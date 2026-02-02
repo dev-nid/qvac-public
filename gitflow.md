@@ -42,6 +42,10 @@ This repo uses a **main-first GitFlow** designed for public-facing SDK/model pac
 
 ## Release flow (new version x.y.z)
 
+
+![Branch types and publishing](.github/docs/gitflow/images/release-flow.png)
+
+
 ### 1) Cut a release branch from `main`
 
 ```bash
@@ -86,6 +90,8 @@ git push
 
 ## Patch flow (x.y.z → x.y.(z+1))
 
+![Branch types and publishing](.github/docs/gitflow/images/patch-flow.png)
+
 ### 1) Implement the fix on `main`
 
 - Do the work in `main` via the normal PR process.
@@ -129,6 +135,8 @@ This prevents repeated cherry-picks for the same patch metadata later.
 ---
 
 ## Feature & temp branches (non-release publishing)
+
+![Branch types and publishing](.github/docs/gitflow/images/feature-temp-flow.png)
 
 ### `feature-<package>-*`
 Use for changes that must **not** enter the immediate release train.
@@ -179,9 +187,9 @@ To reflect the branch intent correctly:
     - `tmp-*` → dist-tag `temp`
 
 - **Path scoping**
-  - All package workflows must use:
+  - All package workflows tigger on:
     - `paths: packages/<package>/**`
-  - Reusable workflows should accept a `workdir` input to point at the package directory.
+  - Reusable workflows accept a `workdir` input to point at the package directory.
 
 ---
 
@@ -200,12 +208,3 @@ To reflect the branch intent correctly:
   - `tmp-*` → GitHub Packages `temp`
 
 ---
-
-## Diagrams
-
-
-
-
-```md
-![Branch types and publishing](.github/docs/gitflow/images/branch-types-and-publishing.png)
-```
