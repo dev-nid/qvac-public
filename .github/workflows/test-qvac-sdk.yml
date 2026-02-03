@@ -39,3 +39,4 @@ jobs:
       MQTT_USERNAME: ${{ secrets.MQTT_USERNAME }}
       MQTT_PASSWORD: ${{ secrets.MQTT_PASSWORD }}
       MQTT_CA_CERT: ${{ secrets.MQTT_CA_CERT }}
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
