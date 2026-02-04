@@ -1,4 +1,4 @@
-name: On Merge - Test & Publish (Qvac-lib-decoder-audio)
+name: On Merge Trigger (Decoder-audio)
 
 on:
   push:

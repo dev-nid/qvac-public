@@ -1,4 +1,4 @@
-name: Build Prebuilds (Qvac-lib-infer-llm)
+name: Prebuilds (LLM)
 
 on:
   workflow_dispatch:

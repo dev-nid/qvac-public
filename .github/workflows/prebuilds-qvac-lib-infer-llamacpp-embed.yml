@@ -1,4 +1,4 @@
-name: "prebuilds (Qvac-lib-infer-llamacpp-embed)"
+name: "Prebuilds (Embed)"
 
 on:
   workflow_dispatch:

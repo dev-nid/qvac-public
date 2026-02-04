@@ -1,4 +1,4 @@
-name: Run Integration Tests (Qvac-lib-infer-llamacpp-llm)
+name: Integration Tests (LLM)
 
 on:
   workflow_call:
