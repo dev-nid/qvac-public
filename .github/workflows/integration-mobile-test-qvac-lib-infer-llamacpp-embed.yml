@@ -1,4 +1,4 @@
-name: Run Mobile Integration Tests (Qvac-lib-infer-llamacpp-embed)
+name: Mobile Integration Tests (Embed)
 on:
   workflow_call:
     inputs:

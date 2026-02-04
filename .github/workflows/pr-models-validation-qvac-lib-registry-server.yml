@@ -7,7 +7,7 @@
 # - Trigger: push to main with paths: ['data/models.prod.json']
 # - Secrets: QVAC_AUTOBASE_KEY_PROD, QVAC_REGISTRY_CORE_KEY_PROD, separate writer keys
 
-name: PR Validation and Staging Sync (Qvac-lib-registry-server)
+name: PR Validation and Staging Sync (Registry-server)
 
 on:
   pull_request_target:
