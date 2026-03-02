@@ -110,7 +110,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Setting WDDM mode via nvidia-smi ..."
-          nvidia-smi -g 0 -dm 0
+          nvidia-smi -fdm 0
           Write-Host "Waiting 10s for things to settle ..."
           Start-Sleep -Seconds 10
           vulkaninfo.exe --summary
