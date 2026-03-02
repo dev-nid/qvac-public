@@ -105,13 +105,13 @@ jobs:
           Write-Host "=== Running Vulkaninfo ==="
           vulkaninfo.exe --summary
 
-      - name: Install Vulkan SDK
+      - name: Force WDDM Mode for Vulkan to work
         continue-on-error: true
         shell: powershell
         run: |
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile vulkan-sdk.exe -PassThru -UseBasicParsing
-          ./vulkan-sdk.exe --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install
-          echo "VULKAN_SDK=C:\VulkanSDK" >> $Env:GITHUB_ENV
-          & "C:\VulkanSDK\Bin\vulkaninfoSDK.exe" --summary
+          Write-Host "Setting WDDM mode via nvidia-smi ..."
+          nvidia-smi -g 0 -dm 0
+          Write-Host "Waiting 10s for things to settle ..."
+          Start-Sleep -Seconds 10
+          vulkaninfo.exe --summary
         timeout-minutes: 40
