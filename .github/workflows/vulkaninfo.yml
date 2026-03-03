@@ -16,13 +16,12 @@ jobs:
           Write-Host "Build Number: $($os.BuildNumber)"
           Write-Host "Architecture: $($os.OSArchitecture)"
 
+      - name: Install WinGet
+        uses: asheroto/winget-install@v1
+
       - name: Install git for windows
         shell: powershell
-        run: |
-          $wingetPath = "$env:USERPROFILE\AppData\Local\Microsoft\WindowsApps"
-          echo "Adding $wingetPath to PATH"
-          echo "$wingetPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding Utf8 -Append
-          winget install --id Git.Git -e --disable-interactivity --accept-package-agreements
+        run: winget install --id Git.Git -e --disable-interactivity --accept-package-agreements
             
       - name: Verify the newly installed Git version
         shell: powershell
