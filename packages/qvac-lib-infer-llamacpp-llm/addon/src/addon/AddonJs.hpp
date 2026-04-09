@@ -340,6 +340,22 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
       readNum("presence_penalty", ov.presence_penalty);
       readNum("repeat_penalty", ov.repeat_penalty);
     }
+
+    prompt.cacheKey =
+        inputObj.getOptionalPropertyAs<js::String, std::string>(env, "cacheKey")
+            .value_or("");
+    prompt.resetCache =
+        inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "reset")
+            .value_or(false);
+
+    js_value_t* persistRaw = inputObj.getProperty(env, "persist");
+    if (js::is<js::Boolean>(env, persistRaw)) {
+      if (js::Boolean::fromValue(persistRaw).as<bool>(env)) {
+        prompt.persistTo = "";
+      }
+    } else if (js::is<js::String>(env, persistRaw)) {
+      prompt.persistTo = js::String::fromValue(persistRaw).as<std::string>(env);
+    }
   };
 
   auto parseMedia = [&](js::Object& inputObj) {

@@ -225,8 +225,8 @@ async function loadModel (dirPath, modelName, config) {
   return { model, loader }
 }
 
-async function runAndCollect (model, prompt) {
-  const response = await model.run(prompt)
+async function runAndCollect (model, prompt, runOptions) {
+  const response = await model.run(prompt, runOptions)
   const chunks = []
   await response
     .onUpdate(data => { chunks.push(data) })
@@ -271,10 +271,11 @@ async function runScenario (dirPath, modelName, opts) {
       const turnTools = getToolsForTurn(i)
       let prompt
 
+      let runOptions = { cacheKey: cachePath }
+
       if (toolsAtEnd) {
         // tools_at_end: session cache + re-send last assistant response + new user + tools
         prompt = [
-          { role: 'session', content: cachePath },
           ...(i === 0
             ? [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: turn.user }]
             : [
@@ -285,9 +286,8 @@ async function runScenario (dirPath, modelName, opts) {
         ]
       } else if (dynamicTools) {
         // tools_in_system with changing tools: reset cache and replay full history with new tools
+        if (i > 0) runOptions = { cacheKey: cachePath, reset: true }
         prompt = [
-          { role: 'session', content: cachePath },
-          ...(i > 0 ? [{ role: 'session', content: 'reset' }] : []),
           { role: 'system', content: 'You are a helpful assistant.' },
           ...conversationHistory,
           { role: 'user', content: turn.user },
@@ -296,7 +296,6 @@ async function runScenario (dirPath, modelName, opts) {
       } else {
         // tools_in_system with same tools: session cache + only new user msg (tools cached from turn 1)
         prompt = [
-          { role: 'session', content: cachePath },
           ...(i === 0
             ? [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: turn.user }]
             : [{ role: 'user', content: turn.user }]),
@@ -305,7 +304,7 @@ async function runScenario (dirPath, modelName, opts) {
       }
 
       const t0 = process.hrtime()
-      const result = await runAndCollect(model, prompt)
+      const result = await runAndCollect(model, prompt, runOptions)
       const elapsed = process.hrtime(t0)
       lastAssistantResponse = stripInternalBlocks(result.output)
 

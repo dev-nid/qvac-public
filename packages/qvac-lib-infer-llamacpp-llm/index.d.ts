@@ -111,6 +111,9 @@ export interface GenerationParams {
 export interface RunOptions {
   prefill?: boolean
   generationParams?: GenerationParams
+  cacheKey?: string
+  persist?: boolean | string
+  reset?: boolean
 }
 
 export interface DownloadWeightsOptions {

@@ -475,21 +475,23 @@ std::any LlamaModel::process(const std::any& input) {
 }
 
 LlamaModel::ResolvedPrompt
-LlamaModel::resolveChatAndTools(const std::string& input) {
+LlamaModel::resolveChatAndTools(const Prompt& prompt) {
   ResolvedPrompt resolved;
   if (state_->cacheManager_.has_value()) {
     resolved.isCacheLoaded = state_->cacheManager_->handleCache(
         resolved.chatMsgs,
         resolved.tools,
-        input,
+        prompt.input,
         [this](const std::string& inputPrompt) {
           return this->formatPrompt(inputPrompt);
-        });
+        },
+        prompt.cacheKey,
+        prompt.resetCache);
     resolved.shouldResetAfterInference =
         state_->cacheManager_->isCacheDisabled() ||
         !state_->cacheManager_->wasCacheUsedInLastPrompt();
   } else {
-    auto formatted = formatPrompt(input);
+    auto formatted = formatPrompt(prompt.input);
     resolved.chatMsgs = std::move(formatted.first);
     resolved.tools = std::move(formatted.second);
     resolved.shouldResetAfterInference = true;
@@ -513,7 +515,7 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
   }
 
   std::string out;
-  ResolvedPrompt resolved = resolveChatAndTools(prompt.input);
+  ResolvedPrompt resolved = resolveChatAndTools(prompt);
 
   if (resolved.shouldResetAfterInference &&
       state_->llmContext_->getNPast() > 0) {
@@ -521,9 +523,7 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
   }
 
   if (resolved.chatMsgs.empty() && resolved.tools.empty()) {
-    QLOG_IF(
-        Priority::INFO,
-        "No messages to process after session commands - returning early\n");
+    QLOG_IF(Priority::INFO, "No messages to process - returning early\n");
     return out;
   }
 
@@ -580,6 +580,15 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
       state_->llmContext_->setFirstMsgTokens(state_->llmContext_->getNPast());
     }
   }
+  if (prompt.persistTo.has_value() && state_->cacheManager_.has_value() &&
+      state_->cacheManager_->hasActiveCache()) {
+    if (prompt.persistTo->empty()) {
+      state_->cacheManager_->saveCache();
+    } else {
+      state_->cacheManager_->saveCacheTo(*prompt.persistTo);
+    }
+  }
+
   if (resolved.shouldResetAfterInference) {
     resetState(false);
   }

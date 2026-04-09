@@ -77,8 +77,8 @@ async function loadModel (dirPath, modelName, config) {
   return { model, loader }
 }
 
-async function runAndCollect (model, prompt) {
-  const response = await model.run(prompt)
+async function runAndCollect (model, prompt, runOptions) {
+  const response = await model.run(prompt, runOptions)
   const chunks = []
   await response.onUpdate(data => { chunks.push(data) }).await()
   return { output: chunks.join(''), stats: response.stats }
@@ -109,15 +109,16 @@ async function main () {
   let lastResponse = null
 
   try {
+    const cacheOpts = { cacheKey: cachePath }
+
     // ── Turn 1: provide getWeather, ask about weather ──
     console.log('── Turn 1: tools=[getWeather], ask about weather ──')
     const prompt1 = [
-      { role: 'session', content: cachePath },
       { role: 'system', content: 'You are a helpful assistant. You must use tools when available. Do not answer without using a tool.' },
       { role: 'user', content: 'What is the weather in Paris?' },
       TOOL_WEATHER
     ]
-    const r1 = await runAndCollect(model, prompt1)
+    const r1 = await runAndCollect(model, prompt1, cacheOpts)
     lastResponse = stripInternalBlocks(r1.output)
     const calls1 = extractToolCalls(r1.output)
     console.log(`   Response tools called: [${calls1.join(', ') || 'none'}]`)
@@ -128,12 +129,11 @@ async function main () {
     // ── Turn 2: REMOVE getWeather, provide calculate instead ──
     console.log('── Turn 2: tools=[calculate] (getWeather REMOVED), ask to calculate ──')
     const prompt2 = [
-      { role: 'session', content: cachePath },
       { role: 'assistant', content: lastResponse },
       { role: 'user', content: 'Calculate 256 * 128' },
       TOOL_CALCULATOR
     ]
-    const r2 = await runAndCollect(model, prompt2)
+    const r2 = await runAndCollect(model, prompt2, cacheOpts)
     lastResponse = stripInternalBlocks(r2.output)
     const calls2 = extractToolCalls(r2.output)
     console.log(`   Response tools called: [${calls2.join(', ') || 'none'}]`)
@@ -145,12 +145,11 @@ async function main () {
     console.log('── Turn 3: tools=[calculate] (getWeather still removed), ask about weather ──')
     console.log('   This is the KEY test: model should NOT call getWeather (it was removed)')
     const prompt3 = [
-      { role: 'session', content: cachePath },
       { role: 'assistant', content: lastResponse },
       { role: 'user', content: 'What is the weather in London?' },
       TOOL_CALCULATOR
     ]
-    const r3 = await runAndCollect(model, prompt3)
+    const r3 = await runAndCollect(model, prompt3, cacheOpts)
     lastResponse = stripInternalBlocks(r3.output)
     const calls3 = extractToolCalls(r3.output)
     console.log(`   Response tools called: [${calls3.join(', ') || 'none'}]`)
@@ -163,12 +162,11 @@ async function main () {
     console.log('── Turn 4: tools=[getWeather] (calculate REMOVED), ask to calculate ──')
     console.log('   Model should NOT call calculate (it was removed)')
     const prompt4 = [
-      { role: 'session', content: cachePath },
       { role: 'assistant', content: lastResponse },
       { role: 'user', content: 'Calculate 999 / 3' },
       TOOL_WEATHER
     ]
-    const r4 = await runAndCollect(model, prompt4)
+    const r4 = await runAndCollect(model, prompt4, cacheOpts)
     lastResponse = stripInternalBlocks(r4.output)
     const calls4 = extractToolCalls(r4.output)
     console.log(`   Response tools called: [${calls4.join(', ') || 'none'}]`)
@@ -231,15 +229,17 @@ async function mainInSystem () {
   const history = [] // accumulate {role, content} for replay
 
   try {
+    const cacheOpts = { cacheKey: cachePath }
+    const resetOpts = { cacheKey: cachePath, reset: true }
+
     // ── Turn 1: provide getWeather, ask about weather ──
     console.log('── Turn 1: tools=[getWeather], ask about weather ──')
     const prompt1 = [
-      { role: 'session', content: cachePath },
       { role: 'system', content: SYSTEM },
       { role: 'user', content: 'What is the weather in Paris?' },
       TOOL_WEATHER
     ]
-    const r1 = await runAndCollect(model, prompt1)
+    const r1 = await runAndCollect(model, prompt1, cacheOpts)
     history.push({ role: 'user', content: 'What is the weather in Paris?' })
     history.push({ role: 'assistant', content: stripInternalBlocks(r1.output) })
     const calls1 = extractToolCalls(r1.output)
@@ -251,14 +251,12 @@ async function mainInSystem () {
     // ── Turn 2: REMOVE getWeather, provide calculate — reset+replay ──
     console.log('── Turn 2: tools=[calculate] (getWeather REMOVED), ask to calculate ──')
     const prompt2 = [
-      { role: 'session', content: cachePath },
-      { role: 'session', content: 'reset' },
       { role: 'system', content: SYSTEM },
       ...history,
       { role: 'user', content: 'Calculate 256 * 128' },
       TOOL_CALCULATOR
     ]
-    const r2 = await runAndCollect(model, prompt2)
+    const r2 = await runAndCollect(model, prompt2, resetOpts)
     history.push({ role: 'user', content: 'Calculate 256 * 128' })
     history.push({ role: 'assistant', content: stripInternalBlocks(r2.output) })
     const calls2 = extractToolCalls(r2.output)
@@ -271,14 +269,12 @@ async function mainInSystem () {
     console.log('── Turn 3: tools=[calculate] (getWeather still removed), ask about weather ──')
     console.log('   This is the KEY test: model should NOT call getWeather (it was removed)')
     const prompt3 = [
-      { role: 'session', content: cachePath },
-      { role: 'session', content: 'reset' },
       { role: 'system', content: SYSTEM },
       ...history,
       { role: 'user', content: 'What is the weather in London?' },
       TOOL_CALCULATOR
     ]
-    const r3 = await runAndCollect(model, prompt3)
+    const r3 = await runAndCollect(model, prompt3, resetOpts)
     history.push({ role: 'user', content: 'What is the weather in London?' })
     history.push({ role: 'assistant', content: stripInternalBlocks(r3.output) })
     const calls3 = extractToolCalls(r3.output)
@@ -292,14 +288,12 @@ async function mainInSystem () {
     console.log('── Turn 4: tools=[getWeather] (calculate REMOVED), ask to calculate ──')
     console.log('   Model should NOT call calculate (it was removed)')
     const prompt4 = [
-      { role: 'session', content: cachePath },
-      { role: 'session', content: 'reset' },
       { role: 'system', content: SYSTEM },
       ...history,
       { role: 'user', content: 'Calculate 999 / 3' },
       TOOL_WEATHER
     ]
-    const r4 = await runAndCollect(model, prompt4)
+    const r4 = await runAndCollect(model, prompt4, resetOpts)
     const calls4 = extractToolCalls(r4.output)
     console.log(`   Response tools called: [${calls4.join(', ') || 'none'}]`)
     console.log('   Expected: NOT calculate (it\'s not available)')
