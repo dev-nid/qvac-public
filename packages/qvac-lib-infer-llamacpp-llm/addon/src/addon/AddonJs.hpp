@@ -349,10 +349,9 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
             .value_or(false);
 
     js_value_t* persistRaw = inputObj.getProperty(env, "persist");
-    if (js::is<js::Boolean>(env, persistRaw)) {
-      if (js::Boolean::fromValue(persistRaw).as<bool>(env)) {
-        prompt.persistTo = "";
-      }
+    if (js::is<js::Boolean>(env, persistRaw) &&
+        js::Boolean::fromValue(persistRaw).as<bool>(env)) {
+      prompt.persistTo = "";
     } else if (js::is<js::String>(env, persistRaw)) {
       prompt.persistTo = js::String::fromValue(persistRaw).as<std::string>(env);
     }

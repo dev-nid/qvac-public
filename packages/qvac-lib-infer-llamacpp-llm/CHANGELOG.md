@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.15.0] - 2026-04-09
+
+### Breaking Changes
+
+#### KV cache API simplified — `{ role: "session" }` replaced with `runOptions`
+
+Cache control moved from `{ role: "session" }` chat messages to explicit `runOptions` fields: `cacheKey`, `persist`, and `reset`. The `getTokens` and `save` session commands are removed — use `response.stats.CacheTokens` and `persist: true` instead.
+
+### Added
+
+- `cacheKey`, `persist`, `reset` options on `runOptions` and `RunOptions` TypeScript interface.
+- `persist` as a string saves to a different path (new capability).
+- `CacheManager::saveCacheTo(path)` C++ method.
+- `docs/cache-api-migration.md` — full migration guide.
+
+### Removed
+
+- `{ role: "session" }` message protocol, `getTokens` command, `save` command.
+
 ## [0.14.3] - 2026-04-07
 
 ### Added

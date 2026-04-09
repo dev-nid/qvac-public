@@ -9,31 +9,15 @@
 
 #include "model-interface/LlamaModel.hpp"
 #include "test_common.hpp"
+#include "test_prompt_helpers.hpp"
 
 namespace fs = std::filesystem;
 
 using test_common::getStatValue;
+using test_common::processPromptString;
+using test_common::processPromptWithCacheOptions;
 
 namespace {
-std::string processPromptString(
-    const std::unique_ptr<LlamaModel>& model, const std::string& input) {
-  LlamaModel::Prompt prompt;
-  prompt.input = input;
-  return model->processPrompt(prompt);
-}
-
-std::string processPromptWithCacheOptions(
-    const std::unique_ptr<LlamaModel>& model, const std::string& input,
-    const std::string& cacheKey, bool resetCache = false,
-    std::optional<std::string> persistTo = std::nullopt) {
-  LlamaModel::Prompt prompt;
-  prompt.input = input;
-  prompt.cacheKey = cacheKey;
-  prompt.resetCache = resetCache;
-  prompt.persistTo = persistTo;
-  return model->processPrompt(prompt);
-}
-
 bool isQwen3ModelPath(const std::string& path) {
   std::string lowerPath = path;
   std::transform(
