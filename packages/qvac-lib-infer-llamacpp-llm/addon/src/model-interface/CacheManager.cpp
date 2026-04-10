@@ -175,16 +175,6 @@ void CacheManager::saveCache() {
   writeCacheFile(sessionPath_);
 }
 
-void CacheManager::saveCacheTo(const std::string& path) {
-  if (cacheDisabled_) {
-    std::string errorMsg =
-        string_format("%s: Cannot save cache - caching disabled\n", __func__);
-    throw qvac_errors::StatusError(
-        ADDON_ID, toString(InvalidInputFormat), errorMsg);
-  }
-  writeCacheFile(path);
-}
-
 void CacheManager::writeCacheFile(const std::string& path) {
   llama_context* ctx = llmContext_->getCtx();
   QLOG_IF(

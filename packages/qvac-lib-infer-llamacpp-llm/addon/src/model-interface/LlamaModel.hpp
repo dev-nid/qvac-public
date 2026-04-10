@@ -131,7 +131,7 @@ public:
         finetuningParams;
 
     std::string cacheKey;
-    std::optional<std::string> persistTo;
+    bool saveCacheToDisk = false;
     bool resetCache = false;
   };
 

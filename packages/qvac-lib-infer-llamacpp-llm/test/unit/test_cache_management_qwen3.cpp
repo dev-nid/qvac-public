@@ -108,7 +108,7 @@ TEST_F(CacheManagementQwen3Test, CacheWithToolsAtEndTrueTrimsToolTokens) {
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   auto statsBeforeSave = model->runtimeStats();
@@ -142,7 +142,7 @@ TEST_F(CacheManagementQwen3Test, CacheReloadWithToolsAtEndTrue) {
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   llama_pos nPastBeforeTools1 = model1->getNPastBeforeTools();
@@ -193,7 +193,7 @@ TEST_F(CacheManagementQwen3Test, CacheWithoutToolsWithToolsAtEndTrue) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   auto statsBeforeSave = model->runtimeStats();
@@ -262,7 +262,7 @@ TEST_F(CacheManagementQwen3Test, CacheToolsAtEndModeWithMultiplePrompts) {
         R"([{"role": "user", "content": "Save checkpoint."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -312,7 +312,7 @@ TEST_F(
         R"([{"role": "user", "content": "Hello"}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   llama_pos nPastBeforeTools = model->getNPastBeforeTools();
@@ -346,7 +346,7 @@ TEST_F(CacheManagementQwen3Test, CacheToolsAtEndModeRestoresNPastBeforeTools) {
         R"([{"role": "user", "content": "Hi"}, {"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   llama_pos nPastBeforeTools1 = model->getNPastBeforeTools();

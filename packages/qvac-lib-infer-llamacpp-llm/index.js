@@ -13,7 +13,7 @@ const RUN_BUSY_ERROR_MESSAGE = 'Cannot set new job: a job is already set or bein
 
 function normalizeRunOptions (runOptions) {
   if (runOptions === undefined) {
-    return { prefill: false, generationParams: undefined, cacheKey: undefined, persist: undefined, reset: false }
+    return { prefill: false, generationParams: undefined, cacheKey: undefined, saveCacheToDisk: false, reset: false }
   }
 
   if (!runOptions || typeof runOptions !== 'object' || Array.isArray(runOptions)) {
@@ -34,10 +34,8 @@ function normalizeRunOptions (runOptions) {
     throw new TypeError('cacheKey must be a string when provided')
   }
 
-  if (runOptions.persist !== undefined &&
-      typeof runOptions.persist !== 'boolean' &&
-      typeof runOptions.persist !== 'string') {
-    throw new TypeError('persist must be a boolean or string when provided')
+  if (runOptions.saveCacheToDisk !== undefined && typeof runOptions.saveCacheToDisk !== 'boolean') {
+    throw new TypeError('saveCacheToDisk must be a boolean when provided')
   }
 
   if (runOptions.reset !== undefined && typeof runOptions.reset !== 'boolean') {
@@ -48,7 +46,7 @@ function normalizeRunOptions (runOptions) {
     prefill: runOptions.prefill === true,
     generationParams: runOptions.generationParams,
     cacheKey: runOptions.cacheKey,
-    persist: runOptions.persist,
+    saveCacheToDisk: runOptions.saveCacheToDisk === true,
     reset: runOptions.reset === true
   }
 }
@@ -406,7 +404,7 @@ class LlmLlamacpp extends BaseInference {
       if (!Array.isArray(prompt)) {
         throw new TypeError('Prompt input must be Message[]')
       }
-      const { prefill, generationParams, cacheKey, persist, reset } = normalizeRunOptions(runOptions)
+      const { prefill, generationParams, cacheKey, saveCacheToDisk, reset } = normalizeRunOptions(runOptions)
 
       this.logger.info('Starting inference with prompt:', prompt)
 
@@ -440,7 +438,7 @@ class LlmLlamacpp extends BaseInference {
         prefill,
         generationParams,
         cacheKey,
-        persist,
+        saveCacheToDisk,
         reset
       })
 

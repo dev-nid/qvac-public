@@ -152,7 +152,7 @@ TEST_F(CacheManagementTest, EnableCacheWithFilename) {
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
     EXPECT_GE(output.length(), 0);
     auto stats = model->runtimeStats();
     EXPECT_GE(stats.size(), 0);
@@ -177,7 +177,7 @@ TEST_F(CacheManagementTest, SessionPersistence) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
     EXPECT_GE(output1.length(), 0);
   });
 
@@ -189,7 +189,7 @@ TEST_F(CacheManagementTest, SessionPersistence) {
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
     EXPECT_GE(output2.length(), 0);
   });
 
@@ -212,7 +212,7 @@ TEST_F(CacheManagementTest, ResetAndPersist) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session2_path,
         true,
-        std::string(""));
+        true);
     EXPECT_GE(output.length(), 0);
   });
 
@@ -235,7 +235,7 @@ TEST_F(CacheManagementTest, ResetCommand) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
     EXPECT_GE(output1.length(), 0);
   });
 
@@ -247,7 +247,7 @@ TEST_F(CacheManagementTest, ResetCommand) {
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session1_path,
         true,
-        std::string(""));
+        true);
     EXPECT_GE(output2.length(), 0);
   });
 
@@ -270,7 +270,7 @@ TEST_F(CacheManagementTest, SwitchToSession2) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -281,7 +281,7 @@ TEST_F(CacheManagementTest, SwitchToSession2) {
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session2_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -365,7 +365,7 @@ TEST_F(CacheManagementTest, ReEnableCacheAfterDisable) {
         R"([{"role": "user", "content": "What is deep learning? Answer shortly."}])",
         temp_session_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(temp_session_path));
@@ -387,7 +387,7 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_NO_THROW({
@@ -396,7 +396,7 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session2_path,
         true,
-        std::string(""));
+        true);
   });
 
   EXPECT_NO_THROW({
@@ -405,7 +405,7 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         R"([{"role": "user", "content": "What is blockchain? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -428,7 +428,7 @@ TEST_F(CacheManagementTest, CacheClearedWhenNoCacheKey) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -473,7 +473,7 @@ TEST_F(CacheManagementTest, CacheClearedWhenSwitchingToDifferentCache) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -484,7 +484,7 @@ TEST_F(CacheManagementTest, CacheClearedWhenSwitchingToDifferentCache) {
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session2_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -542,7 +542,7 @@ TEST_F(CacheManagementTest, CacheToNoCacheToCache) {
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -561,7 +561,7 @@ TEST_F(CacheManagementTest, CacheToNoCacheToCache) {
         R"([{"role": "user", "content": "What is blockchain? Answer shortly."}])",
         session2_path,
         false,
-        std::string(""));
+        true);
     auto stats3 = model->runtimeStats();
     EXPECT_GT(getStatValue(stats3, "CacheTokens"), 0.0);
   });
@@ -616,7 +616,7 @@ TEST_F(CacheManagementTest, CacheTokensExceedContextSize) {
         R"([{"role": "user", "content": "Describe DeFi (Decentralized Finance) applications, including DEXs, lending protocols, and yield farming. Explain how they work and their risks."}])",
         large_cache_path,
         false,
-        std::string(""));
+        true);
   });
 
   auto statsBeforeSave = model_large->runtimeStats();
@@ -666,7 +666,7 @@ TEST_F(CacheManagementTest, CacheWithToolsAtEndFalseSavesFullCache) {
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   auto statsBeforeSave = model->runtimeStats();
@@ -677,28 +677,6 @@ TEST_F(CacheManagementTest, CacheWithToolsAtEndFalseSavesFullCache) {
   EXPECT_EQ(nPastBeforeTools, -1);
 
   EXPECT_TRUE(fs::exists(session1_path));
-}
-
-TEST_F(CacheManagementTest, OptionsPersistToOtherKey) {
-  if (!hasValidModel()) {
-    FAIL() << "Test model not found";
-  }
-
-  auto model = createModel();
-  if (!model) {
-    FAIL() << "Model failed to load";
-  }
-
-  EXPECT_NO_THROW({
-    processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "What is bitcoin?"}])",
-        session1_path,
-        false,
-        std::string(session2_path));
-  });
-
-  EXPECT_TRUE(fs::exists(session2_path));
 }
 
 TEST_F(CacheManagementTest, OptionsNoPersistKeepsRamOnly) {
@@ -741,7 +719,7 @@ TEST_F(CacheManagementTest, ResetTrueOnFirstCallWithNoPriorCache) {
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         session1_path,
         true,
-        std::string(""));
+        true);
   });
 
   EXPECT_TRUE(fs::exists(session1_path));
@@ -766,7 +744,7 @@ TEST_F(CacheManagementTest, ResetTrueWithDifferentCacheKey) {
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         session1_path,
         false,
-        std::string(""));
+        true);
   });
 
   auto stats1 = model->runtimeStats();
@@ -779,7 +757,7 @@ TEST_F(CacheManagementTest, ResetTrueWithDifferentCacheKey) {
         R"([{"role": "user", "content": "Fresh start."}])",
         session2_path,
         true,
-        std::string(""));
+        true);
   });
 
   auto stats2 = model->runtimeStats();
@@ -805,7 +783,7 @@ TEST_F(CacheManagementTest, PersistToWithNoCacheKeyIsNoOp) {
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         "",
         false,
-        std::string(""));
+        true);
   });
 
   EXPECT_FALSE(fs::exists(session1_path));
@@ -828,9 +806,7 @@ TEST_F(CacheManagementTest, PersistFalseDoesNotWriteToDisk) {
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "What is bitcoin?"}])",
-        session1_path,
-        false,
-        std::nullopt);
+        session1_path);
   });
 
   EXPECT_FALSE(fs::exists(session1_path));

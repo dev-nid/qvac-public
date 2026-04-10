@@ -23,7 +23,7 @@ export interface AddonMessage {
   prefill?: boolean
   generationParams?: GenerationParams
   cacheKey?: string
-  persist?: boolean | string
+  saveCacheToDisk?: boolean
   reset?: boolean
 }
 export interface AddonMediaMessage {
@@ -116,7 +116,7 @@ export interface RunOptions {
   prefill?: boolean
   generationParams?: GenerationParams
   cacheKey?: string
-  persist?: boolean | string
+  saveCacheToDisk?: boolean
   reset?: boolean
 }
 

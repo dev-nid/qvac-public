@@ -348,13 +348,9 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
         inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "reset")
             .value_or(false);
 
-    js_value_t* persistRaw = inputObj.getProperty(env, "persist");
-    if (js::is<js::Boolean>(env, persistRaw) &&
-        js::Boolean::fromValue(persistRaw).as<bool>(env)) {
-      prompt.persistTo = "";
-    } else if (js::is<js::String>(env, persistRaw)) {
-      prompt.persistTo = js::String::fromValue(persistRaw).as<std::string>(env);
-    }
+    prompt.saveCacheToDisk =
+        inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "saveCacheToDisk")
+            .value_or(false);
   };
 
   auto parseMedia = [&](js::Object& inputObj) {

@@ -27,7 +27,6 @@ public:
 
   bool loadCache();
   void saveCache();
-  void saveCacheTo(const std::string& path);
   void invalidate();
   bool isCacheDisabled() const;
   bool hasActiveCache() const;

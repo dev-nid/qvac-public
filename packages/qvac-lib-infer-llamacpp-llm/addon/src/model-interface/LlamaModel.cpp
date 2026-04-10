@@ -580,13 +580,9 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
       state_->llmContext_->setFirstMsgTokens(state_->llmContext_->getNPast());
     }
   }
-  if (prompt.persistTo.has_value() && state_->cacheManager_.has_value() &&
+  if (prompt.saveCacheToDisk && state_->cacheManager_.has_value() &&
       state_->cacheManager_->hasActiveCache()) {
-    if (prompt.persistTo->empty()) {
-      state_->cacheManager_->saveCache();
-    } else {
-      state_->cacheManager_->saveCacheTo(*prompt.persistTo);
-    }
+    state_->cacheManager_->saveCache();
   }
 
   if (resolved.shouldResetAfterInference) {
