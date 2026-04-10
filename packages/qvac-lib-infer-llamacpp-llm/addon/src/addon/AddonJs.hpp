@@ -346,7 +346,8 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
             .value_or("");
 
     prompt.saveCacheToDisk =
-        inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "saveCacheToDisk")
+        inputObj
+            .getOptionalPropertyAs<js::Boolean, bool>(env, "saveCacheToDisk")
             .value_or(false);
   };
 
