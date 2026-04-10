@@ -8,7 +8,6 @@ Cache control is managed through `runOptions`, the second argument to `model.run
 | --- | --- | --- |
 | `cacheKey` | `string` | Path to the cache file. Omit to disable caching. |
 | `saveCacheToDisk` | `boolean` | `true` writes the cache to the `cacheKey` path after inference. If omitted, cache stays in RAM and only auto-saves on cache switch or clear. |
-| `reset` | `boolean` | `true` clears the in-memory cache and reloads from the `cacheKey` file (if it exists) before running. |
 | `prefill` | `boolean` | Evaluate prompt without generating a response. |
 | `generationParams` | `object` | Per-run overrides for temp, top_p, top_k, predict, seed, penalties. |
 
@@ -31,17 +30,6 @@ Use the same `cacheKey`. The existing cache is reused — only the new tokens ar
 await model.run(
   [{ role: 'user', content: 'Tell me more' }],
   { cacheKey: 'session.bin' }
-)
-```
-
-## Reset the cache
-
-`reset: true` clears the in-memory cache and reloads it from the `cacheKey` file on disk (if it exists) before evaluating the prompt. This is useful when tools or context have changed and you need to replay from the last saved state.
-
-```js
-await model.run(
-  [{ role: 'user', content: 'Start fresh' }],
-  { cacheKey: 'session.bin', reset: true }
 )
 ```
 
@@ -105,9 +93,9 @@ await model.run([{ role: 'user', content: 'One-off question' }])
 
 If caching was previously active, omitting `cacheKey` auto-saves the active session to disk and clears it.
 
-## Reset and replay with dynamic tools
+## Replay with dynamic tools
 
-Use `reset: true` to clear the cache and replay the full conversation with a new tool set.
+When tools change between turns, omit `cacheKey` and send the full conversation history. This gives the model a fresh context with the new tool set.
 
 ```js
 await model.run(
@@ -116,8 +104,7 @@ await model.run(
     ...history,
     { role: 'user', content: 'Calculate 256 * 128' },
     TOOL_CALCULATOR
-  ],
-  { cacheKey: cachePath, reset: true }
+  ]
 )
 ```
 

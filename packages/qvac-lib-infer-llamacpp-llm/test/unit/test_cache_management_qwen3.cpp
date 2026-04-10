@@ -107,7 +107,6 @@ TEST_F(CacheManagementQwen3Test, CacheWithToolsAtEndTrueTrimsToolTokens) {
         model,
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
-        false,
         true);
   });
 
@@ -141,7 +140,6 @@ TEST_F(CacheManagementQwen3Test, CacheReloadWithToolsAtEndTrue) {
         model1,
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
-        false,
         true);
   });
 
@@ -192,7 +190,6 @@ TEST_F(CacheManagementQwen3Test, CacheWithoutToolsWithToolsAtEndTrue) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -261,7 +258,6 @@ TEST_F(CacheManagementQwen3Test, CacheToolsAtEndModeWithMultiplePrompts) {
         model,
         R"([{"role": "user", "content": "Save checkpoint."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -311,7 +307,6 @@ TEST_F(
         model,
         R"([{"role": "user", "content": "Hello"}])",
         session1_path,
-        false,
         true);
   });
 
@@ -345,7 +340,6 @@ TEST_F(CacheManagementQwen3Test, CacheToolsAtEndModeRestoresNPastBeforeTools) {
         model,
         R"([{"role": "user", "content": "Hi"}, {"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
-        false,
         true);
   });
 

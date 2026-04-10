@@ -6,11 +6,11 @@
 
 #### KV cache API simplified — `{ role: "session" }` replaced with `runOptions`
 
-Cache control moved from `{ role: "session" }` chat messages to explicit `runOptions` fields: `cacheKey`, `saveCacheToDisk`, and `reset`. The `getTokens` and `save` session commands are removed — use `response.stats.CacheTokens` and `saveCacheToDisk: true` instead.
+Cache control moved from `{ role: "session" }` chat messages to explicit `runOptions` fields: `cacheKey` and `saveCacheToDisk`. The `getTokens`, `save`, and `reset` session commands are removed — use `response.stats.CacheTokens`, `saveCacheToDisk: true`, and a different `cacheKey` (or omit it) instead.
 
 ### Added
 
-- `cacheKey`, `saveCacheToDisk`, `reset` options on `runOptions` and `RunOptions` TypeScript interface.
+- `cacheKey`, `saveCacheToDisk` options on `runOptions` and `RunOptions` TypeScript interface.
 - `docs/cache-api.md` — KV cache API usage guide.
 
 ### Removed

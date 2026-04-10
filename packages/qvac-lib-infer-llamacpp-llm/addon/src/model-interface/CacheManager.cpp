@@ -35,7 +35,7 @@ bool CacheManager::handleCache(
         std::pair<std::vector<common_chat_msg>, std::vector<common_chat_tool>>(
             const std::string&)>
         formatPrompt,
-    const std::string& cacheKey, bool resetCache) {
+    const std::string& cacheKey) {
 
   auto formatted = formatPrompt(inputPrompt);
   chatMsgs = std::move(formatted.first);
@@ -58,7 +58,10 @@ bool CacheManager::handleCache(
     return false;
   }
 
-  bool needsReset = resetCache;
+  if (!cacheDisabled_ && sessionPath_ == cacheKey) {
+    cacheUsedInLastPrompt_ = true;
+    return false;
+  }
 
   if (hasActiveCache() && sessionPath_ != cacheKey) {
     QLOG_IF(
@@ -69,22 +72,10 @@ bool CacheManager::handleCache(
             sessionPath_.c_str(),
             cacheKey.c_str()));
     saveCache();
-    needsReset = true;
   }
 
-  if (cacheDisabled_ && sessionPath_.empty()) {
-    needsReset = true;
-  }
-
-  if (!cacheDisabled_ && sessionPath_ == cacheKey && !resetCache) {
-    cacheUsedInLastPrompt_ = true;
-    return false;
-  }
-
-  if (needsReset) {
-    resetStateCallback_(true);
-    cacheUsedInLastPrompt_ = false;
-  }
+  resetStateCallback_(true);
+  cacheUsedInLastPrompt_ = false;
 
   sessionPath_ = cacheKey;
   cacheDisabled_ = false;

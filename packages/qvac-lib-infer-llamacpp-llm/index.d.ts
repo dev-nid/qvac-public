@@ -24,7 +24,6 @@ export interface AddonMessage {
   generationParams?: GenerationParams
   cacheKey?: string
   saveCacheToDisk?: boolean
-  reset?: boolean
 }
 export interface AddonMediaMessage {
   type: 'media'
@@ -121,7 +120,6 @@ export interface RunOptions {
   generationParams?: GenerationParams
   cacheKey?: string
   saveCacheToDisk?: boolean
-  reset?: boolean
 }
 
 export interface DownloadWeightsOptions {

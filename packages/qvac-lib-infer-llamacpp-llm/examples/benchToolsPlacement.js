@@ -285,8 +285,8 @@ async function runScenario (dirPath, modelName, opts) {
           ...turnTools
         ]
       } else if (dynamicTools) {
-        // tools_in_system with changing tools: reset cache and replay full history with new tools
-        if (i > 0) runOptions = { cacheKey: cachePath, reset: true }
+        // tools_in_system with changing tools: omit cacheKey and replay full history with new tools
+        if (i > 0) runOptions = {}
         prompt = [
           { role: 'system', content: 'You are a helpful assistant.' },
           ...conversationHistory,
@@ -458,9 +458,9 @@ async function main () {
     cacheName: 'bench-C-at-end-dynamic.bin'
   })
 
-  // ── Scenario D: tools_in_system with dynamic tools (must reset+replay each turn) ──
+  // ── Scenario D: tools_in_system with dynamic tools (must replay each turn) ──
   const resultD = await runScenario(dirPath, modelName, {
-    name: 'SCENARIO D: tools_at_end = false, DIFFERENT tools each turn (reset+replay)',
+    name: 'SCENARIO D: tools_at_end = false, DIFFERENT tools each turn (full replay)',
     toolsAtEnd: false,
     dynamicTools: true,
     conversationTurns: CONVERSATION_TURNS_DYNAMIC,
@@ -476,7 +476,7 @@ async function main () {
   printComparison(
     'tools_at_end (dynamic tools)',
     resultC.turnStats,
-    'tools_in_system (dynamic tools, reset+replay)',
+    'tools_in_system (dynamic tools, full replay)',
     resultD.turnStats
   )
 
@@ -486,12 +486,12 @@ async function main () {
   console.log('#'.repeat(80))
 
   printToolValidationSummary('Scenario C — tools_at_end, dynamic tools', resultC.toolValidations)
-  printToolValidationSummary('Scenario D — tools_in_system, dynamic tools (reset+replay)', resultD.toolValidations)
+  printToolValidationSummary('Scenario D — tools_in_system, dynamic tools (full replay)', resultD.toolValidations)
 
   console.log('\n' + '─'.repeat(80))
   console.log('Key:')
   console.log('  Scenario C: tools_at_end=true with dynamic tools — trims & re-sends prev response')
-  console.log('  Scenario D: tools_at_end=false with dynamic tools — must reset cache & replay full history')
+  console.log('  Scenario D: tools_at_end=false with dynamic tools — replay full history without cache')
   console.log('  PASS = model only called tools available in that turn')
   console.log('  FAIL = model called a tool from a previous turn (stale/trimmed tool leak)')
   console.log('─'.repeat(80))

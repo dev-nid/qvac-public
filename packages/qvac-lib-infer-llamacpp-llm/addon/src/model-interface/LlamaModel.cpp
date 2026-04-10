@@ -491,8 +491,7 @@ LlamaModel::resolveChatAndTools(const Prompt& prompt) {
         [this](const std::string& inputPrompt) {
           return this->formatPrompt(inputPrompt);
         },
-        prompt.cacheKey,
-        prompt.resetCache);
+        prompt.cacheKey);
     resolved.shouldResetAfterInference =
         state_->cacheManager_->isCacheDisabled() ||
         !state_->cacheManager_->wasCacheUsedInLastPrompt();

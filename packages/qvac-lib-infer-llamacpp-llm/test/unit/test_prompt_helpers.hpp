@@ -16,12 +16,10 @@ inline std::string processPromptString(
 
 inline std::string processPromptWithCacheOptions(
     const std::unique_ptr<LlamaModel>& model, const std::string& input,
-    const std::string& cacheKey, bool resetCache = false,
-    bool saveCacheToDisk = false) {
+    const std::string& cacheKey, bool saveCacheToDisk = false) {
   LlamaModel::Prompt prompt;
   prompt.input = input;
   prompt.cacheKey = cacheKey;
-  prompt.resetCache = resetCache;
   prompt.saveCacheToDisk = saveCacheToDisk;
   return model->processPrompt(prompt);
 }

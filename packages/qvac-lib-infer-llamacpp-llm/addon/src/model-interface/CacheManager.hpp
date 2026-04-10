@@ -23,7 +23,7 @@ public:
           std::vector<common_chat_msg>, std::vector<common_chat_tool>>(
           const std::string&)>
           formatPrompt,
-      const std::string& cacheKey = "", bool resetCache = false);
+      const std::string& cacheKey = "");
 
   bool loadCache();
   void saveCache();

@@ -151,7 +151,6 @@ TEST_F(CacheManagementTest, EnableCacheWithFilename) {
         model,
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session1_path,
-        false,
         true);
     EXPECT_GE(output.length(), 0);
     auto stats = model->runtimeStats();
@@ -176,7 +175,6 @@ TEST_F(CacheManagementTest, SessionPersistence) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
     EXPECT_GE(output1.length(), 0);
   });
@@ -188,7 +186,6 @@ TEST_F(CacheManagementTest, SessionPersistence) {
         model,
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session1_path,
-        false,
         true);
     EXPECT_GE(output2.length(), 0);
   });
@@ -211,7 +208,6 @@ TEST_F(CacheManagementTest, ResetAndPersist) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session2_path,
-        true,
         true);
     EXPECT_GE(output.length(), 0);
   });
@@ -234,7 +230,6 @@ TEST_F(CacheManagementTest, ResetCommand) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
     EXPECT_GE(output1.length(), 0);
   });
@@ -246,7 +241,6 @@ TEST_F(CacheManagementTest, ResetCommand) {
         model,
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session1_path,
-        true,
         true);
     EXPECT_GE(output2.length(), 0);
   });
@@ -269,7 +263,6 @@ TEST_F(CacheManagementTest, SwitchToSession2) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -280,7 +273,6 @@ TEST_F(CacheManagementTest, SwitchToSession2) {
         model,
         R"([{"role": "user", "content": "What did I ask you before? Answer shortly."}])",
         session2_path,
-        false,
         true);
   });
 
@@ -364,7 +356,6 @@ TEST_F(CacheManagementTest, ReEnableCacheAfterDisable) {
         model,
         R"([{"role": "user", "content": "What is deep learning? Answer shortly."}])",
         temp_session_path,
-        false,
         true);
   });
 
@@ -386,7 +377,6 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -395,7 +385,6 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         model,
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session2_path,
-        true,
         true);
   });
 
@@ -404,7 +393,6 @@ TEST_F(CacheManagementTest, SwitchAndResetChain) {
         model,
         R"([{"role": "user", "content": "What is blockchain? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -427,7 +415,6 @@ TEST_F(CacheManagementTest, CacheClearedWhenNoCacheKey) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -472,7 +459,6 @@ TEST_F(CacheManagementTest, CacheClearedWhenSwitchingToDifferentCache) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -483,7 +469,6 @@ TEST_F(CacheManagementTest, CacheClearedWhenSwitchingToDifferentCache) {
         model,
         R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
         session2_path,
-        false,
         true);
   });
 
@@ -541,7 +526,6 @@ TEST_F(CacheManagementTest, CacheToNoCacheToCache) {
         model,
         R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
         session1_path,
-        false,
         true);
   });
 
@@ -560,7 +544,6 @@ TEST_F(CacheManagementTest, CacheToNoCacheToCache) {
         model,
         R"([{"role": "user", "content": "What is blockchain? Answer shortly."}])",
         session2_path,
-        false,
         true);
     auto stats3 = model->runtimeStats();
     EXPECT_GT(getStatValue(stats3, "CacheTokens"), 0.0);
@@ -615,7 +598,6 @@ TEST_F(CacheManagementTest, CacheTokensExceedContextSize) {
         model_large,
         R"([{"role": "user", "content": "Describe DeFi (Decentralized Finance) applications, including DEXs, lending protocols, and yield farming. Explain how they work and their risks."}])",
         large_cache_path,
-        false,
         true);
   });
 
@@ -665,7 +647,6 @@ TEST_F(CacheManagementTest, CacheWithToolsAtEndFalseSavesFullCache) {
         model,
         R"([{"role": "user", "content": "What is the weather in Tokyo?"}, {"type": "function", "name": "getWeather", "description": "Get weather forecast", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}])",
         session1_path,
-        false,
         true);
   });
 
@@ -718,7 +699,6 @@ TEST_F(CacheManagementTest, ResetTrueOnFirstCallWithNoPriorCache) {
         model,
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         session1_path,
-        true,
         true);
   });
 
@@ -743,7 +723,6 @@ TEST_F(CacheManagementTest, ResetTrueWithDifferentCacheKey) {
         model,
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         session1_path,
-        false,
         true);
   });
 
@@ -756,7 +735,6 @@ TEST_F(CacheManagementTest, ResetTrueWithDifferentCacheKey) {
         model,
         R"([{"role": "user", "content": "Fresh start."}])",
         session2_path,
-        true,
         true);
   });
 
@@ -782,7 +760,6 @@ TEST_F(CacheManagementTest, PersistToWithNoCacheKeyIsNoOp) {
         model,
         R"([{"role": "user", "content": "What is bitcoin?"}])",
         "",
-        false,
         true);
   });
 

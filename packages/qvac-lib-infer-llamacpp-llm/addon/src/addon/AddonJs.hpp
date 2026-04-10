@@ -344,9 +344,6 @@ inline js_value_t* runJob(js_env_t* env, js_callback_info_t* info) try {
     prompt.cacheKey =
         inputObj.getOptionalPropertyAs<js::String, std::string>(env, "cacheKey")
             .value_or("");
-    prompt.resetCache =
-        inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "reset")
-            .value_or(false);
 
     prompt.saveCacheToDisk =
         inputObj.getOptionalPropertyAs<js::Boolean, bool>(env, "saveCacheToDisk")

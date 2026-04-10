@@ -13,7 +13,7 @@ const RUN_BUSY_ERROR_MESSAGE = 'Cannot set new job: a job is already set or bein
 
 function normalizeRunOptions (runOptions) {
   if (runOptions === undefined) {
-    return { prefill: false, generationParams: undefined, cacheKey: undefined, saveCacheToDisk: false, reset: false }
+    return { prefill: false, generationParams: undefined, cacheKey: undefined, saveCacheToDisk: false }
   }
 
   if (!runOptions || typeof runOptions !== 'object' || Array.isArray(runOptions)) {
@@ -38,16 +38,11 @@ function normalizeRunOptions (runOptions) {
     throw new TypeError('saveCacheToDisk must be a boolean when provided')
   }
 
-  if (runOptions.reset !== undefined && typeof runOptions.reset !== 'boolean') {
-    throw new TypeError('reset must be a boolean when provided')
-  }
-
   return {
     prefill: runOptions.prefill === true,
     generationParams: runOptions.generationParams,
     cacheKey: runOptions.cacheKey,
-    saveCacheToDisk: runOptions.saveCacheToDisk === true,
-    reset: runOptions.reset === true
+    saveCacheToDisk: runOptions.saveCacheToDisk === true
   }
 }
 
@@ -404,7 +399,7 @@ class LlmLlamacpp extends BaseInference {
       if (!Array.isArray(prompt)) {
         throw new TypeError('Prompt input must be Message[]')
       }
-      const { prefill, generationParams, cacheKey, saveCacheToDisk, reset } = normalizeRunOptions(runOptions)
+      const { prefill, generationParams, cacheKey, saveCacheToDisk } = normalizeRunOptions(runOptions)
 
       this.logger.info('Starting inference with prompt:', prompt)
 
@@ -438,8 +433,7 @@ class LlmLlamacpp extends BaseInference {
         prefill,
         generationParams,
         cacheKey,
-        saveCacheToDisk,
-        reset
+        saveCacheToDisk
       })
 
       const response = this._createResponse('OnlyOneJob')

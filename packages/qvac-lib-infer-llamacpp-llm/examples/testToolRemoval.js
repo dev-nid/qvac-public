@@ -200,11 +200,11 @@ async function main () {
   }
 }
 
-// ─── Same test but with tools_in_system (reset+replay) ─────────────────────
+// ─── Same test but with tools_in_system (full replay) ──────────────────────
 
 async function mainInSystem () {
   console.log('\n\n')
-  console.log('Test: tool removal correctness with tools_in_system (reset+replay)')
+  console.log('Test: tool removal correctness with tools_in_system (full replay)')
   console.log('='.repeat(70))
   console.log('')
 
@@ -230,7 +230,6 @@ async function mainInSystem () {
 
   try {
     const cacheOpts = { cacheKey: cachePath }
-    const resetOpts = { cacheKey: cachePath, reset: true }
 
     // ── Turn 1: provide getWeather, ask about weather ──
     console.log('── Turn 1: tools=[getWeather], ask about weather ──')
@@ -248,7 +247,7 @@ async function mainInSystem () {
     console.log(`   ${calls1.includes('getWeather') ? 'PASS ✓' : 'FAIL ✗'}`)
     console.log('')
 
-    // ── Turn 2: REMOVE getWeather, provide calculate — reset+replay ──
+    // ── Turn 2: REMOVE getWeather, provide calculate — full replay ──
     console.log('── Turn 2: tools=[calculate] (getWeather REMOVED), ask to calculate ──')
     const prompt2 = [
       { role: 'system', content: SYSTEM },
@@ -256,7 +255,7 @@ async function mainInSystem () {
       { role: 'user', content: 'Calculate 256 * 128' },
       TOOL_CALCULATOR
     ]
-    const r2 = await runAndCollect(model, prompt2, resetOpts)
+    const r2 = await runAndCollect(model, prompt2)
     history.push({ role: 'user', content: 'Calculate 256 * 128' })
     history.push({ role: 'assistant', content: stripInternalBlocks(r2.output) })
     const calls2 = extractToolCalls(r2.output)
@@ -274,7 +273,7 @@ async function mainInSystem () {
       { role: 'user', content: 'What is the weather in London?' },
       TOOL_CALCULATOR
     ]
-    const r3 = await runAndCollect(model, prompt3, resetOpts)
+    const r3 = await runAndCollect(model, prompt3)
     history.push({ role: 'user', content: 'What is the weather in London?' })
     history.push({ role: 'assistant', content: stripInternalBlocks(r3.output) })
     const calls3 = extractToolCalls(r3.output)
@@ -293,7 +292,7 @@ async function mainInSystem () {
       { role: 'user', content: 'Calculate 999 / 3' },
       TOOL_WEATHER
     ]
-    const r4 = await runAndCollect(model, prompt4, resetOpts)
+    const r4 = await runAndCollect(model, prompt4)
     const calls4 = extractToolCalls(r4.output)
     console.log(`   Response tools called: [${calls4.join(', ') || 'none'}]`)
     console.log('   Expected: NOT calculate (it\'s not available)')
@@ -303,7 +302,7 @@ async function mainInSystem () {
 
     // ── Summary ──
     console.log('='.repeat(70))
-    console.log('SUMMARY (tools_in_system, reset+replay)')
+    console.log('SUMMARY (tools_in_system, full replay)')
     console.log('='.repeat(70))
     const results = [
       { turn: 1, pass: calls1.includes('getWeather'), desc: 'getWeather available → called it' },

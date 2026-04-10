@@ -438,22 +438,6 @@ test('Options: switching cacheKey auto-saves previous session', { timeout: 600_0
   t.ok(secondStats.CacheTokens > 0, 'second cache session has CacheTokens')
 })
 
-test('Options: reset clears cache and starts fresh', { timeout: 600_000 }, async t => {
-  const { model, dirPath } = await setupModel(t, { n_predict: '256', ctx_size: '4096' })
-  const sessionName = path.join(dirPath, 'opts-cache-reset.bin')
-
-  const firstStats = await runAndCollectStats(model, [...BASE_PROMPT], { cacheKey: sessionName, saveCacheToDisk: true })
-  t.ok(firstStats.CacheTokens > 0, 'first run has CacheTokens')
-
-  const resetStats = await runAndCollectStats(
-    model,
-    [{ role: 'user', content: 'Start over.' }],
-    { cacheKey: sessionName, reset: true, saveCacheToDisk: true }
-  )
-  t.ok(resetStats.CacheTokens > 0, 'reset run still generates CacheTokens')
-  t.ok(resetStats.promptTokens > 0, 'prompt tokens tracked after reset')
-})
-
 test('Validation: cacheKey must be a string', { timeout: 600_000 }, async t => {
   const { model } = await setupModel(t)
   const cases = [123, true, []]
@@ -480,19 +464,6 @@ test('Validation: saveCacheToDisk must be a boolean', { timeout: 600_000 }, asyn
   }
 })
 
-test('Validation: reset must be a boolean', { timeout: 600_000 }, async t => {
-  const { model } = await setupModel(t)
-  const cases = ['yes', 1]
-  for (const bad of cases) {
-    try {
-      await model.run([...BASE_PROMPT], { reset: bad })
-      t.fail('should have thrown for reset: ' + JSON.stringify(bad))
-    } catch (err) {
-      t.ok(/reset must be a boolean/.test(err.message), 'rejects reset: ' + JSON.stringify(bad))
-    }
-  }
-})
-
 test('Options: saveCacheToDisk false does not write to disk', { timeout: 600_000 }, async t => {
   const { model, dirPath } = await setupModel(t, { n_predict: '256', ctx_size: '4096' })
   const sessionName = path.join(dirPath, 'opts-saveCacheToDisk-false.bin')
@@ -506,30 +477,4 @@ test('Options: saveCacheToDisk true with no cacheKey is a no-op', { timeout: 600
   const { model } = await setupModel(t)
   const stats = await runAndCollectStats(model, [...BASE_PROMPT], { saveCacheToDisk: true })
   t.is(stats.CacheTokens, 0, 'no cacheKey means no cache even with saveCacheToDisk: true')
-})
-
-test('Options: reset true on first call with no prior cache', { timeout: 600_000 }, async t => {
-  const { model, dirPath } = await setupModel(t, { n_predict: '256', ctx_size: '4096' })
-  const sessionName = path.join(dirPath, 'opts-reset-first.bin')
-
-  const stats = await runAndCollectStats(model, [...BASE_PROMPT], { cacheKey: sessionName, reset: true })
-  t.ok(stats.CacheTokens > 0, 'reset on fresh model still produces cache')
-  t.ok(stats.promptTokens > 0, 'prompt tokens tracked')
-})
-
-test('Options: reset true with different cacheKey resets the new session', { timeout: 600_000 }, async t => {
-  const { model, dirPath } = await setupModel(t, { n_predict: '256', ctx_size: '4096' })
-  const session1 = path.join(dirPath, 'opts-reset-switch-1.bin')
-  const session2 = path.join(dirPath, 'opts-reset-switch-2.bin')
-
-  const firstStats = await runAndCollectStats(model, [...BASE_PROMPT], { cacheKey: session1, saveCacheToDisk: true })
-  t.ok(firstStats.CacheTokens > 0, 'first session has cache')
-
-  const resetStats = await runAndCollectStats(
-    model,
-    [{ role: 'user', content: 'Fresh start.' }],
-    { cacheKey: session2, reset: true }
-  )
-  t.ok(resetStats.CacheTokens > 0, 'new session with reset still produces cache')
-  assertCacheMatchesTokens(t, resetStats, 'new session cache equals only its own prompt + generated (not inherited from session1)')
 })

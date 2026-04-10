@@ -132,7 +132,6 @@ public:
 
     std::string cacheKey;
     bool saveCacheToDisk = false;
-    bool resetCache = false;
   };
 
   std::any process(const std::any& input) final;
