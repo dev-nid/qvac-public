@@ -172,6 +172,7 @@ TEST(
       applyOne("tensor_type_rules", "^vae.=f16").tensorTypeRules,
       "^vae.=f16");
   EXPECT_EQ(applyOne("backendsDir", "/tmp/backends").backendsDir, "/tmp/backends");
+  EXPECT_EQ(applyOne("openclCacheDir", "/data/local/tmp").openclCacheDir, "/data/local/tmp");
   EXPECT_FLOAT_EQ(applyOne("flow_shift", "1.25").flowShift, 1.25f);
 
   SdCtxConfig cfg;

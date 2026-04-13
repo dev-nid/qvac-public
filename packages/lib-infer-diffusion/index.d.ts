@@ -108,6 +108,8 @@ export interface SdConfig {
   force_sdxl_vae_conv_scale?: boolean
   /** Custom backends directory path (defaults to prebuilds/) */
   backendsDir?: string
+  /** Writable directory for OpenCL kernel binary cache. Required on Android for fast GPU startup. */
+  openclCacheDir?: string
   /** Custom tensor type rules string */
   tensor_type_rules?: string
   /** LoRA application mode */

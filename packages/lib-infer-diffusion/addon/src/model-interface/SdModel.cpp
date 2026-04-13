@@ -302,6 +302,15 @@ void SdModel::load() {
   params.flash_attn = config_.flashAttn;
   params.diffusion_flash_attn = config_.diffusionFlashAttn;
 
+#ifdef __ANDROID__
+  if (!config_.openclCacheDir.empty()) {
+    std::string oclCachePath =
+        (std::filesystem::path(config_.openclCacheDir) / "opencl-cache")
+            .string();
+    setenv("GGML_OPENCL_CACHE_DIR", oclCachePath.c_str(), /*overwrite=*/1);
+  }
+#endif
+
   // Load DL GPU backend modules before probing devices / creating the SD
   // context. In GGML_BACKEND_DL mode, device enumeration is empty until these
   // backend modules are loaded.

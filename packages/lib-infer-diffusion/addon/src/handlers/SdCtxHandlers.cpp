@@ -248,6 +248,9 @@ const SdCtxHandlersMap SD_CTX_HANDLERS = {
     {"backendsDir",
      [](SdCtxConfig& c, const std::string& v) { c.backendsDir = v; }},
 
+    {"openclCacheDir",
+     [](SdCtxConfig& c, const std::string& v) { c.openclCacheDir = v; }},
+
     // ── Logging
     // ────────────────────────────────────────────────────────────────
 

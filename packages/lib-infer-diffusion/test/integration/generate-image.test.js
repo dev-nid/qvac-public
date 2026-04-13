@@ -54,7 +54,8 @@ test('SD2.1 txt2img — generates a valid PNG image', { timeout: 600000, skip },
     {
       threads: 4,
       device: useCpu ? 'cpu' : 'gpu',
-      prediction: 'v' // SD2.1 uses v-prediction
+      prediction: 'v', // SD2.1 uses v-prediction
+      openclCacheDir: modelDir
     }
   )
 

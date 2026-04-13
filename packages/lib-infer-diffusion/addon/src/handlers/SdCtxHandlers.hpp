@@ -101,6 +101,7 @@ struct SdCtxConfig {
 
   // ── Backend loading ────────────────────────────────────────────────────────
   std::string backendsDir; // directory containing DL backend .so modules
+  std::string openclCacheDir; // writable dir for OpenCL kernel binary cache (Android)
 
   // ── Internal ──────────────────────────────────────────────────────────────
   // Upstream defaults to true, which frees model weight buffers after each

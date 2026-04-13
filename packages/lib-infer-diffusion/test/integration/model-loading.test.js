@@ -28,7 +28,8 @@ test('model loading - load and unload', { timeout: 600_000 }, async t => {
   const config = {
     threads: '4',
     device: useCpu ? 'cpu' : 'gpu',
-    prediction: 'v'
+    prediction: 'v',
+    openclCacheDir: modelDir
   }
 
   const addon = new ImgStableDiffusion({
@@ -37,7 +38,10 @@ test('model loading - load and unload', { timeout: 600_000 }, async t => {
     logger: console
   }, config)
 
+  const t0 = Date.now()
   await addon.load()
+  const loadMs = Date.now() - t0
+  console.log(`model.load() took ${loadMs} ms`)
   t.pass('model loaded successfully')
 
   await addon.unload()
