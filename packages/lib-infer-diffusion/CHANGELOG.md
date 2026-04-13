@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3] - 2026-04-13
+
+### Added
+
+- Add `openclCacheDir` config option for OpenCL kernel binary caching on Android. Sets `GGML_OPENCL_CACHE_DIR` before backend init so compiled kernels are cached to disk, reducing GPU load time from ~9.8s to ~2.0s on Adreno devices after the first run
+
 ## [0.1.2] - 2026-04-03
 
 ### Changed
