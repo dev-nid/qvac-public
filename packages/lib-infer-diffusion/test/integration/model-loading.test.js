@@ -1,6 +1,8 @@
 'use strict'
 
 const test = require('brittle')
+const fs = require('bare-fs')
+const path = require('bare-path')
 const os = require('bare-os')
 const proc = require('bare-process')
 
@@ -28,8 +30,7 @@ test('model loading - load and unload', { timeout: 600_000 }, async t => {
   const config = {
     threads: '4',
     device: useCpu ? 'cpu' : 'gpu',
-    prediction: 'v',
-    openclCacheDir: modelDir
+    prediction: 'v'
   }
 
   const addon = new ImgStableDiffusion({
@@ -38,10 +39,7 @@ test('model loading - load and unload', { timeout: 600_000 }, async t => {
     logger: console
   }, config)
 
-  const t0 = Date.now()
   await addon.load()
-  const loadMs = Date.now() - t0
-  console.log(`model.load() took ${loadMs} ms`)
   t.pass('model loaded successfully')
 
   await addon.unload()
@@ -49,6 +47,54 @@ test('model loading - load and unload', { timeout: 600_000 }, async t => {
 
   await addon.unload().catch(() => {})
   t.pass('second unload is idempotent')
+})
+
+const isAndroid = platform === 'android'
+
+test('opencl cache - second load is faster than first', { timeout: 600_000, skip: !isAndroid }, async t => {
+  const [downloadedModelName, modelDir] = await ensureModel({
+    modelName: DEFAULT_MODEL.name,
+    downloadUrl: DEFAULT_MODEL.url
+  })
+
+  const cacheDir = path.join(modelDir, 'opencl-cache')
+  if (fs.existsSync(cacheDir)) {
+    fs.rmSync(cacheDir, { recursive: true })
+  }
+
+  const config = {
+    threads: '4',
+    device: 'gpu',
+    prediction: 'v',
+    openclCacheDir: modelDir
+  }
+
+  const args = {
+    modelName: downloadedModelName,
+    diskPath: modelDir,
+    logger: console
+  }
+
+  const first = new ImgStableDiffusion(args, config)
+  const t0 = Date.now()
+  await first.load()
+  const coldLoadMs = Date.now() - t0
+  console.log(`Cold load (no cache): ${coldLoadMs} ms`)
+  await first.unload()
+
+  t.ok(fs.existsSync(cacheDir), 'opencl-cache directory was created')
+  const cachedFiles = fs.readdirSync(cacheDir).filter(f => f.endsWith('.oclbin'))
+  t.ok(cachedFiles.length > 0, `Cache contains ${cachedFiles.length} .oclbin files`)
+
+  const second = new ImgStableDiffusion(args, config)
+  const t1 = Date.now()
+  await second.load()
+  const warmLoadMs = Date.now() - t1
+  console.log(`Warm load (cached): ${warmLoadMs} ms`)
+  await second.unload()
+
+  console.log(`Speedup: ${(coldLoadMs / warmLoadMs).toFixed(1)}x`)
+  t.ok(warmLoadMs < coldLoadMs, `Warm load (${warmLoadMs} ms) faster than cold load (${coldLoadMs} ms)`)
 })
 
 // Keep event loop alive briefly to let pending async operations complete
