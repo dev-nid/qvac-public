@@ -91,6 +91,7 @@ node quickstart.js
 * **Text-to-Speech:** speech synthesis for text-to-speech (TTS) via [ONNX Runtime](https://onnxruntime.ai).
 * **OCR:** optical character recognition (OCR) for extracting text from images via ONNX runtime.
 * **Image generation:** text-to-image generation via [`qvac-ext-stable-diffusion.cpp`](https://github.com/tetherto/qvac-ext-stable-diffusion.cpp).
+* **Fine-tuning:** adapting LLMs to domain-specific tasks via LoRA.
 * **Multimodal:** LLM inference over text, images, and other media within a single conversation context.
 * **RAG:** out-of-the-box retrieval-augmented generation workflow.
 
