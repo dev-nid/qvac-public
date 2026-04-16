@@ -1,9 +1,6 @@
 import { z } from "zod";
 import { modelSrcInputSchema } from "./model-src-utils";
 
-// Marian/Opus model languages
-export const MARIAN_LANGUAGES = ["en", "de", "es", "it", "ru", "ja"] as const;
-
 // Bergamot supports many more language pairs
 export const BERGAMOT_LANGUAGES = [
   "en",
@@ -88,12 +85,11 @@ export const AFRICAN_LANGUAGES_MAP = new Map([
 
 // Union of all NMT languages (for general type usage)
 export const NMT_LANGUAGES = [
-  ...MARIAN_LANGUAGES,
   ...BERGAMOT_LANGUAGES,
   ...INDICTRANS_LANGUAGES,
 ] as const;
 
-export const NMT_ENGINES = ["Opus", "Bergamot", "IndicTrans"] as const;
+export const NMT_ENGINES = ["Bergamot", "IndicTrans"] as const;
 export type NmtEngine = (typeof NMT_ENGINES)[number];
 
 // Common generation parameters (without language fields)
@@ -107,13 +103,6 @@ const nmtGenerationParamsSchema = z.object({
   temperature: z.number().optional(),
   topk: z.number().optional(),
   topp: z.number().optional(),
-});
-
-// Opus engine config (Marian-based) - supports MARIAN_LANGUAGES
-const opusConfigSchema = nmtGenerationParamsSchema.extend({
-  engine: z.literal("Opus"),
-  from: z.enum(MARIAN_LANGUAGES),
-  to: z.enum(MARIAN_LANGUAGES),
 });
 
 // Pivot model configuration for Bergamot (for translation via intermediate language)
@@ -146,7 +135,6 @@ const indicTransConfigSchema = nmtGenerationParamsSchema.extend({
 
 // Discriminated union of all engine configs
 export const nmtConfigBaseSchema = z.discriminatedUnion("engine", [
-  opusConfigSchema,
   bergamotConfigSchema,
   indicTransConfigSchema,
 ]);
@@ -165,7 +153,6 @@ export const nmtConfigSchema = nmtConfigBaseSchema.transform((data) => ({
   topp: data.topp ?? 1.0,
 }));
 
-export type MarianLanguage = (typeof MARIAN_LANGUAGES)[number];
 export type BergamotLanguage = (typeof BERGAMOT_LANGUAGES)[number];
 export type IndicTransLanguage = (typeof INDICTRANS_LANGUAGES)[number];
 export type NmtLanguage = (typeof NMT_LANGUAGES)[number];
