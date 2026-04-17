@@ -287,36 +287,37 @@ sequenceDiagram
     participant Helpers as LlamaFinetuningHelpers
     participant Queue as outputQueue
 
-    User->>LlamaModel: pause()
-    LlamaModel->>Addon: addon.cancel()
-    Addon->>Binding: _binding.cancel(handle)
-    Binding->>AddonJs: "qvac_lib_inference_addon_llama::cancel(env, info)"
+    User->>LlamaModel: pause#40;#41;
+    LlamaModel->>Addon: addon.cancel#40;#41;
+    Addon->>Binding: _binding.cancel#40;handle#41;
+    Binding->>AddonJs: qvac_lib_inference_addon_llama#58;#58;cancel#40;env, info#41;
 
-    AddonJs->>AddonJs: "JsInterface::getInstance; isFinetuneRunning()?"
-    AddonJs->>LlamaModelCpp: llamaModel->requestPause()
-    LlamaModelCpp->>LlamaModelCpp: "currentCheckpointState_->pauseRequested.store(true)"
-    LlamaModelCpp->>LlamaModelCpp: llama_opt_request_stop(ctx)
+    AddonJs->>AddonJs: JsInterface.getInstance, getLlamaModel#40;instance#41;#59; isFinetuneRunning#40;#41;?
+    AddonJs->>LlamaModelCpp: llamaModel#45;#62;requestPause#40;#41;
+    LlamaModelCpp->>LlamaModelCpp: currentCheckpointState_#45;#62;pauseRequested.store#40;true#41;
+    LlamaModelCpp->>LlamaModelCpp: llama_opt_request_stop#40;ctx#41;
 
-    Note over AddonJs: Returns Promise (JsAsyncTask). If no pause needed, resolves immediately.
+    Note over AddonJs: Always returns Promise #40;JsAsyncTask#58;#58;run#41;. If requestPause#40;#41; was false, runs empty task so Promise resolves immediately.
 
-    AddonJs->>AddonJs: "JsAsyncTask::run(env, [llamaModel])"
-    AddonJs->>LlamaModelCpp: "waitUntilFinetuningPauseComplete() (when didPause)"
+    AddonJs->>AddonJs: JsAsyncTask#58;#58;run#40;env, [llamaModel]#40;#41; { ... } or []#40;#41; {}#41;
+    AddonJs->>LlamaModelCpp: llamaModel#45;#62;waitUntilFinetuningPauseComplete#40;#41; #40;when didPause#41;
     Note over LlamaModelCpp: waits on pauseDoneCv until pause done
 
-    par JobRunner thread (finetune job)
+    par JobRunner thread #40;finetune job#41; reacts to stop when finetuning was running
         LlamaModelCpp->>Helpers: training loop sees pauseRequested / stop
-        Helpers->>Helpers: "save checkpoint, mark pause done, notify waiter"
-        Helpers->>Helpers: "pauseWaitDone=true, pauseDoneCv.notify_all()"
-        LlamaModelCpp->>Queue: "queueJobEnded({ op:'finetune', status:'PAUSED' })"
-        Queue->>LlamaModel: "_addonOutputCallback to QvacResponse.ended()"
+        Helpers->>Helpers: save checkpoint, mark pause done, notify pause waiter
+        Helpers->>Helpers: pauseWaitDone=true, pauseDoneCv.notify_all#40;#41;
+        LlamaModelCpp->>Queue: queueJobEnded#40;{ op:'finetune', status:'PAUSED', stats? }#41;
+        Queue->>LlamaModel: _addonOutputCallback#40;...#41; -> _outputCallback#40;..., 'JobEnded', ...#41;
+        LlamaModel->>LlamaModel: QvacResponse.ended#40;data#41;
     and waitUntilFinetuningPauseComplete unblocks
-        LlamaModelCpp-->>AddonJs: waitUntilFinetuningPauseComplete() returns
+        LlamaModelCpp-->>AddonJs: waitUntilFinetuningPauseComplete#40;#41; returns
     end
 
     AddonJs-->>Binding: JsAsyncTask resolves
     Binding-->>Addon: Promise resolves
-    Addon-->>LlamaModel: pause() resolves
-    LlamaModel-->>User: pause() resolves
+    Addon-->>LlamaModel: pause#40;#41; resolves
+    LlamaModel-->>User: pause#40;#41; resolves
 ```
 
 #### Component overview (JS ↔ C++)
