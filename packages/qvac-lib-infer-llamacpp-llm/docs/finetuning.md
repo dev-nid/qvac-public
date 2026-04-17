@@ -246,32 +246,33 @@ sequenceDiagram
     participant Helpers as LlamaFinetuningHelpers
     participant Queue as outputQueue
 
-    User->>LlamaModel: finetune(opts) or finetune() (no args → stored params)
-    LlamaModel->>LlamaModel: _finetuneActive check, store params, normalize opts (validation object required; dataset requires validation.path; emits validationSplit/useEvalDatasetForValidation/evalDatasetPath)
+    User->>LlamaModel: "finetune(opts) or finetune() (no args -> stored params)"
+    LlamaModel->>LlamaModel: "_finetuneActive check, store params, normalize opts"
+    Note over LlamaModel: validation object required; emits validationSplit/useEvalDatasetForValidation
     LlamaModel->>Addon: finetune(params)
 
     Addon->>Binding: _binding.finetune(handle, params)
     Binding->>AddonJs: finetune(env, info)
-    AddonJs->>AddonJs: JsInterface.getInstance, getLlamaModel(instance); tryGetObject for params; build Prompt with finetuningParams and outputCallback
+    AddonJs->>AddonJs: "JsInterface::getInstance, getLlamaModel; build Prompt"
     AddonJs->>AddonCpp: runJob(any(prompt))
     AddonCpp->>JobRunner: runJob(any)
-    JobRunner->>LlamaModelCpp: process(job) → branch on finetuningParams → finetune(params, outputCallback)
+    JobRunner->>LlamaModelCpp: "process(job) -> branch on finetuningParams -> finetune()"
     AddonJs-->>Binding: return
     Binding-->>Addon: return
     Addon-->>LlamaModel: return
-    LlamaModel-->>User: handle { await() }
+    LlamaModel-->>User: "handle { await() }"
 
     Note over JobRunner,LlamaModelCpp: Finetune runs in JobRunner thread (same as inference)
-    LlamaModelCpp->>LlamaModelCpp: pauseCheckpointExists(checkpointDir)? clearPauseRequest(); resume or fresh path
+    LlamaModelCpp->>LlamaModelCpp: "pauseCheckpointExists? clearPauseRequest(); resume or fresh"
     LlamaModelCpp->>Helpers: prepareTrainingDataset, training loop
     loop each batch / completion
         Helpers->>LlamaModelCpp: logCallback(msg) for progress
-        LlamaModelCpp->>Queue: enqueueLog(msg) → queueResult(any(message))
+        LlamaModelCpp->>Queue: "enqueueLog(msg) -> queueResult(any(message))"
     end
-    LlamaModelCpp->>Queue: queueJobEnded({ op:'finetune', status, stats? })
-    Queue->>LlamaModel: _addonOutputCallback(...) -> _outputCallback(..., 'JobEnded', 'OnlyOneJob', data)
+    LlamaModelCpp->>Queue: "queueJobEnded({ op:'finetune', status, stats? })"
+    Queue->>LlamaModel: "_addonOutputCallback(...) -> _outputCallback(...)"
     LlamaModel->>LlamaModel: BaseInference routes JobEnded to QvacResponse.ended(data)
-    LlamaModel->>User: handle.await() resolves with { op:'finetune', status:'COMPLETED'|'PAUSED', stats? } (errors reject)
+    LlamaModel->>User: "handle.await() resolves with { status:'COMPLETED'|'PAUSED' }"
 ```
 
 #### pause() flow
@@ -290,26 +291,25 @@ sequenceDiagram
     User->>LlamaModel: pause()
     LlamaModel->>Addon: addon.cancel()
     Addon->>Binding: _binding.cancel(handle)
-    Binding->>AddonJs: qvac_lib_inference_addon_llama::cancel(env, info)
+    Binding->>AddonJs: "qvac_lib_inference_addon_llama::cancel(env, info)"
 
-    AddonJs->>AddonJs: JsInterface.getInstance, getLlamaModel(instance); isFinetuneRunning()?
+    AddonJs->>AddonJs: "JsInterface::getInstance; isFinetuneRunning()?"
     AddonJs->>LlamaModelCpp: llamaModel->requestPause()
-    LlamaModelCpp->>LlamaModelCpp: currentCheckpointState_->pauseRequested.store(true)
+    LlamaModelCpp->>LlamaModelCpp: "currentCheckpointState_->pauseRequested.store(true)"
     LlamaModelCpp->>LlamaModelCpp: llama_opt_request_stop(ctx)
 
-    Note over AddonJs: Always returns Promise (JsAsyncTask::run). If requestPause() was false, runs empty task so Promise resolves immediately.
+    Note over AddonJs: Returns Promise (JsAsyncTask). If no pause needed, resolves immediately.
 
-    AddonJs->>AddonJs: JsAsyncTask::run(env, [llamaModel]() { ... } or []() {})
-    AddonJs->>LlamaModelCpp: llamaModel->waitUntilFinetuningPauseComplete() (when didPause)
+    AddonJs->>AddonJs: "JsAsyncTask::run(env, [llamaModel])"
+    AddonJs->>LlamaModelCpp: "waitUntilFinetuningPauseComplete() (when didPause)"
     Note over LlamaModelCpp: waits on pauseDoneCv until pause done
 
-    par JobRunner thread (finetune job) reacts to stop when finetuning was running
+    par JobRunner thread (finetune job)
         LlamaModelCpp->>Helpers: training loop sees pauseRequested / stop
-        Helpers->>Helpers: save checkpoint, mark pause done, notify pause waiter
-        Helpers->>Helpers: pauseWaitDone=true, pauseDoneCv.notify_all()
-        LlamaModelCpp->>Queue: queueJobEnded({ op:'finetune', status:'PAUSED', stats? })
-        Queue->>LlamaModel: _addonOutputCallback(...) -> _outputCallback(..., 'JobEnded', ...)
-        LlamaModel->>LlamaModel: QvacResponse.ended(data)
+        Helpers->>Helpers: "save checkpoint, mark pause done, notify waiter"
+        Helpers->>Helpers: "pauseWaitDone=true, pauseDoneCv.notify_all()"
+        LlamaModelCpp->>Queue: "queueJobEnded({ op:'finetune', status:'PAUSED' })"
+        Queue->>LlamaModel: "_addonOutputCallback to QvacResponse.ended()"
     and waitUntilFinetuningPauseComplete unblocks
         LlamaModelCpp-->>AddonJs: waitUntilFinetuningPauseComplete() returns
     end
