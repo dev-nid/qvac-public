@@ -236,43 +236,39 @@ The following sequence diagrams show how `finetune()` and `pause()` call from Ja
 ```mermaid
 sequenceDiagram
     participant User
-    participant LlamaModel as index.js LlmLlamacpp
-    participant Addon as addon.js LlamaInterface
-    participant Binding as binding.cpp (BARE)
-    participant AddonJs as AddonJs.hpp
-    participant AddonCpp as AddonCpp
-    participant JobRunner as JobRunner
-    participant LlamaModelCpp as LlamaModel.cpp
-    participant Helpers as LlamaFinetuningHelpers
-    participant Queue as outputQueue
+    participant LlamaModel
+    participant Addon
+    participant Binding
+    participant AddonJs
+    participant JobRunner
+    participant LlamaModelCpp
+    participant Helpers
+    participant Queue
 
-    User->>LlamaModel: "finetune(opts) or finetune() (no args -> stored params)"
-    LlamaModel->>LlamaModel: "_finetuneActive check, store params, normalize opts"
-    Note over LlamaModel: validation object required; emits validationSplit/useEvalDatasetForValidation
+    User->>LlamaModel: finetune(opts)
+    Note over LlamaModel: Normalizes validation params
     LlamaModel->>Addon: finetune(params)
 
     Addon->>Binding: _binding.finetune(handle, params)
     Binding->>AddonJs: finetune(env, info)
-    AddonJs->>AddonJs: "JsInterface::getInstance, getLlamaModel; build Prompt"
-    AddonJs->>AddonCpp: runJob(any(prompt))
-    AddonCpp->>JobRunner: runJob(any)
-    JobRunner->>LlamaModelCpp: "process(job) -> branch on finetuningParams -> finetune()"
+    AddonJs->>AddonJs: "Build Prompt with finetuningParams"
+    AddonJs->>JobRunner: runJob(prompt)
+    JobRunner->>LlamaModelCpp: "process() -> finetune()"
     AddonJs-->>Binding: return
     Binding-->>Addon: return
     Addon-->>LlamaModel: return
-    LlamaModel-->>User: "handle { await() }"
+    LlamaModel-->>User: handle { await() }
 
-    Note over JobRunner,LlamaModelCpp: Finetune runs in JobRunner thread (same as inference)
-    LlamaModelCpp->>LlamaModelCpp: "pauseCheckpointExists? clearPauseRequest(); resume or fresh"
-    LlamaModelCpp->>Helpers: prepareTrainingDataset, training loop
-    loop each batch / completion
-        Helpers->>LlamaModelCpp: logCallback(msg) for progress
-        LlamaModelCpp->>Queue: "enqueueLog(msg) -> queueResult(any(message))"
+    Note over JobRunner,LlamaModelCpp: JobRunner Thread starts training
+    LlamaModelCpp->>LlamaModelCpp: Check for pause checkpoint
+    LlamaModelCpp->>Helpers: executeTrainingLoop()
+    loop each batch
+        Helpers->>LlamaModelCpp: log progress
+        LlamaModelCpp->>Queue: enqueueLog(msg)
     end
-    LlamaModelCpp->>Queue: "queueJobEnded({ op:'finetune', status, stats? })"
-    Queue->>LlamaModel: "_addonOutputCallback(...) -> _outputCallback(...)"
-    LlamaModel->>LlamaModel: BaseInference routes JobEnded to QvacResponse.ended(data)
-    LlamaModel->>User: "handle.await() resolves with { status:'COMPLETED'|'PAUSED' }"
+    LlamaModelCpp->>Queue: queueJobEnded(status)
+    Queue->>LlamaModel: _addonOutputCallback(JobEnded)
+    LlamaModel->>User: handle.await() resolves
 ```
 
 #### pause() flow
