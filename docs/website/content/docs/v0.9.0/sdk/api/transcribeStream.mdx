@@ -1,56 +1,30 @@
 ---
 title: "transcribeStream( )"
 titleStyle: code
-description: Streams audio transcription results in real-time, yielding text chunks as they become available from the model.
+description: "No description available"
 ---
 
-```ts
-function transcribeStream(params: TranscribeClientParams, options?: RPCOptions): AsyncGenerator<string>;
-```
+<Callout type="warn" title="Deprecated">
+Pass audio via `transcribe()` instead. This overload will be
+removed in the next major version.
 
-Yields text chunks as they become available from the model.
+Streaming transcription with upfront audio: sends full audio, yields text
+chunks as they arrive.
+</Callout>
+
+```typescript
+function transcribeStream(params: TranscribeClientParams, options?: { forceNewConnection?: boolean; healthCheckTimeout?: number; profiling?: { enabled?: boolean; includeServerBreakdown?: boolean; mode?: "summary" | "verbose" }; timeout?: number }): AsyncGenerator
+```
 
 ## Parameters
 
 | Name | Type | Required? | Description |
 | --- | --- | :---: | --- |
-| params.modelId | `string` | ✓ | The identifier of the transcription model |
-| params.audioChunk | `string \| Buffer` | ✓ | Audio input as file path (string) or audio buffer |
-| params.prompt | `string` | ✗ | Optional initial prompt to guide the transcription |
-| options | [`RPCOptions`](../index#rpcoptions) | ✗ | Optional RPC transport options |
+| `params` | `TranscribeClientParams` | ✓ | No description |
+| `options` | `\{ forceNewConnection?: boolean; healthCheckTimeout?: number; profiling?: \{ enabled?: boolean; includeServerBreakdown?: boolean; mode?: "summary" | "verbose" \}; timeout?: number \}` | ✗ | No description |
 
 ## Returns
 
-`AsyncGenerator<string>` — Yields text chunks as they are transcribed.
-
-## Throws
-
-| Error | When |
-| --- | --- |
-| `TRANSCRIPTION_FAILED` | Transcription fails |
-
-## Example
-
 ```typescript
-const stream = transcribeStream({
-  modelId: "whisper-model",
-  audioChunk: "/path/to/audio.wav",
-});
-
-for await (const textChunk of stream) {
-  process.stdout.write(textChunk);
-}
-```
-
-## `SUPPORTED_AUDIO_FORMATS`
-
-Use this exported constant to check which audio formats are accepted before passing a file to `transcribeStream()`. Avoids runtime errors from unsupported formats.
-
-```typescript
-import { SUPPORTED_AUDIO_FORMATS } from "@qvac/sdk";
-
-const ext = filePath.split(".").pop();
-if (!SUPPORTED_AUDIO_FORMATS.includes(ext)) {
-  console.error(`Unsupported format: ${ext}`);
-}
+AsyncGenerator
 ```
