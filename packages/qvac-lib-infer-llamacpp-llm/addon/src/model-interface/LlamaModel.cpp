@@ -692,6 +692,29 @@ void LlamaModel::commonParamsParse(
     }
   }
 
+  llama_split_mode splitMode = LLAMA_SPLIT_MODE_NONE;
+  for (const char* key : {"split-mode", "split_mode"}) {
+    if (auto it = configFilemap.find(key); it != configFilemap.end()) {
+      std::string val = it->second;
+      std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+      if (val == "layer") {
+        splitMode = LLAMA_SPLIT_MODE_LAYER;
+      } else if (val == "row") {
+        splitMode = LLAMA_SPLIT_MODE_ROW;
+      } else if (val != "none") {
+        throw qvac_errors::StatusError(
+            qvac_errors::general_error::InvalidArgument,
+            string_format(
+                "%s: invalid split-mode '%s', must be 'none', 'layer', or "
+                "'row'.\n",
+                __func__,
+                it->second.c_str()));
+      }
+      configFilemap.erase(it);
+      break;
+    }
+  }
+
   auto deviceIt = configFilemap.find("device");
   if (deviceIt == configFilemap.end()) {
     std::string errorMsg =
@@ -722,7 +745,7 @@ void LlamaModel::commonParamsParse(
 #else
       params.mmproj_use_gpu = true;
 #endif
-      params.split_mode = LLAMA_SPLIT_MODE_NONE;
+      params.split_mode = splitMode;
       runtimeBackendDevice_ = 1;
     } else if (chosenBackend.first == BackendType::CPU) {
       params.mmproj_use_gpu = false;
@@ -733,9 +756,18 @@ void LlamaModel::commonParamsParse(
           "preferredDeviceFromString: wrong deduced device, must be 'gpu' or "
           "'cpu'.\n");
     }
-    configVector.emplace_back("--device");
-    configVector.emplace_back(chosenBackend.second);
+    if (splitMode == LLAMA_SPLIT_MODE_NONE) {
+      configVector.emplace_back("--device");
+      configVector.emplace_back(chosenBackend.second);
+    }
     configFilemap.erase(deviceIt);
+
+    // Re-insert main-gpu so tuneConfigMap forwards it to llama.cpp CLI args
+    if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value() &&
+        std::holds_alternative<int>(mainGpu.value())) {
+      configFilemap["main-gpu"] =
+          std::to_string(std::get<int>(mainGpu.value()));
+    }
   }
 
   tuneConfigMap(
