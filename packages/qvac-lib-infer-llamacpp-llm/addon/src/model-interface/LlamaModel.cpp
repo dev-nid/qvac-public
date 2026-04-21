@@ -753,8 +753,8 @@ void LlamaModel::commonParamsParse(
       if (splitMode != LLAMA_SPLIT_MODE_NONE) {
         QLOG_IF(
             Priority::WARNING,
-            "[LlamaModel] split-mode ignored: no GPU backend available, "
-            "falling back to CPU\n");
+            "[LlamaModel] split-mode, tensor-split and main-gpu ignored: "
+            "no GPU backend available, falling back to CPU\n");
       }
     } else {
       throw qvac_errors::StatusError(
