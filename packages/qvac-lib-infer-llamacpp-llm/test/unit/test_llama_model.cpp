@@ -1295,4 +1295,3 @@ TEST_F(LlamaModelTest, CommonParamsParseSplitModeInvalid) {
       },
       qvac_errors::StatusError);
 }
-
