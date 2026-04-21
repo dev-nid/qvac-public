@@ -400,8 +400,8 @@ std::pair<BackendType, std::string> backend_selection::chooseBackend(
       isFinetuning);
 }
 
-size_t backend_selection::getEffectiveGpuDeviceCount(
-    const BackendInterface& bckI) {
+size_t
+backend_selection::getEffectiveGpuDeviceCount(const BackendInterface& bckI) {
   size_t gpuCount = 0;
   size_t igpuCount = 0;
   const size_t totalDevices = bckI.ggml_backend_dev_count();
