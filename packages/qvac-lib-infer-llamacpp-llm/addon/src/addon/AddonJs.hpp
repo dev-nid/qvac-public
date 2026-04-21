@@ -431,4 +431,22 @@ inline js_value_t* finetune(js_env_t* env, js_callback_info_t* info) try {
 }
 JSCATCH
 
+inline js_value_t*
+getGpuDeviceCount(js_env_t* env, js_callback_info_t* /*info*/) try {
+  size_t gpuCount = 0;
+  size_t totalDevices = ggml_backend_dev_count();
+  for (size_t i = 0; i < totalDevices; ++i) {
+    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+    enum ggml_backend_dev_type devType = ggml_backend_dev_type(dev);
+    if (devType == GGML_BACKEND_DEVICE_TYPE_GPU ||
+        devType == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+      ++gpuCount;
+    }
+  }
+  js_value_t* result;
+  js_create_int64(env, static_cast<int64_t>(gpuCount), &result);
+  return result;
+}
+JSCATCH
+
 } // namespace qvac_lib_inference_addon_llama

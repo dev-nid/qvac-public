@@ -261,3 +261,6 @@ export { QvacResponse, FinetuneHandle, FinetuneProgressStats, FinetuneOptions, F
 
 /** Returns the first shard (matching `-NNNNN-of-MMMMM.gguf`) or the sole entry for single-file models. */
 export function pickPrimaryGgufPath(files: string[]): string
+
+/** Returns the number of GPU devices (discrete + integrated) detected by the ggml backend. */
+export function getGpuDeviceCount(): number

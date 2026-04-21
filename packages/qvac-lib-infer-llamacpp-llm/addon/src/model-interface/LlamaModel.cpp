@@ -762,7 +762,6 @@ void LlamaModel::commonParamsParse(
     }
     configFilemap.erase(deviceIt);
 
-    // Re-insert main-gpu so tuneConfigMap forwards it to llama.cpp CLI args
     if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value() &&
         std::holds_alternative<int>(mainGpu.value())) {
       configFilemap["main-gpu"] =
