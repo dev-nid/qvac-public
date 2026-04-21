@@ -434,10 +434,9 @@ JSCATCH
 
 inline js_value_t*
 getGpuDeviceCount(js_env_t* env, js_callback_info_t* /*info*/) try {
-  size_t count = backend_selection::getEffectiveGpuDeviceCount();
-  js_value_t* result;
-  js_create_int64(env, static_cast<int64_t>(count), &result);
-  return result;
+  auto count =
+      static_cast<int64_t>(backend_selection::getEffectiveGpuDeviceCount());
+  return js::Number::create(env, count);
 }
 JSCATCH
 
