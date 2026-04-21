@@ -750,22 +750,37 @@ void LlamaModel::commonParamsParse(
     } else if (chosenBackend.first == BackendType::CPU) {
       params.mmproj_use_gpu = false;
       runtimeBackendDevice_ = 0;
+      if (splitMode != LLAMA_SPLIT_MODE_NONE) {
+        QLOG_IF(
+            Priority::WARNING,
+            "[LlamaModel] split-mode ignored: no GPU backend available, "
+            "falling back to CPU\n");
+      }
     } else {
       throw qvac_errors::StatusError(
           qvac_errors::general_error::InternalError,
           "preferredDeviceFromString: wrong deduced device, must be 'gpu' or "
           "'cpu'.\n");
     }
+    // In multi-GPU split mode we intentionally omit --device so llama.cpp
+    // distributes layers/rows across all available GPUs rather than pinning
+    // to the single backend that chooseBackend selected.
     if (splitMode == LLAMA_SPLIT_MODE_NONE) {
       configVector.emplace_back("--device");
       configVector.emplace_back(chosenBackend.second);
     }
     configFilemap.erase(deviceIt);
 
-    if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value() &&
-        std::holds_alternative<int>(mainGpu.value())) {
-      configFilemap["main-gpu"] =
-          std::to_string(std::get<int>(mainGpu.value()));
+    if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value()) {
+      if (std::holds_alternative<int>(mainGpu.value())) {
+        configFilemap["main-gpu"] =
+            std::to_string(std::get<int>(mainGpu.value()));
+      } else {
+        QLOG_IF(
+            Priority::WARNING,
+            "[LlamaModel] main-gpu 'dedicated'/'integrated' ignored in "
+            "multi-GPU split-mode; use an integer device index instead\n");
+      }
     }
   }
 

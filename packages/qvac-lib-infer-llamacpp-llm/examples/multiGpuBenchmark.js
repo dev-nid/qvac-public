@@ -9,7 +9,6 @@ const DEFAULT_RUNS = 5
 const DEFAULT_WARMUP = 2
 const DEFAULT_PROMPT_BASE = 'Explain in detail how neural networks learn through backpropagation, covering gradient descent, chain rule, weight updates, loss functions, activation functions, and optimization techniques. '
 const DEFAULT_PROMPT_REPEATS = 50
-const DEFAULT_PROMPT = DEFAULT_PROMPT_BASE.repeat(DEFAULT_PROMPT_REPEATS) + '\n\nSummarize the above in 3 sentences.'
 
 function parseIntegerArg (name, defaultValue) {
   const arg = process.argv.find(a => a.startsWith(`--${name}=`))
