@@ -747,6 +747,18 @@ void LlamaModel::commonParamsParse(
 #endif
       params.split_mode = splitMode;
       runtimeBackendDevice_ = 1;
+
+      if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value()) {
+        if (std::holds_alternative<int>(mainGpu.value())) {
+          configFilemap["main-gpu"] =
+              std::to_string(std::get<int>(mainGpu.value()));
+        } else {
+          QLOG_IF(
+              Priority::WARNING,
+              "[LlamaModel] main-gpu 'dedicated'/'integrated' ignored in "
+              "multi-GPU split-mode; use an integer device index instead\n");
+        }
+      }
     } else if (chosenBackend.first == BackendType::CPU) {
       params.mmproj_use_gpu = false;
       runtimeBackendDevice_ = 0;
@@ -755,6 +767,9 @@ void LlamaModel::commonParamsParse(
             Priority::WARNING,
             "[LlamaModel] split-mode, tensor-split and main-gpu ignored: "
             "no GPU backend available, falling back to CPU\n");
+        splitMode = LLAMA_SPLIT_MODE_NONE;
+        params.split_mode = LLAMA_SPLIT_MODE_NONE;
+        configFilemap.erase("tensor-split");
       }
     } else {
       throw qvac_errors::StatusError(
@@ -770,18 +785,6 @@ void LlamaModel::commonParamsParse(
       configVector.emplace_back(chosenBackend.second);
     }
     configFilemap.erase(deviceIt);
-
-    if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value()) {
-      if (std::holds_alternative<int>(mainGpu.value())) {
-        configFilemap["main-gpu"] =
-            std::to_string(std::get<int>(mainGpu.value()));
-      } else {
-        QLOG_IF(
-            Priority::WARNING,
-            "[LlamaModel] main-gpu 'dedicated'/'integrated' ignored in "
-            "multi-GPU split-mode; use an integer device index instead\n");
-      }
-    }
   }
 
   tuneConfigMap(
