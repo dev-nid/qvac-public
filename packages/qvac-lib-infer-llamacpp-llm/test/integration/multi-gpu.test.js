@@ -19,7 +19,7 @@ const PROMPT = [
 function extractBufferDevices (logs) {
   const deviceNames = new Set()
   for (const line of logs) {
-    const match = line.match(/\b(Vulkan|CUDA|Metal|ROCm|SYCL|OpenCL)\d*\b\s+model buffer size\s*=/i)
+    const match = line.match(/\b((?:Vulkan|CUDA|Metal|ROCm|SYCL|OpenCL)\d*)\b\s+model buffer size\s*=/i)
     if (match) deviceNames.add(match[1])
   }
   return deviceNames
