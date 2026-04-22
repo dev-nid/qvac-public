@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.16.1] - 2026-04-22
+
+### Added
+
+#### Multi-GPU pipeline parallelism via `split-mode` config
+
+- New `split-mode` (`'none'` | `'layer'` | `'row'`) and `tensor-split` config options enable distributing a model across multiple GPUs via pipeline or tensor parallelism.
+- Also adds `getGpuDeviceCount()` which returns the number of available GPU devices.
+
 ## [0.16.0] - 2026-04-14
 
 This release migrates the LLM addon off `BaseInference` inheritance and the `WeightsProvider` download layer onto the composable `createJobHandler` + `exclusiveRunQueue` utilities from `@qvac/infer-base@^0.4.0`. The constructor signature is replaced with a single object whose `files.model` field is an ordered array of absolute paths and `files.projectionModel` is an optional absolute path for multimodal models. This is a breaking change — every caller must update.
