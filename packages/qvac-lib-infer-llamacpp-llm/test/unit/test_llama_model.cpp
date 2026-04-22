@@ -1140,13 +1140,13 @@ TEST_F(LlamaModelTest, CommonParamsParseSplitModeNone) {
 #endif
   config["backendsDir"] = backendDir.string();
 
-  EXPECT_NO_THROW({
-    LlamaModel model(
-        getValidModelPath(),
-        std::string(test_projection_path),
-        std::unordered_map<std::string, std::string>(config));
-    model.waitForLoadInitialization();
-  });
+  LlamaModel model(
+      getValidModelPath(),
+      std::string(test_projection_path),
+      std::unordered_map<std::string, std::string>(config));
+  model.waitForLoadInitialization();
+  ASSERT_TRUE(model.isLoaded());
+  EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_NONE);
 }
 
 TEST_F(LlamaModelTest, CommonParamsParseSplitModeLayer) {
@@ -1169,13 +1169,19 @@ TEST_F(LlamaModelTest, CommonParamsParseSplitModeLayer) {
 #endif
   config["backendsDir"] = backendDir.string();
 
-  EXPECT_NO_THROW({
-    LlamaModel model(
-        getValidModelPath(),
-        std::string(test_projection_path),
-        std::unordered_map<std::string, std::string>(config));
-    model.waitForLoadInitialization();
-  });
+  LlamaModel model(
+      getValidModelPath(),
+      std::string(test_projection_path),
+      std::unordered_map<std::string, std::string>(config));
+  model.waitForLoadInitialization();
+  ASSERT_TRUE(model.isLoaded());
+
+  double backendDevice = getStatValue(model.runtimeStats(), "backendDevice");
+  if (backendDevice == 0.0) {
+    EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_NONE);
+  } else {
+    EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_LAYER);
+  }
 }
 
 TEST_F(LlamaModelTest, CommonParamsParseSplitModeRow) {
@@ -1198,13 +1204,19 @@ TEST_F(LlamaModelTest, CommonParamsParseSplitModeRow) {
 #endif
   config["backendsDir"] = backendDir.string();
 
-  EXPECT_NO_THROW({
-    LlamaModel model(
-        getValidModelPath(),
-        std::string(test_projection_path),
-        std::unordered_map<std::string, std::string>(config));
-    model.waitForLoadInitialization();
-  });
+  LlamaModel model(
+      getValidModelPath(),
+      std::string(test_projection_path),
+      std::unordered_map<std::string, std::string>(config));
+  model.waitForLoadInitialization();
+  ASSERT_TRUE(model.isLoaded());
+
+  double backendDevice = getStatValue(model.runtimeStats(), "backendDevice");
+  if (backendDevice == 0.0) {
+    EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_NONE);
+  } else {
+    EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_ROW);
+  }
 }
 
 TEST_F(LlamaModelTest, CommonParamsParseSplitModeCaseInsensitive) {
@@ -1263,6 +1275,39 @@ TEST_F(LlamaModelTest, CommonParamsParseSplitModeUnderscoreVariant) {
         std::unordered_map<std::string, std::string>(config));
     model.waitForLoadInitialization();
   });
+}
+
+TEST_F(LlamaModelTest, CpuFallbackClearsGpuSplitParams) {
+  if (!fs::exists(getValidModelPath())) {
+    FAIL() << "Test model not found at: " << getValidModelPath();
+  }
+
+  std::unordered_map<std::string, std::string> config;
+  config["device"] = "cpu";
+  config["ctx_size"] = "2048";
+  config["n_predict"] = "10";
+  config["split-mode"] = "layer";
+  config["tensor-split"] = "50,50";
+  config["main-gpu"] = "0";
+
+  fs::path backendDir;
+#ifdef TEST_BINARY_DIR
+  backendDir = fs::path(TEST_BINARY_DIR);
+#else
+  backendDir = fs::current_path() / "build" / "test" / "unit";
+#endif
+  config["backendsDir"] = backendDir.string();
+
+  LlamaModel model(
+      getValidModelPath(),
+      std::string(test_projection_path),
+      std::unordered_map<std::string, std::string>(config));
+  model.waitForLoadInitialization();
+  ASSERT_TRUE(model.isLoaded());
+
+  EXPECT_EQ(model.getCommonParams().split_mode, LLAMA_SPLIT_MODE_NONE);
+  double backendDevice = getStatValue(model.runtimeStats(), "backendDevice");
+  EXPECT_EQ(backendDevice, 0.0);
 }
 
 TEST_F(LlamaModelTest, CommonParamsParseSplitModeInvalid) {
