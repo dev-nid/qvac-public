@@ -778,6 +778,7 @@ void LlamaModel::commonParamsParse(
         splitMode = LLAMA_SPLIT_MODE_NONE;
         params.split_mode = LLAMA_SPLIT_MODE_NONE;
         configFilemap.erase("tensor-split");
+        params.main_gpu = -1;
       }
     } else {
       throw qvac_errors::StatusError(
