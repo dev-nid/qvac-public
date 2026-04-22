@@ -23,7 +23,7 @@ function parseIntegerArg (name, defaultValue) {
 function parseStringArg (name, defaultValue) {
   const arg = process.argv.find(a => a.startsWith(`--${name}=`))
   if (!arg) return defaultValue
-  return arg.slice(name.length + 3)
+  return arg.slice(`--${name}=`.length)
 }
 
 function median (values) {
