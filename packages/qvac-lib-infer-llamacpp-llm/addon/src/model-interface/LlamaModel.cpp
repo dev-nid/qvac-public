@@ -693,26 +693,34 @@ void LlamaModel::commonParamsParse(
   }
 
   llama_split_mode splitMode = LLAMA_SPLIT_MODE_NONE;
-  for (const char* key : {"split-mode", "split_mode"}) {
-    if (auto it = configFilemap.find(key); it != configFilemap.end()) {
-      std::string val = it->second;
-      std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-      if (val == "layer") {
-        splitMode = LLAMA_SPLIT_MODE_LAYER;
-      } else if (val == "row") {
-        splitMode = LLAMA_SPLIT_MODE_ROW;
-      } else if (val != "none") {
-        throw qvac_errors::StatusError(
-            qvac_errors::general_error::InvalidArgument,
-            string_format(
-                "%s: invalid split-mode '%s', must be 'none', 'layer', or "
-                "'row'.\n",
-                __func__,
-                it->second.c_str()));
-      }
-      configFilemap.erase(it);
-      break;
+  auto hIt = configFilemap.find("split-mode");
+  auto uIt = configFilemap.find("split_mode");
+  if (hIt != configFilemap.end() && uIt != configFilemap.end()) {
+    throw qvac_errors::StatusError(
+        qvac_errors::general_error::InvalidArgument,
+        string_format(
+            "%s: both 'split-mode' and 'split_mode' are present; "
+            "use one or the other.\n",
+            __func__));
+  }
+  if (auto it = (hIt != configFilemap.end()) ? hIt : uIt;
+      it != configFilemap.end()) {
+    std::string val = it->second;
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    if (val == "layer") {
+      splitMode = LLAMA_SPLIT_MODE_LAYER;
+    } else if (val == "row") {
+      splitMode = LLAMA_SPLIT_MODE_ROW;
+    } else if (val != "none") {
+      throw qvac_errors::StatusError(
+          qvac_errors::general_error::InvalidArgument,
+          string_format(
+              "%s: invalid split-mode '%s', must be 'none', 'layer', or "
+              "'row'.\n",
+              __func__,
+              it->second.c_str()));
     }
+    configFilemap.erase(it);
   }
 
   auto deviceIt = configFilemap.find("device");
