@@ -433,7 +433,14 @@ inline js_value_t* finetune(js_env_t* env, js_callback_info_t* info) try {
 JSCATCH
 
 inline js_value_t*
-getGpuDeviceCount(js_env_t* env, js_callback_info_t* /*info*/) try {
+getGpuDeviceCount(js_env_t* env, js_callback_info_t* info) try {
+  std::string backendsDir;
+  auto args = js::getArguments(env, info);
+  if (!args.empty() && js::is<js::String>(env, args[0])) {
+    backendsDir = js::String(env, args[0]).as<std::string>(env);
+  }
+  LlamaLazyInitializeBackend::initialize(backendsDir);
+
   auto count =
       static_cast<int64_t>(backend_selection::getEffectiveGpuDeviceCount());
   return js::Number::create(env, count);
