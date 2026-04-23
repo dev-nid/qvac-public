@@ -1,6 +1,7 @@
 'use strict'
 
 const test = require('brittle')
+const process = require('bare-process')
 const LlmLlamacpp = require('../../index.js')
 const { ensureModel } = require('./utils')
 const { attachSpecLogger } = require('./spec-logger')
@@ -31,8 +32,7 @@ async function collectResponse (response) {
   return chunks.join('').trim()
 }
 
-const gpuCount = LlmLlamacpp.getGpuDeviceCount()
-const hasMultiGpu = gpuCount >= 2
+const hasMultiGpu = process.env.QVAC_HAS_MULTI_GPU === '1'
 
 const BASE_CONFIG = {
   device: 'gpu',
@@ -44,7 +44,7 @@ const BASE_CONFIG = {
 
 async function runMultiGpuTest (t, extraConfig, assertDevices) {
   if (!hasMultiGpu) {
-    t.comment(`Skipping: detected ${gpuCount} GPU(s), requires at least 2`)
+    t.comment('Skipping: QVAC_HAS_MULTI_GPU is not set')
     return
   }
 

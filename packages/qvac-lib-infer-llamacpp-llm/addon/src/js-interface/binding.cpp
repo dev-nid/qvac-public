@@ -28,7 +28,6 @@ qvacLibInferenceAddonLlamaExports(js_env_t* env, js_value_t* exports) {
     qvac_lib_inference_addon_cpp::JsInterface::destroyInstance)
   V("setLogger", qvac_lib_inference_addon_cpp::JsInterface::setLogger)
   V("releaseLogger", qvac_lib_inference_addon_cpp::JsInterface::releaseLogger)
-  V("getGpuDeviceCount", qvac_lib_inference_addon_llama::getGpuDeviceCount)
 
 #undef V
   return exports;

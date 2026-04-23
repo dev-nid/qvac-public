@@ -12,7 +12,6 @@
 
 #include "model-interface/LlamaFinetuningParams.hpp"
 #include "model-interface/LlamaModel.hpp"
-#include "utils/BackendSelection.hpp"
 
 namespace qvac_lib_inference_addon_llama {
 
@@ -429,21 +428,6 @@ inline js_value_t* finetune(js_env_t* env, js_callback_info_t* info) try {
   prompt.progressCallback = makeQueueProgressCallback(instance);
 
   return instance.runJob(any(std::move(prompt)));
-}
-JSCATCH
-
-inline js_value_t*
-getGpuDeviceCount(js_env_t* env, js_callback_info_t* info) try {
-  std::string backendsDir;
-  auto args = js::getArguments(env, info);
-  if (!args.empty() && js::is<js::String>(env, args[0])) {
-    backendsDir = js::String(env, args[0]).as<std::string>(env);
-  }
-  LlamaLazyInitializeBackend::initialize(backendsDir);
-
-  auto count =
-      static_cast<int64_t>(backend_selection::getEffectiveGpuDeviceCount());
-  return js::Number::create(env, count);
 }
 JSCATCH
 

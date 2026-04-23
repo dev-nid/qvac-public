@@ -7,7 +7,6 @@
 #### Multi-GPU pipeline parallelism via `split-mode` config
 
 - New `split-mode` (`'none'` | `'layer'` | `'row'`) and `tensor-split` config options enable distributing a model across multiple GPUs via pipeline or tensor parallelism.
-- Also adds `getGpuDeviceCount()` which returns the number of available GPU devices.
 
 ## [0.16.0] - 2026-04-14
 

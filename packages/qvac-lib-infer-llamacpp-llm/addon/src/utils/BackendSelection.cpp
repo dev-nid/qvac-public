@@ -416,16 +416,3 @@ backend_selection::getEffectiveGpuDeviceCount(const BackendInterface& bckI) {
   }
   return gpuCount > 0 ? gpuCount : igpuCount;
 }
-
-size_t backend_selection::getEffectiveGpuDeviceCount() {
-  BackendInterface bckI{
-      ggml_backend_dev_count,
-      ggml_backend_dev_backend_reg,
-      ggml_backend_dev_get,
-      ggml_backend_reg_name,
-      ggml_backend_dev_description,
-      ggml_backend_dev_name,
-      ggml_backend_dev_type,
-      nullptr};
-  return getEffectiveGpuDeviceCount(bckI);
-}

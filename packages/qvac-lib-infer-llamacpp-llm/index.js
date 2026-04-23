@@ -436,7 +436,3 @@ class LlmLlamacpp {
 
 module.exports = LlmLlamacpp
 module.exports.pickPrimaryGgufPath = pickPrimaryGgufPath
-module.exports.getGpuDeviceCount = function getGpuDeviceCount () {
-  const backendsDir = path.join(__dirname, 'prebuilds')
-  return require('./binding').getGpuDeviceCount(backendsDir)
-}
