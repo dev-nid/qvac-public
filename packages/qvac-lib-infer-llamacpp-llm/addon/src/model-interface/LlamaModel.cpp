@@ -793,7 +793,7 @@ void LlamaModel::commonParamsParse(
       configVector.emplace_back("--device");
       configVector.emplace_back(chosenBackend.second);
     }
-    configFilemap.erase(deviceIt);
+    configFilemap.erase("device");
   }
 
   tuneConfigMap(
