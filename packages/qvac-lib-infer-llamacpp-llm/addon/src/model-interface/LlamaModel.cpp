@@ -770,13 +770,13 @@ void LlamaModel::commonParamsParse(
     } else if (chosenBackend.first == BackendType::CPU) {
       params.mmproj_use_gpu = false;
       runtimeBackendDevice_ = 0;
+      params.split_mode = LLAMA_SPLIT_MODE_NONE;
       if (splitMode != LLAMA_SPLIT_MODE_NONE) {
         QLOG_IF(
             Priority::WARNING,
             "[LlamaModel] split-mode, tensor-split and main-gpu ignored: "
             "no GPU backend available, falling back to CPU\n");
         splitMode = LLAMA_SPLIT_MODE_NONE;
-        params.split_mode = LLAMA_SPLIT_MODE_NONE;
         configFilemap.erase("tensor-split");
         params.main_gpu = -1;
       }
