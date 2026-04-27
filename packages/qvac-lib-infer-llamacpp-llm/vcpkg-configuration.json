@@ -14,5 +14,8 @@
         "picojson"
       ]
     }
+  ],
+  "overlay-ports": [
+    "./overlay-ports/qvac-fabric"
   ]
 }
