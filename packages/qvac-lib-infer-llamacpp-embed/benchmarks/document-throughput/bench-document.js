@@ -9,20 +9,24 @@ const { generateDocument, chunkDocument, getDocumentStats } = require('./generat
 
 const MODELS = {
   gte: {
-    url: 'https://huggingface.co/ChristianAzinn/gte-large-gguf/resolve/main/gte-large_fp16.gguf',
-    filename: 'gte-large_fp16.gguf'
+    url: 'https://huggingface.co/ChristianAzinn/gte-large-gguf/resolve/main/gte-large.Q8_0.gguf',
+    filename: 'gte-large.Q8_0.gguf',
+    label: 'GTE-Large (Q8_0)'
   },
   gemma: {
     url: 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf',
-    filename: 'embeddinggemma-300M-Q8_0.gguf'
+    filename: 'embeddinggemma-300M-Q8_0.gguf',
+    label: 'EmbeddingGemma-300M (Q8_0)'
   }
 }
+
 const CHUNK_CONFIGS = [
   { label: 'small (64w, 10w overlap)', chunkSize: 64, overlap: 10 },
   { label: 'medium (128w, 20w overlap)', chunkSize: 128, overlap: 20 },
   { label: 'large (256w, 40w overlap)', chunkSize: 256, overlap: 40 }
 ]
 
+const MULTIPLIERS = [1, 5, 10]
 const WARMUP_RUNS = 2
 const BENCH_REPEATS = 3
 
@@ -222,109 +226,15 @@ function round (val, decimals) {
   return Math.round(val * factor) / factor
 }
 
-function printResults (docStats, results, loadMs, device, modelFilename) {
-  console.log('\n' + '='.repeat(72))
-  console.log('DOCUMENT THROUGHPUT BENCHMARK RESULTS')
-  console.log('='.repeat(72))
-
-  console.log('\nDocument:')
-  console.log('  Words:      ' + docStats.words)
-  console.log('  Characters: ' + docStats.chars)
-  console.log('  Paragraphs: ' + docStats.paragraphs)
-  console.log('  Est. pages: ' + docStats.pages)
-
-  console.log('\nModel: ' + modelFilename)
-  console.log('Device: ' + device)
-  console.log('Load time: ' + round(loadMs) + 'ms')
-  console.log('Warmup runs: ' + WARMUP_RUNS)
-  console.log('Bench repeats: ' + BENCH_REPEATS)
-
-  console.log('\n' + '-'.repeat(72))
-  console.log(padRight('Chunk Config', 30) + padRight('Chunks', 8) + padRight('Avg(ms)', 10) + padRight('Min(ms)', 10) + padRight('Max(ms)', 10) + padRight('TPS', 10) + 'Chunks/s')
-  console.log('-'.repeat(72))
-
-  for (const r of results) {
-    console.log(
-      padRight(r.configLabel, 30) +
-      padRight(String(r.numChunks), 8) +
-      padRight(String(r.avgMs), 10) +
-      padRight(String(r.minMs), 10) +
-      padRight(String(r.maxMs), 10) +
-      padRight(r.avgTps != null ? String(r.avgTps) : 'n/a', 10) +
-      String(r.chunksPerSec)
-    )
-  }
-
-  console.log('-'.repeat(72))
-
-  for (const r of results) {
-    console.log('\n  [' + r.configLabel + ']')
-    console.log('    Embeddings produced: ' + r.embeddingCount + ' x ' + r.embeddingDim + 'd')
-    console.log('    Individual run times: ' + r.timings.join('ms, ') + 'ms')
-    const docsPerMin = round((60000 / r.avgMs), 1)
-    console.log('    Estimated 10-page docs/min: ' + docsPerMin)
-  }
-
-  console.log('\n' + '='.repeat(72))
-}
-
 function padRight (str, len) {
   if (str.length >= len) return str
   return str + ' '.repeat(len - str.length)
 }
 
-function writeReport (docStats, results, loadMs, device, splitMode, tensorSplit, modelFilename) {
-  const reportDir = path.resolve(__dirname, 'results')
-  fs.mkdirSync(reportDir, { recursive: true })
-
-  const now = new Date()
-  const dateStr = now.toISOString().slice(0, 10)
-  const reportPath = path.join(reportDir, 'document-throughput-' + dateStr + '.json')
-
-  const report = {
-    timestamp: now.toISOString(),
-    model: modelFilename,
-    device,
-    splitMode,
-    tensorSplit: tensorSplit || null,
-    loadMs: round(loadMs),
-    warmupRuns: WARMUP_RUNS,
-    benchRepeats: BENCH_REPEATS,
-    document: docStats,
-    platform: {
-      os: os.platform(),
-      arch: os.arch()
-    },
-    results
-  }
-
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
-  console.log('\nReport saved to: ' + reportPath)
-  return reportPath
-}
-
-async function main () {
-  const args = parseArgs(process.argv)
-  const device = args.device || 'gpu'
-  const batchSize = parseInt(args['batch-size'] || '2048', 10)
-  const splitMode = args['split-mode'] || 'none'
-  const tensorSplit = args['tensor-split'] || null
-  const multiplier = parseInt(args.multiply || '1', 10)
-  if (multiplier < 1 || !Number.isFinite(multiplier)) {
-    throw new Error('--multiply must be a positive integer (got: ' + args.multiply + ')')
-  }
-
-  const modelConfig = args.gemma ? MODELS.gemma : MODELS.gte
-
-  console.log('=== 10-Page Document Throughput Benchmark ===\n')
-
-  const baseDocument = generateDocument()
-  const document = multiplier > 1
-    ? Array(multiplier).fill(baseDocument).join('\n\n')
-    : baseDocument
-  const docStats = getDocumentStats(document)
-  const multiplierLabel = multiplier > 1 ? ' (' + multiplier + 'x)' : ''
-  console.log('Generated document: ' + docStats.words + ' words, ~' + docStats.pages + ' pages' + multiplierLabel)
+async function benchmarkModel (modelKey, modelConfig, device, batchSize, splitMode, tensorSplit) {
+  console.log('\n' + '#'.repeat(72))
+  console.log('# MODEL: ' + modelConfig.label)
+  console.log('#'.repeat(72))
 
   const modelPath = await ensureModel(modelConfig)
 
@@ -334,22 +244,436 @@ async function main () {
   const { model, loadMs, device: resolvedDevice } = await loadModel(modelPath, device, batchSize, splitMode, tensorSplit)
   console.log('Model loaded in ' + round(loadMs) + 'ms')
 
-  const results = []
+  const baseDocument = generateDocument()
+  const scaleResults = []
 
   try {
-    for (const cfg of CHUNK_CONFIGS) {
-      const chunks = chunkDocument(document, cfg.chunkSize, cfg.overlap)
-      const result = await benchmarkChunkConfig(model, chunks, cfg.label)
-      results.push(result)
-    }
+    for (const multiplier of MULTIPLIERS) {
+      const scaleLabel = multiplier + 'x'
+      console.log('\n' + '='.repeat(60))
+      console.log('  Scale: ' + scaleLabel + (multiplier > 1 ? ' (' + multiplier + ' x base document)' : ' (base document)'))
+      console.log('='.repeat(60))
 
-    printResults(docStats, results, loadMs, resolvedDevice, modelConfig.filename)
-    writeReport(docStats, results, loadMs, resolvedDevice, splitMode, tensorSplit, modelConfig.filename)
+      const document = multiplier > 1
+        ? Array(multiplier).fill(baseDocument).join('\n\n')
+        : baseDocument
+      const docStats = getDocumentStats(document)
+      console.log('  Words: ' + docStats.words + ', ~' + docStats.pages + ' pages')
+
+      const chunkResults = []
+      for (const cfg of CHUNK_CONFIGS) {
+        const chunks = chunkDocument(document, cfg.chunkSize, cfg.overlap)
+        const result = await benchmarkChunkConfig(model, chunks, cfg.label)
+        chunkResults.push(result)
+      }
+
+      scaleResults.push({
+        multiplier,
+        scaleLabel,
+        docStats,
+        results: chunkResults
+      })
+
+      printScaleResults(docStats, chunkResults, scaleLabel)
+    }
   } finally {
-    console.log('\nUnloading model...')
+    console.log('\nUnloading model: ' + modelConfig.label + '...')
     await model.unload()
     console.log('Done.')
   }
+
+  return {
+    modelKey,
+    label: modelConfig.label,
+    filename: modelConfig.filename,
+    loadMs: round(loadMs),
+    device: resolvedDevice,
+    scaleResults
+  }
+}
+
+function printScaleResults (docStats, results, scaleLabel) {
+  console.log('\n  --- ' + scaleLabel + ' Results ---')
+  console.log('  ' + padRight('Chunk Config', 30) + padRight('Chunks', 8) + padRight('Avg(ms)', 10) + padRight('TPS', 10) + 'Chunks/s')
+  console.log('  ' + '-'.repeat(68))
+  for (const r of results) {
+    console.log('  ' +
+      padRight(r.configLabel, 30) +
+      padRight(String(r.numChunks), 8) +
+      padRight(String(r.avgMs), 10) +
+      padRight(r.avgTps != null ? String(r.avgTps) : 'n/a', 10) +
+      String(r.chunksPerSec)
+    )
+  }
+}
+
+function generateReport (allModelResults, device, splitMode, tensorSplit) {
+  const W = 80
+  const lines = []
+
+  function hr (ch) { lines.push(ch.repeat(W)) }
+  function blank () { lines.push('') }
+  function heading (text) {
+    blank()
+    hr('=')
+    lines.push(text)
+    hr('=')
+    blank()
+  }
+  function subheading (text) {
+    blank()
+    lines.push(text)
+    hr('-')
+    blank()
+  }
+
+  heading('DOCUMENT EMBEDDING BENCHMARK — FULL REPORT')
+
+  lines.push('Date:     ' + new Date().toISOString())
+  lines.push('Device:   ' + device)
+  lines.push('Platform: ' + os.platform() + ' / ' + os.arch())
+  lines.push('Warmup:   ' + WARMUP_RUNS + ' runs')
+  lines.push('Repeats:  ' + BENCH_REPEATS + ' per config')
+  lines.push('Scales:   ' + MULTIPLIERS.map(function (m) { return m + 'x' }).join(', '))
+  blank()
+  lines.push('Models tested:')
+  for (const mr of allModelResults) {
+    lines.push('  - ' + mr.label + ' (load: ' + mr.loadMs + 'ms)')
+  }
+
+  for (const mr of allModelResults) {
+    heading('Results Summary — ' + mr.label)
+
+    for (const sr of mr.scaleResults) {
+      subheading(sr.scaleLabel + ' Scale — ' + sr.docStats.words + ' words, ~' + sr.docStats.pages + ' pages')
+
+      lines.push(
+        padRight('Chunk Config', 32) +
+        padRight('Chunks', 8) +
+        padRight('Avg(ms)', 10) +
+        padRight('Min(ms)', 10) +
+        padRight('Max(ms)', 10) +
+        padRight('TPS', 10) +
+        'Chunks/s'
+      )
+      lines.push('-'.repeat(W))
+
+      for (const r of sr.results) {
+        lines.push(
+          padRight(r.configLabel, 32) +
+          padRight(String(r.numChunks), 8) +
+          padRight(String(r.avgMs), 10) +
+          padRight(String(r.minMs), 10) +
+          padRight(String(r.maxMs), 10) +
+          padRight(r.avgTps != null ? String(r.avgTps) : 'n/a', 10) +
+          String(r.chunksPerSec)
+        )
+      }
+      blank()
+
+      for (const r of sr.results) {
+        lines.push('  [' + r.configLabel + ']')
+        lines.push('    Embeddings: ' + r.embeddingCount + ' x ' + r.embeddingDim + 'd')
+        lines.push('    Runs: ' + r.timings.join('ms, ') + 'ms')
+        const docsPerMin = round((60000 / r.avgMs), 1)
+        lines.push('    Est. docs/min at this scale: ' + docsPerMin)
+        blank()
+      }
+    }
+  }
+
+  heading('Scaling Analysis (1x to 10x Scale)')
+
+  for (const mr of allModelResults) {
+    subheading(mr.label)
+
+    const scale1 = mr.scaleResults.find(function (s) { return s.multiplier === 1 })
+    const scale10 = mr.scaleResults.find(function (s) { return s.multiplier === 10 })
+    if (!scale1 || !scale10) continue
+
+    lines.push(
+      padRight('Chunk Config', 32) +
+      padRight('1x ms', 10) +
+      padRight('10x ms', 10) +
+      padRight('Ratio', 8) +
+      padRight('1x TPS', 10) +
+      padRight('10x TPS', 10) +
+      'TPS delta'
+    )
+    lines.push('-'.repeat(W))
+
+    for (let i = 0; i < CHUNK_CONFIGS.length; i++) {
+      const r1 = scale1.results[i]
+      const r10 = scale10.results[i]
+      const ratio = round(r10.avgMs / r1.avgMs, 1)
+      const tps1 = r1.avgTps != null ? String(r1.avgTps) : 'n/a'
+      const tps10 = r10.avgTps != null ? String(r10.avgTps) : 'n/a'
+      let tpsDelta = 'n/a'
+      if (r1.avgTps != null && r10.avgTps != null && r1.avgTps > 0) {
+        const pct = round(((r10.avgTps - r1.avgTps) / r1.avgTps) * 100, 1)
+        tpsDelta = (pct >= 0 ? '+' : '') + pct + '%'
+      }
+      lines.push(
+        padRight(r1.configLabel, 32) +
+        padRight(String(r1.avgMs), 10) +
+        padRight(String(r10.avgMs), 10) +
+        padRight(ratio + 'x', 8) +
+        padRight(tps1, 10) +
+        padRight(tps10, 10) +
+        tpsDelta
+      )
+    }
+    blank()
+
+    lines.push('  Observations:')
+    for (let i = 0; i < CHUNK_CONFIGS.length; i++) {
+      const r1 = scale1.results[i]
+      const r10 = scale10.results[i]
+      const ratio = round(r10.avgMs / r1.avgMs, 1)
+      const chunkRatio = round(r10.numChunks / r1.numChunks, 1)
+      const efficiency = round((chunkRatio / ratio) * 100, 1)
+      lines.push('  - ' + r1.configLabel + ': ' + ratio + 'x time for ' + chunkRatio + 'x chunks (' + efficiency + '% linear scaling efficiency)')
+    }
+    blank()
+  }
+
+  heading('Key Findings & Recommendations')
+
+  const findings = []
+
+  for (const mr of allModelResults) {
+    const scale1 = mr.scaleResults.find(function (s) { return s.multiplier === 1 })
+    const scale10 = mr.scaleResults.find(function (s) { return s.multiplier === 10 })
+    if (!scale1 || !scale10) continue
+
+    let bestTps = 0
+    let bestTpsChunk = ''
+    let bestScale = ''
+    for (const sr of mr.scaleResults) {
+      for (const r of sr.results) {
+        if (r.avgTps != null && r.avgTps > bestTps) {
+          bestTps = r.avgTps
+          bestTpsChunk = r.configLabel
+          bestScale = sr.scaleLabel
+        }
+      }
+    }
+
+    const mediumResults = mr.scaleResults.map(function (sr) { return sr.results[1] })
+    const tpsArr = mediumResults.map(function (r) { return r.avgTps }).filter(function (t) { return t != null })
+    const avgTpsAcrossScales = tpsArr.length > 0 ? round(tpsArr.reduce(function (a, b) { return a + b }, 0) / tpsArr.length) : null
+
+    findings.push({
+      label: mr.label,
+      loadMs: mr.loadMs,
+      bestTps,
+      bestTpsChunk,
+      bestScale,
+      avgTpsMedium: avgTpsAcrossScales,
+      dim: scale1.results[0].embeddingDim
+    })
+  }
+
+  for (const f of findings) {
+    lines.push(f.label + ':')
+    lines.push('  - Load time: ' + f.loadMs + 'ms')
+    lines.push('  - Embedding dimension: ' + f.dim + 'd')
+    lines.push('  - Peak throughput: ' + f.bestTps + ' TPS (' + f.bestTpsChunk + ' @ ' + f.bestScale + ')')
+    if (f.avgTpsMedium != null) {
+      lines.push('  - Avg TPS (medium chunks, all scales): ' + f.avgTpsMedium)
+    }
+    blank()
+  }
+
+  lines.push('Recommendations:')
+  blank()
+
+  if (findings.length >= 2) {
+    const sorted = findings.slice().sort(function (a, b) { return b.bestTps - a.bestTps })
+    const faster = sorted[0]
+    const slower = sorted[1]
+    if (faster.bestTps > 0 && slower.bestTps > 0) {
+      const speedup = round(faster.bestTps / slower.bestTps, 1)
+      lines.push('  - ' + faster.label + ' achieves ' + speedup + 'x higher peak TPS than ' + slower.label)
+    }
+    if (faster.loadMs < slower.loadMs) {
+      lines.push('  - ' + faster.label + ' also loads faster (' + faster.loadMs + 'ms vs ' + slower.loadMs + 'ms)')
+    }
+  }
+
+  lines.push('  - Larger chunks (256w) produce fewer embeddings with higher throughput per chunk')
+  lines.push('  - Smaller chunks (64w) offer finer retrieval granularity at the cost of more embeddings')
+  lines.push('  - For bulk ingestion, prefer large batch sizes with 256w chunks to maximize throughput')
+  lines.push('  - For interactive/real-time use, medium chunks (128w) balance latency and quality')
+
+  heading('Comparison: EmbeddingGemma-300M vs. GTE-Large')
+
+  if (findings.length >= 2) {
+    const gteF = findings.find(function (f) { return f.label.indexOf('GTE') !== -1 })
+    const gemmaF = findings.find(function (f) { return f.label.indexOf('Gemma') !== -1 })
+    const gteR = allModelResults.find(function (m) { return m.modelKey === 'gte' })
+    const gemmaR = allModelResults.find(function (m) { return m.modelKey === 'gemma' })
+
+    if (gteF && gemmaF && gteR && gemmaR) {
+      lines.push(
+        padRight('Metric', 36) +
+        padRight(gteF.label, 22) +
+        gemmaF.label
+      )
+      lines.push('-'.repeat(W))
+      lines.push(
+        padRight('Embedding Dimension', 36) +
+        padRight(gteF.dim + 'd', 22) +
+        gemmaF.dim + 'd'
+      )
+      lines.push(
+        padRight('Model Load Time', 36) +
+        padRight(gteF.loadMs + 'ms', 22) +
+        gemmaF.loadMs + 'ms'
+      )
+      lines.push(
+        padRight('Peak TPS', 36) +
+        padRight(String(gteF.bestTps), 22) +
+        String(gemmaF.bestTps)
+      )
+      if (gteF.avgTpsMedium != null && gemmaF.avgTpsMedium != null) {
+        lines.push(
+          padRight('Avg TPS (medium chunks)', 36) +
+          padRight(String(gteF.avgTpsMedium), 22) +
+          String(gemmaF.avgTpsMedium)
+        )
+      }
+      blank()
+
+      for (const sr of gteR.scaleResults) {
+        const gemmaSr = gemmaR.scaleResults.find(function (s) { return s.multiplier === sr.multiplier })
+        if (!gemmaSr) continue
+
+        lines.push(sr.scaleLabel + ' scale:')
+        lines.push(
+          '  ' + padRight('Chunk Config', 30) +
+          padRight('GTE ms', 10) +
+          padRight('Gemma ms', 10) +
+          padRight('GTE TPS', 10) +
+          padRight('Gemma TPS', 10) +
+          'Winner'
+        )
+        lines.push('  ' + '-'.repeat(W - 2))
+
+        for (let i = 0; i < sr.results.length; i++) {
+          const gR = sr.results[i]
+          const eR = gemmaSr.results[i]
+          let winner = 'tie'
+          if (gR.avgMs < eR.avgMs) winner = 'GTE'
+          else if (eR.avgMs < gR.avgMs) winner = 'Gemma'
+
+          lines.push('  ' +
+            padRight(gR.configLabel, 30) +
+            padRight(String(gR.avgMs), 10) +
+            padRight(String(eR.avgMs), 10) +
+            padRight(gR.avgTps != null ? String(gR.avgTps) : 'n/a', 10) +
+            padRight(eR.avgTps != null ? String(eR.avgTps) : 'n/a', 10) +
+            winner
+          )
+        }
+        blank()
+      }
+
+      blank()
+      lines.push('Summary:')
+      blank()
+
+      if (gteF.bestTps > gemmaF.bestTps) {
+        const ratio = round(gteF.bestTps / gemmaF.bestTps, 1)
+        lines.push('  GTE-Large is ~' + ratio + 'x faster in peak TPS.')
+      } else if (gemmaF.bestTps > gteF.bestTps) {
+        const ratio = round(gemmaF.bestTps / gteF.bestTps, 1)
+        lines.push('  EmbeddingGemma-300M is ~' + ratio + 'x faster in peak TPS.')
+      } else {
+        lines.push('  Both models have comparable peak TPS.')
+      }
+
+      if (gteF.dim !== gemmaF.dim) {
+        lines.push('  GTE produces ' + gteF.dim + 'd embeddings, Gemma produces ' + gemmaF.dim + 'd.')
+        if (gteF.dim > gemmaF.dim) {
+          lines.push('  GTE\'s higher dimension may offer richer representations at the cost of more storage.')
+        } else {
+          lines.push('  Gemma\'s higher dimension may offer richer representations at the cost of more storage.')
+        }
+      }
+
+      if (gteF.loadMs < gemmaF.loadMs) {
+        lines.push('  GTE loads ' + round(gemmaF.loadMs / gteF.loadMs, 1) + 'x faster.')
+      } else if (gemmaF.loadMs < gteF.loadMs) {
+        lines.push('  Gemma loads ' + round(gteF.loadMs / gemmaF.loadMs, 1) + 'x faster.')
+      }
+    }
+  } else {
+    lines.push('  (Only one model was tested — comparison unavailable)')
+  }
+
+  blank()
+  hr('=')
+  lines.push('END OF REPORT')
+  hr('=')
+  blank()
+
+  return lines.join('\n')
+}
+
+function writeFullReport (allModelResults, device, splitMode, tensorSplit) {
+  const reportDir = path.resolve(__dirname, 'results')
+  fs.mkdirSync(reportDir, { recursive: true })
+
+  const now = new Date()
+  const dateStr = now.toISOString().slice(0, 10)
+
+  const reportText = generateReport(allModelResults, device, splitMode, tensorSplit)
+  const textPath = path.join(reportDir, 'benchmark-report-' + dateStr + '.txt')
+  fs.writeFileSync(textPath, reportText)
+  console.log('\nReport saved to: ' + textPath)
+
+  const jsonReport = {
+    timestamp: now.toISOString(),
+    device,
+    splitMode,
+    tensorSplit: tensorSplit || null,
+    warmupRuns: WARMUP_RUNS,
+    benchRepeats: BENCH_REPEATS,
+    multipliers: MULTIPLIERS,
+    platform: { os: os.platform(), arch: os.arch() },
+    models: allModelResults
+  }
+  const jsonPath = path.join(reportDir, 'benchmark-report-' + dateStr + '.json')
+  fs.writeFileSync(jsonPath, JSON.stringify(jsonReport, null, 2))
+  console.log('JSON data saved to: ' + jsonPath)
+
+  return { textPath, jsonPath, reportText }
+}
+
+async function main () {
+  const args = parseArgs(process.argv)
+  const device = args.device || 'gpu'
+  const batchSize = parseInt(args['batch-size'] || '2048', 10)
+  const splitMode = args['split-mode'] || 'none'
+  const tensorSplit = args['tensor-split'] || null
+
+  console.log('=== Document Embedding Benchmark: GTE vs EmbeddingGemma ===')
+  console.log('Scales: ' + MULTIPLIERS.map(function (m) { return m + 'x' }).join(', '))
+  console.log('Chunk configs: ' + CHUNK_CONFIGS.length)
+  console.log('')
+
+  const allModelResults = []
+
+  for (const modelKey of Object.keys(MODELS)) {
+    const result = await benchmarkModel(modelKey, MODELS[modelKey], device, batchSize, splitMode, tensorSplit)
+    allModelResults.push(result)
+  }
+
+  const { reportText } = writeFullReport(allModelResults, device, splitMode, tensorSplit)
+
+  console.log('\n')
+  console.log(reportText)
 }
 
 main().catch((error) => {
