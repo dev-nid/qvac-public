@@ -7,8 +7,16 @@ const os = require('bare-os')
 const GGMLBert = require('../../index')
 const { generateDocument, chunkDocument, getDocumentStats } = require('./generate-document')
 
-const MODEL_URL = 'https://huggingface.co/ChristianAzinn/gte-large-gguf/resolve/main/gte-large_fp16.gguf'
-const MODEL_FILENAME = 'gte-large_fp16.gguf'
+const MODELS = {
+  gte: {
+    url: 'https://huggingface.co/ChristianAzinn/gte-large-gguf/resolve/main/gte-large_fp16.gguf',
+    filename: 'gte-large_fp16.gguf'
+  },
+  gemma: {
+    url: 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf',
+    filename: 'embeddinggemma-300M-Q8_0.gguf'
+  }
+}
 const CHUNK_CONFIGS = [
   { label: 'small (64w, 10w overlap)', chunkSize: 64, overlap: 10 },
   { label: 'medium (128w, 20w overlap)', chunkSize: 128, overlap: 20 },
@@ -93,19 +101,19 @@ async function downloadFile (url, dest) {
   })
 }
 
-async function ensureModel () {
+async function ensureModel (modelConfig) {
   const modelDir = path.resolve(__dirname, '../../test/model')
-  const modelPath = path.join(modelDir, MODEL_FILENAME)
+  const modelPath = path.join(modelDir, modelConfig.filename)
 
   if (fs.existsSync(modelPath)) {
     const stats = fs.statSync(modelPath)
-    console.log('Model found: ' + MODEL_FILENAME + ' (' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)')
+    console.log('Model found: ' + modelConfig.filename + ' (' + (stats.size / 1024 / 1024).toFixed(1) + 'MB)')
     return modelPath
   }
 
   fs.mkdirSync(modelDir, { recursive: true })
-  console.log('Downloading model: ' + MODEL_FILENAME + '...')
-  await downloadFile(MODEL_URL, modelPath)
+  console.log('Downloading model: ' + modelConfig.filename + '...')
+  await downloadFile(modelConfig.url, modelPath)
   console.log('Download complete.')
   return modelPath
 }
@@ -214,7 +222,7 @@ function round (val, decimals) {
   return Math.round(val * factor) / factor
 }
 
-function printResults (docStats, results, loadMs, device) {
+function printResults (docStats, results, loadMs, device, modelFilename) {
   console.log('\n' + '='.repeat(72))
   console.log('DOCUMENT THROUGHPUT BENCHMARK RESULTS')
   console.log('='.repeat(72))
@@ -225,7 +233,7 @@ function printResults (docStats, results, loadMs, device) {
   console.log('  Paragraphs: ' + docStats.paragraphs)
   console.log('  Est. pages: ' + docStats.pages)
 
-  console.log('\nModel: ' + MODEL_FILENAME)
+  console.log('\nModel: ' + modelFilename)
   console.log('Device: ' + device)
   console.log('Load time: ' + round(loadMs) + 'ms')
   console.log('Warmup runs: ' + WARMUP_RUNS)
@@ -265,7 +273,7 @@ function padRight (str, len) {
   return str + ' '.repeat(len - str.length)
 }
 
-function writeReport (docStats, results, loadMs, device, splitMode, tensorSplit) {
+function writeReport (docStats, results, loadMs, device, splitMode, tensorSplit, modelFilename) {
   const reportDir = path.resolve(__dirname, 'results')
   fs.mkdirSync(reportDir, { recursive: true })
 
@@ -275,7 +283,7 @@ function writeReport (docStats, results, loadMs, device, splitMode, tensorSplit)
 
   const report = {
     timestamp: now.toISOString(),
-    model: MODEL_FILENAME,
+    model: modelFilename,
     device,
     splitMode,
     tensorSplit: tensorSplit || null,
@@ -306,6 +314,8 @@ async function main () {
     throw new Error('--multiply must be a positive integer (got: ' + args.multiply + ')')
   }
 
+  const modelConfig = args.gemma ? MODELS.gemma : MODELS.gte
+
   console.log('=== 10-Page Document Throughput Benchmark ===\n')
 
   const baseDocument = generateDocument()
@@ -316,7 +326,7 @@ async function main () {
   const multiplierLabel = multiplier > 1 ? ' (' + multiplier + 'x)' : ''
   console.log('Generated document: ' + docStats.words + ' words, ~' + docStats.pages + ' pages' + multiplierLabel)
 
-  const modelPath = await ensureModel()
+  const modelPath = await ensureModel(modelConfig)
 
   const splitLabel = splitMode !== 'none' ? ', split-mode=' + splitMode : ''
   const tensorLabel = tensorSplit ? ', tensor-split=' + tensorSplit : ''
@@ -333,8 +343,8 @@ async function main () {
       results.push(result)
     }
 
-    printResults(docStats, results, loadMs, resolvedDevice)
-    writeReport(docStats, results, loadMs, resolvedDevice, splitMode, tensorSplit)
+    printResults(docStats, results, loadMs, resolvedDevice, modelConfig.filename)
+    writeReport(docStats, results, loadMs, resolvedDevice, splitMode, tensorSplit, modelConfig.filename)
   } finally {
     console.log('\nUnloading model...')
     await model.unload()
