@@ -184,6 +184,7 @@ async function benchmarkChunkConfig (model, chunks, configLabel) {
   const timings = []
   const tpsValues = []
   let lastEmbeddings = null
+  let backendDevice = null
 
   for (let i = 0; i < BENCH_REPEATS; i++) {
     const runStart = process.hrtime()
@@ -192,6 +193,7 @@ async function benchmarkChunkConfig (model, chunks, configLabel) {
     timings.push(runMs)
     lastEmbeddings = rawEmbeddings
     if (stats.tokens_per_second) tpsValues.push(stats.tokens_per_second)
+    if (stats.backendDevice) backendDevice = stats.backendDevice
   }
 
   const embeddingCount = lastEmbeddings[0] ? lastEmbeddings[0].length : 0
@@ -216,7 +218,8 @@ async function benchmarkChunkConfig (model, chunks, configLabel) {
     maxMs: round(maxMs),
     avgTps: avgTps ? round(avgTps) : null,
     chunksPerSec: round(chunksPerSec),
-    timings: timings.map(round)
+    timings: timings.map(round),
+    backendDevice
   }
 }
 
@@ -282,12 +285,14 @@ async function benchmarkModel (modelKey, modelConfig, device, batchSize, splitMo
     console.log('Done.')
   }
 
+  const runtimeDevice = scaleResults[0]?.results[0]?.backendDevice
+
   return {
     modelKey,
     label: modelConfig.label,
     filename: modelConfig.filename,
     loadMs: round(loadMs),
-    device: resolvedDevice,
+    device: runtimeDevice || resolvedDevice,
     scaleResults
   }
 }
@@ -338,11 +343,11 @@ function generateReport (allModelResults, meta) {
   blank()
   lines.push('Models tested:')
   for (const mr of allModelResults) {
-    lines.push('  - ' + mr.label + ' (load: ' + mr.loadMs + 'ms)')
+    lines.push('  - ' + mr.label + ' (device: ' + mr.device + ', load: ' + mr.loadMs + 'ms)')
   }
 
   for (const mr of allModelResults) {
-    heading('Results Summary — ' + mr.label)
+    heading('Results Summary — ' + mr.label + ' [' + mr.device + ']')
 
     for (const sr of mr.scaleResults) {
       subheading(sr.scaleLabel + ' Scale — ' + sr.docStats.words + ' words, ~' + sr.docStats.pages + ' pages')
@@ -629,7 +634,7 @@ function toJsonLines (allModelResults, meta) {
       for (const r of sr.results) {
         lines.push(JSON.stringify({
           timestamp: meta.timestamp,
-          device: meta.device,
+          device: mr.device,
           splitMode: meta.splitMode,
           tensorSplit: meta.tensorSplit,
           platform: meta.platform,
@@ -676,6 +681,7 @@ function toMarkdown (allModelResults, meta) {
   for (const mr of allModelResults) {
     lines.push('## ' + mr.label)
     lines.push('')
+    lines.push('Device: ' + mr.device)
     lines.push('Load time: ' + mr.loadMs + 'ms')
     lines.push('')
 
@@ -703,14 +709,17 @@ function toMarkdown (allModelResults, meta) {
   return lines.join('\n') + '\n'
 }
 
-function writeFullReport (allModelResults, device, splitMode, tensorSplit) {
+function writeFullReport (allModelResults, splitMode, tensorSplit) {
   const reportDir = path.resolve(__dirname, 'results')
   fs.mkdirSync(reportDir, { recursive: true })
+
+  const devices = [...new Set(allModelResults.map(function (mr) { return mr.device }))]
+  const deviceLabel = devices.join(', ')
 
   const now = new Date()
   const meta = {
     timestamp: now.toISOString(),
-    device,
+    device: deviceLabel,
     splitMode,
     tensorSplit: tensorSplit || null,
     platform: { os: os.platform(), arch: os.arch() }
@@ -761,7 +770,7 @@ async function main () {
     allModelResults.push(result)
   }
 
-  const { reportText } = writeFullReport(allModelResults, device, splitMode, tensorSplit)
+  const { reportText } = writeFullReport(allModelResults, splitMode, tensorSplit)
 
   console.log('\n')
   console.log(reportText)
