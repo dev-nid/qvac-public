@@ -45,7 +45,7 @@ A comma-separated string of proportions that control how much of the model each 
 'tensor-split': '2,2,1'   // 40/40/20 across 3 GPUs
 ```
 
-The values are relative weights, not absolute sizes. llama.cpp normalizes them internally so `'1,1'` and `'50,50'` produce the same result.
+The values are relative weights, not absolute sizes. qvac-fabric normalizes them internally so `'1,1'` and `'50,50'` produce the same result.
 
 - In `layer` mode: controls how many layers are assigned to each GPU (proportional to the weights).
 - In `row` mode on CUDA/SYCL: controls both layer assignment **and** the row-wise split ratio within each layer's weight tensors. On Vulkan/Metal, only the layer assignment applies (same as `layer` mode).
@@ -58,24 +58,24 @@ Selects which GPU to use. The behavior depends on the split mode:
 | Split mode | `main-gpu` role |
 |------------|----------------|
 | `'none'`   | Picks the **sole GPU** for the entire model. |
-| `'row'`    | Selects the GPU for **intermediate results and KV cache** (per llama.cpp CLI documentation). |
-| `'layer'`  | Not used by llama.cpp for layer distribution. |
+| `'row'`    | Selects the GPU for **intermediate results and KV cache** (per qvac-fabric CLI documentation). |
+| `'layer'`  | Not used by qvac-fabric for layer distribution. |
 
 In the qvac addon, `main-gpu` also influences **backend selection** (choosing between integrated and dedicated GPUs) before the split-mode logic runs.
 
 | Value | Behavior |
 |-------|----------|
-| integer (e.g. `'0'`, `'1'`) | Select GPU by device index. Forwarded to llama.cpp as `--main-gpu`. |
-| `'integrated'` | Filter to integrated GPUs only during backend selection. **Ignored in multi-GPU split modes** (warning logged). |
-| `'dedicated'`  | Filter to dedicated GPUs only during backend selection. **Ignored in multi-GPU split modes** (warning logged). |
+| integer (e.g. `'0'`, `'1'`) | Select GPU by device index. Forwarded to qvac-fabric as `--main-gpu`. |
+| `'integrated'` | Filter to integrated GPUs only during backend selection. In multi-GPU split modes, still affects backend selection (may cause CPU fallback if no matching GPU exists) but is **not forwarded** to qvac-fabric as `--main-gpu` (warning logged). Use an integer device index instead. |
+| `'dedicated'`  | Filter to dedicated GPUs only during backend selection. In multi-GPU split modes, still affects backend selection (may cause CPU fallback if no matching GPU exists) but is **not forwarded** to qvac-fabric as `--main-gpu` (warning logged). Use an integer device index instead. |
 
 Accepts both `main-gpu` (hyphen) and `main_gpu` (underscore). Providing both throws an error. The string values are case-insensitive.
 
 **In `none` mode:** `main-gpu` selects the GPU for the entire model. Integer values pick by device index; `'integrated'`/`'dedicated'` filter by GPU type during [backend selection](#interaction-with-device-and-backend-selection).
 
-**In `row` mode:** `main-gpu` (integer only) selects the GPU for intermediate results and KV cache. The `'integrated'`/`'dedicated'` string values are logged as warnings — use an integer device index instead.
+**In `row` mode:** `main-gpu` (integer only) selects the GPU for intermediate results and KV cache. The `'integrated'`/`'dedicated'` string values still filter the device list during backend selection (which may cause CPU fallback if no matching GPU type exists), but are not forwarded to qvac-fabric as `--main-gpu`. A warning is logged — use an integer device index instead.
 
-**In `layer` mode:** `main-gpu` has no effect on layer distribution — placement is controlled entirely by `tensor-split`.
+**In `layer` mode:** `main-gpu` has no effect on layer distribution — placement is controlled entirely by `tensor-split`. As with `row` mode, `'integrated'`/`'dedicated'` still affect backend selection but are not forwarded to qvac-fabric.
 
 ## How the parameters interact
 
@@ -94,7 +94,7 @@ device ─── 'cpu' ──> All GPU params ignored, CPU inference
                         │   tensor-split has no effect
                         │
                         └── split-mode = 'layer' | 'row'
-                            --device is NOT passed (so llama.cpp sees all GPUs)
+                            --device is NOT passed (so qvac-fabric sees all GPUs)
                             tensor-split proportions forwarded as --tensor-split
                             main-gpu (integer only) forwarded as --main-gpu
                               row: selects GPU for intermediate results and KV
@@ -112,11 +112,11 @@ The `device` parameter is always required and is consumed first. When set to `'g
 After backend selection, the split-mode determines the forwarding strategy:
 
 - **`split-mode: 'none'`** (or omitted): the chosen backend name is passed as `--device <backend>`, pinning inference to that single GPU.
-- **`split-mode: 'layer'` or `'row'`**: `--device` is intentionally **not** passed. This lets llama.cpp discover all available GPUs and distribute the model according to `tensor-split`.
+- **`split-mode: 'layer'` or `'row'`**: `--device` is intentionally **not** passed. This lets qvac-fabric discover all available GPUs and distribute the model according to `tensor-split`.
 
 ### Why `--device` is omitted in split modes
 
-When a split mode is active, passing `--device` would pin all computation to the single backend that `chooseBackend()` selected, defeating the purpose of multi-GPU. By omitting it, llama.cpp's own device enumeration distributes layers or rows across all visible GPU backends.
+When a split mode is active, passing `--device` would pin all computation to the single backend that `chooseBackend()` selected, defeating the purpose of multi-GPU. By omitting it, qvac-fabric's own device enumeration distributes layers or rows across all visible GPU backends.
 
 ## Usage examples
 
@@ -190,7 +190,7 @@ Skips integrated GPUs during backend selection. Falls back to CPU if no discrete
 |----------|--------|
 | `device: 'cpu'` with split params set | All split params silently ignored |
 | `device: 'gpu'` but no GPU available | Falls back to CPU; `split-mode` reset to `'none'`, `tensor-split` erased, warning logged |
-| `split-mode: 'layer'` with `main-gpu: 'dedicated'` | Warning logged: `'dedicated'`/`'integrated'` not supported in multi-GPU split modes; use an integer index |
+| `split-mode: 'layer'` with `main-gpu: 'dedicated'` | `'dedicated'`/`'integrated'` still filters the device list during backend selection — on an iGPU-only system this causes CPU fallback (split-mode reset, tensor-split erased). If a matching GPU is found, a warning is logged and the string value is not forwarded to qvac-fabric; use an integer index |
 | `split-mode: 'none'` with `tensor-split` set | `tensor-split` has no effect (only one GPU is used) |
 | Invalid `split-mode` value | Throws `InvalidArgument` error |
 | Both `split-mode` and `split_mode` provided | Throws `InvalidArgument` error |
