@@ -168,7 +168,7 @@ function hrtimeMs (start) {
 
 async function embedChunks (model, chunks) {
   const response = await model.run(chunks)
-  const rawEmbeddings = await response._finishPromise
+  const rawEmbeddings = await response.await()
   const stats = response.stats || {}
   return { rawEmbeddings, stats }
 }
@@ -307,7 +307,7 @@ function printScaleResults (docStats, results, scaleLabel) {
   }
 }
 
-function generateReport (allModelResults, device, splitMode, tensorSplit) {
+function generateReport (allModelResults, meta) {
   const W = 80
   const lines = []
 
@@ -329,9 +329,9 @@ function generateReport (allModelResults, device, splitMode, tensorSplit) {
 
   heading('DOCUMENT EMBEDDING BENCHMARK — FULL REPORT')
 
-  lines.push('Date:     ' + new Date().toISOString())
-  lines.push('Device:   ' + device)
-  lines.push('Platform: ' + os.platform() + ' / ' + os.arch())
+  lines.push('Date:     ' + meta.timestamp)
+  lines.push('Device:   ' + meta.device)
+  lines.push('Platform: ' + meta.platform.os + ' / ' + meta.platform.arch)
   lines.push('Warmup:   ' + WARMUP_RUNS + ' runs')
   lines.push('Repeats:  ' + BENCH_REPEATS + ' per config')
   lines.push('Scales:   ' + MULTIPLIERS.map(function (m) { return m + 'x' }).join(', '))
@@ -621,34 +621,125 @@ function generateReport (allModelResults, device, splitMode, tensorSplit) {
   return lines.join('\n')
 }
 
+function toJsonLines (allModelResults, meta) {
+  const lines = []
+
+  for (const mr of allModelResults) {
+    for (const sr of mr.scaleResults) {
+      for (const r of sr.results) {
+        lines.push(JSON.stringify({
+          timestamp: meta.timestamp,
+          device: meta.device,
+          splitMode: meta.splitMode,
+          tensorSplit: meta.tensorSplit,
+          platform: meta.platform,
+          warmupRuns: WARMUP_RUNS,
+          benchRepeats: BENCH_REPEATS,
+          modelKey: mr.modelKey,
+          modelLabel: mr.label,
+          modelFilename: mr.filename,
+          loadMs: mr.loadMs,
+          scale: sr.scaleLabel,
+          multiplier: sr.multiplier,
+          docWords: sr.docStats.words,
+          docPages: sr.docStats.pages,
+          chunkConfig: r.configLabel,
+          numChunks: r.numChunks,
+          embeddingCount: r.embeddingCount,
+          embeddingDim: r.embeddingDim,
+          avgMs: r.avgMs,
+          minMs: r.minMs,
+          maxMs: r.maxMs,
+          avgTps: r.avgTps,
+          chunksPerSec: r.chunksPerSec,
+          timings: r.timings
+        }))
+      }
+    }
+  }
+
+  return lines.join('\n') + '\n'
+}
+
+function toMarkdown (allModelResults, meta) {
+  const lines = []
+  lines.push('# Document Embedding Benchmark Report')
+  lines.push('')
+  lines.push('- Date: ' + meta.timestamp)
+  lines.push('- Device: ' + meta.device)
+  lines.push('- Platform: ' + meta.platform.os + ' / ' + meta.platform.arch)
+  lines.push('- Warmup: ' + WARMUP_RUNS + ' runs')
+  lines.push('- Repeats: ' + BENCH_REPEATS + ' per config')
+  lines.push('- Scales: ' + MULTIPLIERS.map(function (m) { return m + 'x' }).join(', '))
+  lines.push('')
+
+  for (const mr of allModelResults) {
+    lines.push('## ' + mr.label)
+    lines.push('')
+    lines.push('Load time: ' + mr.loadMs + 'ms')
+    lines.push('')
+
+    for (const sr of mr.scaleResults) {
+      lines.push('### ' + sr.scaleLabel + ' Scale (' + sr.docStats.words + ' words, ~' + sr.docStats.pages + ' pages)')
+      lines.push('')
+      lines.push('| Chunk Config | Chunks | Avg (ms) | Min (ms) | Max (ms) | TPS | Chunks/s |')
+      lines.push('|---|---:|---:|---:|---:|---:|---:|')
+
+      for (const r of sr.results) {
+        lines.push(
+          '| ' + r.configLabel +
+          ' | ' + r.numChunks +
+          ' | ' + r.avgMs +
+          ' | ' + r.minMs +
+          ' | ' + r.maxMs +
+          ' | ' + (r.avgTps != null ? r.avgTps : 'n/a') +
+          ' | ' + r.chunksPerSec + ' |'
+        )
+      }
+      lines.push('')
+    }
+  }
+
+  return lines.join('\n') + '\n'
+}
+
 function writeFullReport (allModelResults, device, splitMode, tensorSplit) {
   const reportDir = path.resolve(__dirname, 'results')
   fs.mkdirSync(reportDir, { recursive: true })
 
   const now = new Date()
-  const dateStr = now.toISOString().slice(0, 10)
-
-  const reportText = generateReport(allModelResults, device, splitMode, tensorSplit)
-  const textPath = path.join(reportDir, 'benchmark-report-' + dateStr + '.txt')
-  fs.writeFileSync(textPath, reportText)
-  console.log('\nReport saved to: ' + textPath)
-
-  const jsonReport = {
+  const meta = {
     timestamp: now.toISOString(),
     device,
     splitMode,
     tensorSplit: tensorSplit || null,
-    warmupRuns: WARMUP_RUNS,
-    benchRepeats: BENCH_REPEATS,
-    multipliers: MULTIPLIERS,
-    platform: { os: os.platform(), arch: os.arch() },
-    models: allModelResults
+    platform: { os: os.platform(), arch: os.arch() }
   }
-  const jsonPath = path.join(reportDir, 'benchmark-report-' + dateStr + '.json')
-  fs.writeFileSync(jsonPath, JSON.stringify(jsonReport, null, 2))
-  console.log('JSON data saved to: ' + jsonPath)
 
-  return { textPath, jsonPath, reportText }
+  const yyyy = String(now.getFullYear())
+  const mm = String(now.getMonth() + 1).padStart(2, '0')
+  const dd = String(now.getDate()).padStart(2, '0')
+  const hh = String(now.getHours()).padStart(2, '0')
+  const mi = String(now.getMinutes()).padStart(2, '0')
+  const ss = String(now.getSeconds()).padStart(2, '0')
+  const stamp = yyyy + mm + dd + '-' + hh + mi + ss
+
+  const reportText = generateReport(allModelResults, meta)
+  const textPath = path.join(reportDir, 'document-throughput-' + stamp + '.txt')
+  fs.writeFileSync(textPath, reportText)
+  console.log('\nReport saved to: ' + textPath)
+
+  const jsonlContent = toJsonLines(allModelResults, meta)
+  const jsonlPath = path.join(reportDir, 'document-throughput-' + stamp + '.jsonl')
+  fs.writeFileSync(jsonlPath, jsonlContent)
+  console.log('JSONL data saved to: ' + jsonlPath)
+
+  const mdContent = toMarkdown(allModelResults, meta)
+  const mdPath = path.join(reportDir, 'document-throughput-' + stamp + '.md')
+  fs.writeFileSync(mdPath, mdContent)
+  console.log('Markdown saved to: ' + mdPath)
+
+  return { textPath, jsonlPath, mdPath, reportText }
 }
 
 async function main () {
