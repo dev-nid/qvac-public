@@ -478,8 +478,7 @@ bool MtmdLlmContext::generateResponse(
           string_format(
               "[MtmdLlm] Harmony <|call|> stop: tokenId=%d\n", tokenId));
       if (outputCallback) {
-        std::string callMarker =
-            common_token_to_piece(lctx_, tokenId, true);
+        std::string callMarker = common_token_to_piece(lctx_, tokenId, true);
         if (!callMarker.empty()) {
           outputCallback(callMarker);
         }

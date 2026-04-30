@@ -65,7 +65,8 @@ TextLlmContext::TextLlmContext(
     QLOG_IF(
         Priority::DEBUG,
         string_format(
-            "[TextLlm] Harmony detection: isHarmony=%d callToken=%d useJinja=%d\n",
+            "[TextLlm] Harmony detection: isHarmony=%d callToken=%d "
+            "useJinja=%d\n",
             isHarmonyModel_,
             harmonyCallToken_,
             params_.use_jinja));
@@ -534,8 +535,7 @@ bool TextLlmContext::generateResponse(
           string_format(
               "[TextLlm] Harmony <|call|> stop: tokenId=%d\n", tokenId));
       if (outputCallback) {
-        std::string callMarker =
-            common_token_to_piece(lctx_, tokenId, true);
+        std::string callMarker = common_token_to_piece(lctx_, tokenId, true);
         if (!callMarker.empty()) {
           outputCallback(callMarker);
         }
