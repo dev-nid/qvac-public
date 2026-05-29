@@ -6,11 +6,11 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <llama.h>
 #include <inference-addon-cpp/Errors.hpp>
 #include <inference-addon-cpp/RuntimeStats.hpp>
 #include <inference-addon-cpp/queue/OutputCallbackCpp.hpp>
 #include <inference-addon-cpp/queue/OutputQueue.hpp>
+#include <llama.h>
 
 #include "addon/AddonCpp.hpp"
 #include "addon/BertErrors.hpp"
@@ -974,5 +974,6 @@ TEST_F(BertModelTest, CancelMidDecode_ThrowsJobCancelled) {
   EXPECT_EQ(errorMsg, "Job cancelled")
       << "Mid-decode cancel must surface 'Job cancelled', not a generic "
          "decode error like 'Failed to get sequence embeddings'. "
-         "Got: " << errorMsg;
+         "Got: "
+      << errorMsg;
 }
