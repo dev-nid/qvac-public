@@ -53,10 +53,10 @@ void batchDecode(
           .c_str(),
       nullptr);
   if (llama_decode(ctx, batch) < 0) {
-    qvac_lib_infer_llamacpp_embed::logging::llamaLogCallback(
-        GGML_LOG_LEVEL_ERROR,
-        string_format("%s : failed to process\n", __func__).c_str(),
-        nullptr);
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(DecodeFailed),
+        string_format("%s: llama_decode failed", __func__));
   }
 
   std::span<const int8_t> logitsSpan{
