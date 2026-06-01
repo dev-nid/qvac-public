@@ -64,7 +64,22 @@ endif()
 add_bare_module(inference-addon-llama EXPORTS ${BACKEND_DL_LIBS})
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_options(${inference-addon-llama}_module PRIVATE -Wl,--exclude-libs,ALL)
+  # `--exclude-libs,ALL` hides every symbol coming from a static archive from
+  # the addon's dynamic symbol table. With dynamic ggml backends this breaks
+  # dlopen'd `libqvac-ggml-*.so` modules that need to call back into
+  # ggml-base symbols statically archived inside the .bare. Only safe with
+  # fully-static ggml linkage.
+  if(NOT GGML_BACKEND_DL)
+    target_link_options(${inference-addon-llama}_module PRIVATE -Wl,--exclude-libs,ALL)
+  endif()
+
+  # Resolve any inter-backend `.so` references relative to the .bare's own
+  # directory so the dynamic loader picks up the bundled backends in
+  # prebuilds/<bare-target>/inference-addon-llama/ regardless of cwd.
+  # Harmless when GGML_BACKEND_DL is OFF.
+  set_target_properties(${inference-addon-llama}_module PROPERTIES
+    INSTALL_RPATH "$ORIGIN"
+    BUILD_RPATH "$ORIGIN")
 endif()
 
   set(ADDON_SOURCES
