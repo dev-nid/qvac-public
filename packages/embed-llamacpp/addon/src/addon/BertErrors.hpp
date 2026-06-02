@@ -24,7 +24,8 @@ inline std::string toString(GteErrorCode code)
   switch(code)
   {
     case UnableToLoadModel : return "UnableToLoadModel";
-    case UnableToLoadMetadata: return "UnableToLoadMetadata";
+    case UnableToLoadMetadata:
+      return "UnableToLoadMetadata";
     case InvalidConfiguration : return "InvalidConfiguration";
     case UnsupportedEmbeddings : return "UnsupportedEmbeddings";
     case InputTokensExceedBatchSize : return "InputTokensExceedBatchSize";

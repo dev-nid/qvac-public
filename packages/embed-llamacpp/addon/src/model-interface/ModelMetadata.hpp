@@ -52,8 +52,7 @@ public:
 
   /// @brief Returns the string value at @p key, or nullopt if absent or not a
   /// string type.
-  [[nodiscard]] std::optional<std::string>
-  tryGetString(const char* key) const;
+  [[nodiscard]] std::optional<std::string> tryGetString(const char* key) const;
 
   class FirstFileFromGgufStreamState {
   public:

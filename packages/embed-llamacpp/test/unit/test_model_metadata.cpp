@@ -60,8 +60,7 @@ TEST_F(ModelMetadataTest, DiskSingleFileParsesArchitectureAndContextLength) {
 
   ModelMetaData meta;
   GGUFShards emptyShards;
-  meta.parse(
-      test_model_path_, emptyShards, false /* isStreaming */, "Test");
+  meta.parse(test_model_path_, emptyShards, false /* isStreaming */, "Test");
 
   std::optional<std::string> architecture =
       meta.tryGetString("general.architecture");
@@ -82,8 +81,7 @@ TEST_F(ModelMetadataTest, TryGetU32ReturnsNulloptForUnknownKey) {
 
   ModelMetaData meta;
   GGUFShards emptyShards;
-  meta.parse(
-      test_model_path_, emptyShards, false /* isStreaming */, "Test");
+  meta.parse(test_model_path_, emptyShards, false /* isStreaming */, "Test");
 
   EXPECT_FALSE(meta.tryGetU32("definitely.not.a.real.key").has_value());
 }
