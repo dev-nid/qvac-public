@@ -72,6 +72,7 @@ target_sources(
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/BackendSelection.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/logging.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/LlamaLazyInitializeBackend.cpp
+  ${PROJECT_SOURCE_DIR}/addon/src/model-interface/ModelMetadata.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/BertModel.cpp
 )
 target_include_directories(

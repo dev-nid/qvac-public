@@ -19,11 +19,13 @@
 
 #include "BackendSelection.hpp"
 #include "LlamaLazyInitializeBackend.hpp"
+#include "ModelMetadata.hpp"
 #include "addon/BertErrors.hpp"
 #include "inference-addon-cpp/GGUFShards.hpp"
 #include "inference-addon-cpp/LlamacppUtils.hpp"
 #include "logging.hpp"
 #include "utils.hpp"
+#include "utils/BorrowablePtr.hpp"
 
 using namespace qvac_lib_infer_llamacpp_embed::errors;
 using namespace qvac_lib_infer_llamacpp_embed::logging;
@@ -248,65 +250,57 @@ int getEffectiveContextSize(const llama_model* model, const llama_context* ctx) 
       llama_model_n_ctx_train(model), static_cast<int>(llama_n_ctx(ctx)));
 }
 
-/// @brief Read the model's trained context size from GGUF metadata without
-/// loading model weights.
-/// @returns The trained context size, or std::nullopt if metadata cannot be
-/// read. Legitimate skips (streaming load, file not yet on disk) are silent;
-/// unexpected metadata failures (read error, missing keys) emit an
-/// ERROR-level log so the silent fallback to llama.cpp's default ctx_size is
-/// diagnosable.
-std::optional<int> readTrainedContextSize(
-    const std::string& modelPath, const GGUFShards& shards, bool isStreaming) {
-  // Intentional: sharded / streamed loads (setWeightsForFile path) consume the
-  // GGUF stream during model load, so pre-load metadata inspection isn't
-  // possible. Returning nullopt skips adjustEmbeddingContextSize, so the
-  // ctx_size default-/cap-to-n_ctx_train behavior does NOT apply on this path
-  // — streamed loads fall through to llama.cpp's built-in default ctx_size.
-  if (isStreaming) {
-    return std::nullopt;
+/// @brief Resolves shard basenames in-place to absolute paths relative to the
+/// parent directory of @p modelPath. `expandGGUFIntoShards` only populates
+/// basenames; resolving them is required for both pre-load metadata
+/// inspection and `llama_model_load_from_splits` when the working directory
+/// differs from the model directory.
+void resolveShardPaths(GGUFShards& shards, const std::string& modelPath) {
+  if (shards.gguf_files.empty()) {
+    return;
   }
-
-  const std::string& sourcePath =
-      shards.gguf_files.empty() ? modelPath : shards.gguf_files.front();
-  if (sourcePath.empty() || !std::filesystem::exists(sourcePath)) {
-    return std::nullopt;
+  const std::filesystem::path baseDir =
+      std::filesystem::path(modelPath).parent_path();
+  if (baseDir.empty()) {
+    return;
   }
+  for (std::string& f : shards.gguf_files) {
+    f = (baseDir / f).string();
+  }
+  shards.tensors_file = (baseDir / shards.tensors_file).string();
+}
 
-  auto logMetaFailure = [&sourcePath](const std::string& detail) {
+/// @brief Reads the model's trained context size from already-parsed GGUF
+/// metadata. Emits an ERROR-level diagnostic and returns nullopt when the
+/// architecture key or `<arch>.context_length` key is missing.
+std::optional<int> readTrainedContextSize(const ModelMetaData& metadata) {
+  auto logMetaFailure = [](const std::string& detail) {
     qvac_lib_infer_llamacpp_embed::logging::llamaLogCallback(
         GGML_LOG_LEVEL_ERROR,
         string_format(
-            "readTrainedContextSize: %s (path=%s); falling back to llama.cpp "
-            "default ctx_size\n",
-            detail.c_str(),
-            sourcePath.c_str())
+            "readTrainedContextSize: %s; falling back to llama.cpp default "
+            "ctx_size\n",
+            detail.c_str())
             .c_str(),
         nullptr);
   };
 
-  metadata_handle_ptr meta;
-  if (llama_model_meta_from_file(sourcePath.c_str(), &meta) !=
-      MetaResultStatus::SUCCESS) {
-    logMetaFailure("llama_model_meta_from_file failed");
-    return std::nullopt;
-  }
-
-  std::string architecture;
-  if (llama_model_meta_get_str(meta, "general.architecture", &architecture) !=
-      MetaResultStatus::SUCCESS) {
+  std::optional<std::string> architecture =
+      metadata.tryGetString("general.architecture");
+  if (!architecture.has_value() || architecture->empty()) {
     logMetaFailure("missing 'general.architecture' key");
     return std::nullopt;
   }
 
-  uint32_t trainedCtx = 0;
-  const std::string contextLengthKey = architecture + ".context_length";
-  if (llama_model_meta_get_u32(meta, contextLengthKey.c_str(), &trainedCtx) !=
-      MetaResultStatus::SUCCESS) {
+  const std::string contextLengthKey = *architecture + ".context_length";
+  std::optional<uint32_t> trainedCtx =
+      metadata.tryGetU32(contextLengthKey.c_str());
+  if (!trainedCtx.has_value()) {
     logMetaFailure("missing '" + contextLengthKey + "' key");
     return std::nullopt;
   }
 
-  return static_cast<int>(trainedCtx);
+  return static_cast<int>(*trainedCtx);
 }
 
 /// @brief Adjusts @p params.n_ctx so the runtime context does not exceed the
@@ -548,6 +542,7 @@ BertModel::BertModel(
       pooling_type(LLAMA_POOLING_TYPE_NONE), n_embd(0), is_loaded_(false),
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
       shards_(GGUFShards::expandGGUFIntoShards(modelGgufPath)) {
+  resolveShardPaths(shards_, modelGgufPath);
   auto modelInit = [this](
                        const std::string& path,
                        const std::unordered_map<std::string, std::string>& cfg,
@@ -568,6 +563,7 @@ BertModel::BertModel(common_params& params, bool ctxSizeConfigured)
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
       shards_(GGUFShards::expandGGUFIntoShards(params.model.path)),
       ctxSizeConfigured_(ctxSizeConfigured) {
+  resolveShardPaths(shards_, params.model.path);
   auto modelInit = [this](common_params commonParams) {
     this->init(commonParams);
   };
@@ -629,19 +625,23 @@ void BertModel::init(common_params& params) {
 
   const std::string errorWhenFailed = toString(UnableToLoadModel);
 
-  // Inspect GGUF metadata (no weight load) so we can default / cap the runtime
-  // context size before the llama context is created. Mirrors the pattern used
-  // by llm-llamacpp via ModelMetaData. When metadata cannot be read (e.g.
-  // streaming load), the runtime context falls back to llama.cpp's default.
-  if (auto trainedCtx = readTrainedContextSize(
-          params.model.path, shards_, isStreaming_)) {
+  metadata_.parse(params.model.path, shards_, isStreaming_, ADDON_ID);
+  if (std::optional<int> trainedCtx = readTrainedContextSize(metadata_)) {
     adjustEmbeddingContextSize(params, *trainedCtx, ctxSizeConfigured_);
   }
+
+  std::map<std::string, std::unique_ptr<std::basic_streambuf<char>>>
+      reclaimedSingleGgufStreamedFiles;
+  for (auto& [filename, sharedBuf] : singleGgufStreamedFiles_) {
+    reclaimedSingleGgufStreamedFiles.emplace(
+        filename, sharedBuf.reclaimUnique());
+  }
+  singleGgufStreamedFiles_.clear();
 
   common_init_result_ptr llamaInit = initFromConfig(
       params,
       params.model.path,
-      singleGgufStreamedFiles_,
+      reclaimedSingleGgufStreamedFiles,
       shards_,
       loadingContext_,
       isStreaming_,
@@ -749,16 +749,40 @@ void BertModel::setWeightsForFile(
   isStreaming_ = true;
 
   if (shards_.gguf_files.empty()) {
-    // Store it and make it available when `init` is called
-    singleGgufStreamedFiles_[filename] = std::move(shard);
+    auto [it, inserted] = singleGgufStreamedFiles_.emplace(
+        filename, StreamedSharedBuffer(std::move(shard)));
+    if (!inserted) {
+      throw qvac_errors::StatusError(
+          ADDON_ID,
+          toString(UnableToLoadModel),
+          "BertModel::setWeightsForFile: duplicate streamed shard filename: " +
+              filename);
+    }
+    metadata_.firstFileFromGgufStreamState.provide(it->second);
     return;
   }
 
-  // Asynchronous shard loading - ensure background initialization has started
   initLoader_.ensureLoadInBackground();
 
+  const std::string firstShardName =
+      std::filesystem::path(shards_.gguf_files.front()).filename().string();
+  const std::string incomingName =
+      std::filesystem::path(filename).filename().string();
+
+  std::unique_ptr<std::basic_streambuf<char>> readyShard;
+  if (firstShardName == incomingName) {
+    static constexpr int64_t kMetadataReleaseTimeoutSec = 60;
+    StreamedSharedBuffer lent(std::move(shard));
+    metadata_.firstFileFromGgufStreamState.provide(lent);
+    metadata_.firstFileFromGgufStreamState
+        .waitForRelease<kMetadataReleaseTimeoutSec>();
+    readyShard = lent.reclaimUnique();
+  } else {
+    readyShard = std::move(shard);
+  }
+
   if (!llama_model_load_fulfill_split_future(
-          filename.c_str(), loadingContext_.c_str(), std::move(shard))) {
+          filename.c_str(), loadingContext_.c_str(), std::move(readyShard))) {
     std::string msg = string_format(
         "%s: failed to load model from %s", __func__, filename.c_str());
     throw std::runtime_error(msg);

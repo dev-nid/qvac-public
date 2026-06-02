@@ -1,5 +1,7 @@
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -805,6 +807,33 @@ TEST_F(BertModelTest, ContextOverflowUsesRuntimeContextSizeForSequences) {
 
   EXPECT_THROW(
       { model.encodeHostF32Sequences(sequences); }, qvac_errors::StatusError);
+}
+
+TEST_F(BertModelTest, StreamingSingleGgufAppliesContextCap) {
+  if (!fs::exists(getValidModelPath())) {
+    FAIL() << "Test model not found at: " << getValidModelPath();
+  }
+
+  std::unordered_map<std::string, std::string> config = {{"device", "cpu"}};
+  BertModel model(getValidModelPath(), config);
+  model.initializeBackend(test_backends_dir);
+
+  std::unique_ptr<std::filebuf> filebuf = std::make_unique<std::filebuf>();
+  ASSERT_NE(
+      filebuf->open(getValidModelPath(), std::ios::in | std::ios::binary),
+      nullptr);
+  filebuf->pubseekpos(0, std::ios::in);
+  std::unique_ptr<std::basic_streambuf<char>> sb(std::move(filebuf));
+
+  const std::string filename =
+      fs::path(getValidModelPath()).filename().string();
+  model.setWeightsForFile(filename, std::move(sb));
+  model.waitForLoadInitialization();
+
+  ASSERT_TRUE(model.isLoaded());
+  EXPECT_EQ(
+      static_cast<int>(llama_n_ctx(model.getCtx())),
+      llama_model_n_ctx_train(model.getModel()));
 }
 
 TEST_F(BertModelTest, ProcessWithContextOverflow) {
