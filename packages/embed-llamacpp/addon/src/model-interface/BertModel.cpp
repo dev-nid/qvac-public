@@ -250,26 +250,6 @@ int getEffectiveContextSize(const llama_model* model, const llama_context* ctx) 
       llama_model_n_ctx_train(model), static_cast<int>(llama_n_ctx(ctx)));
 }
 
-/// @brief Resolves shard basenames in-place to absolute paths relative to the
-/// parent directory of @p modelPath. `expandGGUFIntoShards` only populates
-/// basenames; resolving them is required for both pre-load metadata
-/// inspection and `llama_model_load_from_splits` when the working directory
-/// differs from the model directory.
-void resolveShardPaths(GGUFShards& shards, const std::string& modelPath) {
-  if (shards.gguf_files.empty()) {
-    return;
-  }
-  const std::filesystem::path baseDir =
-      std::filesystem::path(modelPath).parent_path();
-  if (baseDir.empty()) {
-    return;
-  }
-  for (std::string& f : shards.gguf_files) {
-    f = (baseDir / f).string();
-  }
-  shards.tensors_file = (baseDir / shards.tensors_file).string();
-}
-
 /// @brief Reads the model's trained context size from already-parsed GGUF
 /// metadata. Emits an ERROR-level diagnostic and returns nullopt when the
 /// architecture key or `<arch>.context_length` key is missing.
@@ -387,16 +367,12 @@ parseSplitMode(std::unordered_map<std::string, std::string>& configFilemap) {
   return splitMode;
 }
 
-// NOLINTBEGIN(bugprone-easily-swappable-parameters)
-common_params setupParams(
+BertModelSetup setupParams(
     const std::string& modelGgufPath,
-    std::unordered_map<std::string, std::string> configFilemap,
-    bool& ctxSizeConfigured,
-    int64_t& resolvedBackendDevice) {
-  // NOLINTEND(bugprone-easily-swappable-parameters)
-  // Default params
-  common_params params;
-  ctxSizeConfigured = hasContextSizeConfig(configFilemap);
+    std::unordered_map<std::string, std::string> configFilemap) {
+  BertModelSetup result{};
+  common_params& params = result.params;
+  result.ctxSizeConfigured = hasContextSizeConfig(configFilemap);
 
   // Override default params
   std::vector<std::string> configVector;
@@ -443,7 +419,7 @@ common_params setupParams(
         chooseBackend(preferredBackend, llamaLogCallback, mainGpu);
 
     if (chosenBackend.first == BackendType::GPU) {
-      resolvedBackendDevice = 1;
+      result.resolvedBackendDevice = 1;
       params.split_mode = splitMode;
 
       if (splitMode != LLAMA_SPLIT_MODE_NONE && mainGpu.has_value()) {
@@ -459,7 +435,7 @@ common_params setupParams(
         }
       }
     } else if (chosenBackend.first == BackendType::CPU) {
-      resolvedBackendDevice = 0;
+      result.resolvedBackendDevice = 0;
       params.split_mode = LLAMA_SPLIT_MODE_NONE;
       params.main_gpu = -1;
       if (splitMode != LLAMA_SPLIT_MODE_NONE) {
@@ -530,9 +506,25 @@ common_params setupParams(
         "Invalid configuration parameters.");
   }
 
-  return params;
+  return result;
 }
 } // namespace
+
+void BertModel::resolveShardPaths(
+    GGUFShards& shards, const std::string& modelPath) {
+  if (shards.gguf_files.empty()) {
+    return;
+  }
+  const std::filesystem::path baseDir =
+      std::filesystem::path(modelPath).parent_path();
+  if (baseDir.empty()) {
+    return;
+  }
+  for (std::string& f : shards.gguf_files) {
+    f = (baseDir / f).string();
+  }
+  shards.tensors_file = (baseDir / shards.tensors_file).string();
+}
 
 BertModel::BertModel(
     const std::string& modelGgufPath,
@@ -542,7 +534,7 @@ BertModel::BertModel(
       pooling_type(LLAMA_POOLING_TYPE_NONE), n_embd(0), is_loaded_(false),
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
       shards_(GGUFShards::expandGGUFIntoShards(modelGgufPath)) {
-  resolveShardPaths(shards_, modelGgufPath);
+  BertModel::resolveShardPaths(shards_, modelGgufPath);
   auto modelInit = [this](
                        const std::string& path,
                        const std::unordered_map<std::string, std::string>& cfg,
@@ -557,18 +549,15 @@ BertModel::BertModel(
       backendsDir);
 }
 
-BertModel::BertModel(common_params& params, bool ctxSizeConfigured)
+BertModel::BertModel(BertModelSetup& setup)
     : model_(nullptr), ctx_(nullptr), vocab_(nullptr), batch_{},
       pooling_type(LLAMA_POOLING_TYPE_NONE), n_embd(0), is_loaded_(false),
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
-      shards_(GGUFShards::expandGGUFIntoShards(params.model.path)),
-      ctxSizeConfigured_(ctxSizeConfigured) {
-  resolveShardPaths(shards_, params.model.path);
-  auto modelInit = [this](common_params commonParams) {
-    this->init(commonParams);
-  };
+      shards_(GGUFShards::expandGGUFIntoShards(setup.params.model.path)) {
+  BertModel::resolveShardPaths(shards_, setup.params.model.path);
+  auto modelInit = [this](BertModelSetup s) { this->init(s); };
 
-  initLoader_.init(InitLoader::LOADER_TYPE::DELAYED, modelInit, params);
+  initLoader_.init(InitLoader::LOADER_TYPE::DELAYED, modelInit, setup);
 }
 
 void BertModel::init(
@@ -592,12 +581,15 @@ void BertModel::init(
   lazyCommonInit();
   initializeBackend(backendsDir, openclCacheDir);
 
-  common_params params = setupParams(
-      modelGgufPath, configCopy, ctxSizeConfigured_, runtimeBackendDevice_);
-  BertModel::init(params);
+  BertModelSetup setup = setupParams(modelGgufPath, configCopy);
+  BertModel::init(setup);
 }
 
-void BertModel::init(common_params& params) {
+void BertModel::init(BertModelSetup& setup) {
+  ctxSizeConfigured_ = setup.ctxSizeConfigured;
+  runtimeBackendDevice_ = setup.resolvedBackendDevice;
+  common_params& params = setup.params;
+
   lazyCommonInit();
   initializeBackend();
 

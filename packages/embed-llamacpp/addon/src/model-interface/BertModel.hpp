@@ -61,6 +61,16 @@ struct BertCommonInitResult {
   common_init_result_ptr result;
 };
 
+/// @brief Bundle of parameters required to initialize a BertModel: the parsed
+/// llama.cpp common_params, plus addon-specific flags resolved during setup
+/// (whether the caller explicitly configured ctx_size, and which backend
+/// device was selected).
+struct BertModelSetup {
+  common_params params;
+  bool ctxSizeConfigured = false;
+  int64_t resolvedBackendDevice = 0;
+};
+
 /// @brief Instantiates a BERT language model. An open source architecture
 /// designed to help machines understand context in sentences and used for
 /// natural language processing (NLP) and understanding (NLU).
@@ -109,6 +119,14 @@ public:
 
   using TokenizerHandle = void*;
 
+  /// @brief Resolves shard basenames in-place to absolute paths relative to
+  /// the parent directory of @p modelPath. `GGUFShards::expandGGUFIntoShards`
+  /// only populates basenames; resolving them is required for both pre-load
+  /// metadata inspection and `llama_model_load_from_splits` when the working
+  /// directory differs from the model directory.
+  static void
+  resolveShardPaths(GGUFShards& shards, const std::string& modelPath);
+
   /// @brief This constructor allows to specify model to load more clearly and
   /// override default common params by a configuration object.
   ///
@@ -118,12 +136,12 @@ public:
       const std::unordered_map<std::string, std::string>& config,
       const std::string& backendsDir = "");
 
-  /// @brief Construct with already parsed parameters.
-  explicit BertModel(
-      common_params& params, bool ctxSizeConfigured = false);
+  /// @brief Construct with already parsed parameters bundled in a
+  /// @ref BertModelSetup.
+  explicit BertModel(BertModelSetup& setup);
 
-  /// @see BertModel::BertModel(common_params)
-  void init(common_params& params);
+  /// @see BertModel::BertModel(BertModelSetup&)
+  void init(BertModelSetup& setup);
 
   /// @see BertModel::BertModel(string, unordered_map)
   void init(
