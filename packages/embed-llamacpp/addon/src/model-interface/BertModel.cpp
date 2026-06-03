@@ -245,7 +245,8 @@ bool hasContextSizeConfig(
          configFilemap.contains("ctx-size");
 }
 
-int getEffectiveContextSize(const llama_model* model, const llama_context* ctx) {
+int getEffectiveContextSize(
+    const llama_model* model, const llama_context* ctx) {
   return std::min(
       llama_model_n_ctx_train(model), static_cast<int>(llama_n_ctx(ctx)));
 }
