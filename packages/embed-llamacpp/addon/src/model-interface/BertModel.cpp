@@ -536,7 +536,6 @@ BertModel::BertModel(
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
       shards_(GGUFShards::expandGGUFIntoShards(modelGgufPath)),
       asyncWeightsLoader_(shards_, initLoader_, loadingContext_, &metadata_) {
-  BertModel::resolveShardPaths(shards_, modelGgufPath);
   auto modelInit = [this](
                        const std::string& path,
                        const std::unordered_map<std::string, std::string>& cfg,
@@ -557,7 +556,6 @@ BertModel::BertModel(BertModelSetup& setup)
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
       shards_(GGUFShards::expandGGUFIntoShards(setup.params.model.path)),
       asyncWeightsLoader_(shards_, initLoader_, loadingContext_, &metadata_) {
-  BertModel::resolveShardPaths(shards_, setup.params.model.path);
   auto modelInit = [this](BertModelSetup s) { this->init(s); };
 
   initLoader_.init(InitLoader::LOADER_TYPE::DELAYED, modelInit, setup);
@@ -619,6 +617,10 @@ void BertModel::init(BertModelSetup& setup) {
   llama_numa_init(params.numa);
 
   const std::string errorWhenFailed = toString(UnableToLoadModel);
+
+  if (!asyncWeightsLoader_.isStreaming()) {
+    BertModel::resolveShardPaths(shards_, params.model.path);
+  }
 
   metadata_.parse(
       params.model.path, shards_, asyncWeightsLoader_.isStreaming(), ADDON_ID);
