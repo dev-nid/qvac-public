@@ -4,6 +4,7 @@
 #include <any>
 #include <cctype>
 #include <cstring>
+#include <map>
 #include <ranges>
 #include <stdexcept>
 #include <utility>
@@ -25,7 +26,6 @@
 #include "inference-addon-cpp/LlamacppUtils.hpp"
 #include "logging.hpp"
 #include "utils.hpp"
-#include "utils/BorrowablePtr.hpp"
 
 using namespace qvac_lib_infer_llamacpp_embed::errors;
 using namespace qvac_lib_infer_llamacpp_embed::logging;
@@ -534,7 +534,8 @@ BertModel::BertModel(
     : model_(nullptr), ctx_(nullptr), vocab_(nullptr), batch_{},
       pooling_type(LLAMA_POOLING_TYPE_NONE), n_embd(0), is_loaded_(false),
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
-      shards_(GGUFShards::expandGGUFIntoShards(modelGgufPath)) {
+      shards_(GGUFShards::expandGGUFIntoShards(modelGgufPath)),
+      asyncWeightsLoader_(shards_, initLoader_, loadingContext_, &metadata_) {
   BertModel::resolveShardPaths(shards_, modelGgufPath);
   auto modelInit = [this](
                        const std::string& path,
@@ -554,7 +555,8 @@ BertModel::BertModel(BertModelSetup& setup)
     : model_(nullptr), ctx_(nullptr), vocab_(nullptr), batch_{},
       pooling_type(LLAMA_POOLING_TYPE_NONE), n_embd(0), is_loaded_(false),
       loadingContext_(InitLoader::getLoadingContext("BertModel")),
-      shards_(GGUFShards::expandGGUFIntoShards(setup.params.model.path)) {
+      shards_(GGUFShards::expandGGUFIntoShards(setup.params.model.path)),
+      asyncWeightsLoader_(shards_, initLoader_, loadingContext_, &metadata_) {
   BertModel::resolveShardPaths(shards_, setup.params.model.path);
   auto modelInit = [this](BertModelSetup s) { this->init(s); };
 
@@ -618,26 +620,22 @@ void BertModel::init(BertModelSetup& setup) {
 
   const std::string errorWhenFailed = toString(UnableToLoadModel);
 
-  metadata_.parse(params.model.path, shards_, isStreaming_, ADDON_ID);
+  metadata_.parse(
+      params.model.path, shards_, asyncWeightsLoader_.isStreaming(), ADDON_ID);
   if (std::optional<int> trainedCtx = readTrainedContextSize(metadata_)) {
     adjustEmbeddingContextSize(params, *trainedCtx, ctxSizeConfigured_);
   }
 
   std::map<std::string, std::unique_ptr<std::basic_streambuf<char>>>
-      reclaimedSingleGgufStreamedFiles;
-  for (auto& [filename, sharedBuf] : singleGgufStreamedFiles_) {
-    reclaimedSingleGgufStreamedFiles.emplace(
-        filename, sharedBuf.reclaimUnique());
-  }
-  singleGgufStreamedFiles_.clear();
+      streamedFiles = asyncWeightsLoader_.extractIndividualStreamedFiles();
 
   common_init_result_ptr llamaInit = initFromConfig(
       params,
       params.model.path,
-      reclaimedSingleGgufStreamedFiles,
+      streamedFiles,
       shards_,
       loadingContext_,
-      isStreaming_,
+      asyncWeightsLoader_.isStreaming(),
       ADDON_ID,
       errorWhenFailed);
 
@@ -739,52 +737,7 @@ void BertModel::cancel() const { stopCancelled_.store(true); }
 void BertModel::setWeightsForFile(
     const std::string& filename,
     std::unique_ptr<std::basic_streambuf<char>>&& shard) {
-  isStreaming_ = true;
-
-  if (shards_.gguf_files.empty()) {
-    auto [it, inserted] = singleGgufStreamedFiles_.emplace(
-        filename, StreamedSharedBuffer(std::move(shard)));
-    if (!inserted) {
-      throw qvac_errors::StatusError(
-          ADDON_ID,
-          toString(UnableToLoadModel),
-          "BertModel::setWeightsForFile: duplicate streamed shard filename: " +
-              filename);
-    }
-    metadata_.firstFileFromGgufStreamState.provide(it->second);
-    return;
-  }
-
-  initLoader_.ensureLoadInBackground();
-
-  const std::string firstShardName =
-      std::filesystem::path(shards_.gguf_files.front()).filename().string();
-  const std::string incomingName =
-      std::filesystem::path(filename).filename().string();
-
-  std::unique_ptr<std::basic_streambuf<char>> readyShard;
-  if (firstShardName == incomingName) {
-    static constexpr int64_t kMetadataReleaseTimeoutSec = 60;
-    StreamedSharedBuffer lent(std::move(shard));
-    metadata_.firstFileFromGgufStreamState.provide(lent);
-    metadata_.firstFileFromGgufStreamState
-        .waitForRelease<kMetadataReleaseTimeoutSec>();
-    readyShard = lent.reclaimUnique();
-  } else {
-    readyShard = std::move(shard);
-  }
-
-  if (!llama_model_load_fulfill_split_future(
-          filename.c_str(), loadingContext_.c_str(), std::move(readyShard))) {
-    std::string msg = string_format(
-        "%s: failed to load model from %s", __func__, filename.c_str());
-    throw std::runtime_error(msg);
-  }
-
-  int current = fulfilledFiles_.fetch_add(1) + 1;
-  if (current == static_cast<int>(shards_.gguf_files.size()) + 1) {
-    initLoader_.waitForLoadInitialization();
-  }
+  asyncWeightsLoader_.setWeightsForFile(filename, std::move(shard));
 }
 
 std::vector<std::vector<int32_t>>

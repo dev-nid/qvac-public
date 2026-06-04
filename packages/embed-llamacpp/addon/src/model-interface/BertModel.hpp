@@ -3,7 +3,6 @@
 #include <any>
 #include <atomic>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,6 +15,7 @@
 #include <llama/common/common.h>
 #include <llama/common/log.h>
 
+#include "AsyncWeightsLoader.hpp"
 #include "LlamaLazyInitializeBackend.hpp"
 #include "ModelMetadata.hpp"
 #include "inference-addon-cpp/GGUFShards.hpp"
@@ -23,7 +23,6 @@
 #include "inference-addon-cpp/ModelInterfaces.hpp"
 #include "inference-addon-cpp/RuntimeStats.hpp"
 #include "utils.hpp"
-#include "utils/BorrowablePtr.hpp"
 
 #ifdef _MSC_VER
 #pragma warning(disable : 4244 4267) // possible loss of data
@@ -100,15 +99,12 @@ private:
   GGUFShards shards_;
   friend class InitLoader;
   InitLoader initLoader_;
-  bool isStreaming_ = false;
-  using StreamedSharedBuffer = BorrowablePtr<std::basic_streambuf<char>>;
-  std::map<std::string, StreamedSharedBuffer> singleGgufStreamedFiles_;
   std::optional<LlamaBackendsHandle> backendsHandle_;
   mutable std::atomic<bool> stopCancelled_{false};
   int64_t runtimeBackendDevice_ = 0;
   bool ctxSizeConfigured_ = false;
-  std::atomic<int> fulfilledFiles_{0};
   ModelMetaData metadata_;
+  AsyncWeightsLoader asyncWeightsLoader_;
 
 public:
   // These using definitions are accessed by the Addon<BertModel> template.
