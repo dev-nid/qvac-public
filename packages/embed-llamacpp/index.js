@@ -217,3 +217,10 @@ class GGMLBert {
 
 module.exports = GGMLBert
 module.exports.pickPrimaryGgufPath = pickPrimaryGgufPath
+
+// IdMapIndex (turbovec POC) lives in a sibling module so consumers that
+// only need the ANN index can `require('@qvac/embed-llamacpp/idMapIndex')`
+// and never even touch this file's `require('./addon')` import chain.
+// `GGMLBert` users still get IdMapIndex as a named export here for
+// discoverability.
+module.exports.IdMapIndex = require('./idMapIndex')
