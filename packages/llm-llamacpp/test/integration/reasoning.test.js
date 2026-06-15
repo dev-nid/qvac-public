@@ -254,9 +254,13 @@ safeTest('Qwen3 reasoning-budget=0 disables thinking', {
 })
 
 // Compaction-on-by-default: after a Qwen3 turn that emits <think>...</think>,
-// the runtime stats should report at least one thinking block discarded, and
-// the cache after the turn should be smaller than the naive sum of prompt +
-// generated tokens (since the thinking span was dropped).
+// the runtime stats should report at least one thinking block discarded.
+// We do not assert on `CacheTokens` here because the addon resets the
+// context after every non-session-cached inference (see
+// `LlamaModel::processPromptImpl::shouldResetAfterInference`), so post-run
+// `nPast_` is 0 regardless of whether compaction happened. The cross-turn
+// effect of compaction is covered by the multi-turn test below, which uses
+// a `cacheKey` to keep the cache live between calls.
 safeTest('remove_thinking_from_context defaults on for Qwen3', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
@@ -273,15 +277,6 @@ safeTest('remove_thinking_from_context defaults on for Qwen3', {
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
   t.ok(thinkingDiscards >= 1,
     `default run should report at least one compaction (got ${thinkingDiscards})`)
-
-  // CacheTokens should be smaller than prompt + generated: the discarded
-  // thinking span is no longer accounted for in the residual cache.
-  const cacheTokens = toNumber(stats.CacheTokens)
-  const promptTokens = toNumber(stats.promptTokens)
-  const generatedTokens = toNumber(stats.generatedTokens)
-  t.ok(cacheTokens > 0, `cacheTokens should be positive (got ${cacheTokens})`)
-  t.ok(cacheTokens < promptTokens + generatedTokens,
-    `cacheTokens (${cacheTokens}) should be < prompt (${promptTokens}) + generated (${generatedTokens}) when thinking was compacted out`)
 })
 
 // Opt-out path: when the caller explicitly disables the compaction, the
@@ -335,44 +330,64 @@ safeTest('remove_thinking_from_context is a no-op when reasoning_budget=0', {
     `reasoning_budget=0 output should not contain <think>: "${response.slice(0, 200)}"`)
 })
 
-// Multi-turn cache growth comparison. With compaction enabled (default), the
-// turn-2 CacheTokens should be smaller than what we would see if the turn-1
-// thinking block remained in the cache. We anchor the assertion against the
-// turn-1 stats so the test is independent of the model's specific verbosity.
+// Multi-turn cache growth comparison. Uses a `cacheKey` so the KV cache
+// persists across `run()` calls (without it the addon resets `nPast_` to 0
+// after every inference and the cross-turn effect is invisible). Runs the
+// same two-turn flow twice: once with compaction enabled (default) and once
+// disabled; the disabled run should have a larger residual cache.
 safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
   skip: isDarwinX64 || isWindowsX64,
-  timeout: 900_000
+  timeout: 1_200_000
 }, async t => {
-  const { inference } = await setupReasoningModel(t, false)
+  const sessionA = path.join(os.tmpdir(), `qvac-think-compact-on-${Date.now()}.bin`)
+  const sessionB = path.join(os.tmpdir(), `qvac-think-compact-off-${Date.now() + 1}.bin`)
+
+  t.teardown(() => {
+    for (const p of [sessionA, sessionB]) {
+      try { require('bare-fs').unlinkSync(p) } catch {}
+    }
+  })
 
   const messages1 = createInitialMessages()
-  const { response: response1, stats: stats1 } = await runCompletionWithStats(
-    inference,
-    messages1
+
+  // Run A — compaction ON (default).
+  const { inference: infA } = await setupReasoningModel(t, false)
+  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA })
+  verifyReasoningTags(t, a1.response, 'A turn 1')
+  t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
+    'A turn 1 should compact at least one thinking block')
+  const a2 = await runCompletionWithStats(
+    infA,
+    createFollowUpMessages(messages1, a1.response),
+    { cacheKey: sessionA }
   )
-  verifyReasoningTags(t, response1, 'turn 1')
-  t.ok(toNumber(stats1.thinkingBlockDiscards) >= 1,
-    'turn 1 should compact at least one thinking block')
+  verifyReasoningTags(t, a2.response, 'A turn 2')
 
-  const messages2 = createFollowUpMessages(messages1, response1)
-  const { response: response2, stats: stats2 } = await runCompletionWithStats(
-    inference,
-    messages2
+  // Run B — same flow, compaction OFF.
+  const { inference: infB } = await setupReasoningModel(t, false)
+  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
+  const b1 = await runCompletionWithStats(
+    infB,
+    messages1,
+    { cacheKey: sessionB, ...overridesOff }
   )
-  verifyReasoningTags(t, response2, 'turn 2')
+  verifyReasoningTags(t, b1.response, 'B turn 1')
+  t.is(toNumber(b1.stats.thinkingBlockDiscards), 0,
+    'B turn 1 with compaction off should report 0 discards')
+  const b2 = await runCompletionWithStats(
+    infB,
+    createFollowUpMessages(messages1, b1.response),
+    { cacheKey: sessionB, ...overridesOff }
+  )
+  verifyReasoningTags(t, b2.response, 'B turn 2')
 
-  const cache1 = toNumber(stats1.CacheTokens)
-  const cache2 = toNumber(stats2.CacheTokens)
-  const promptTokens2 = toNumber(stats2.promptTokens)
-  const generatedTokens2 = toNumber(stats2.generatedTokens)
+  const cacheA2 = toNumber(a2.stats.CacheTokens)
+  const cacheB2 = toNumber(b2.stats.CacheTokens)
+  t.comment(`compaction ON  turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
+  t.comment(`compaction OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
 
-  t.comment(`turn1: cache=${cache1} stats=${JSON.stringify(stats1)}`)
-  t.comment(`turn2: cache=${cache2} stats=${JSON.stringify(stats2)}`)
-
-  // Even after adding turn 2's prompt + generated tokens, the new cache
-  // should be less than a naive accumulation that would include turn 1's
-  // thinking block (we compacted it).
-  const naive = cache1 + promptTokens2 + generatedTokens2
-  t.ok(cache2 < naive,
-    `turn 2 cache (${cache2}) should be < naive accumulation (${naive}) — proves turn 1 thinking was compacted out`)
+  t.ok(cacheA2 > 0, `compaction-on turn 2 should have non-zero cache (got ${cacheA2})`)
+  t.ok(cacheB2 > 0, `compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
+  t.ok(cacheA2 < cacheB2,
+    `turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
 })
