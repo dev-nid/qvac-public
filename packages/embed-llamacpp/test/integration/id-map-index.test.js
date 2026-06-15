@@ -14,10 +14,19 @@ const os = require('bare-os')
 // Pull IdMapIndex via the package's sub-export path. The package exports
 // `./idMapIndex` so consumers can opt into just the ANN-index class
 // without dragging the GGMLBert require chain. Loading this module must
-// NOT boot any BERT runtime; if a future refactor breaks that, simply
-// requiring this file would fail (e.g. native-init crash) or pull in
-// fabric llama-init code. Resolved via a relative path here because the
-// integration tests run inside the package itself (no self-link).
+// NOT boot any BERT runtime. Resolved via a relative path here because
+// the integration tests run inside the package itself (no self-link).
+//
+// To catch a future regression that wires GGMLBert init back into the
+// IdMapIndex path, the first test below inspects `require.cache` and
+// asserts the GGMLBert module file was never loaded. Bare keys
+// `require.cache` by `file://` URL, so we convert the resolved paths.
+const cacheKey = (p) => 'file://' + require.resolve(p)
+const KEY_IDMAP   = cacheKey('../../idMapIndex')
+const KEY_BINDING = cacheKey('../../binding')
+const KEY_INDEX   = cacheKey('../../index.js')
+const KEY_ADDON   = cacheKey('../../addon.js')
+
 const IdMapIndex = require('../../idMapIndex')
 
 // DIM is chosen large enough that the N seed vectors below can each be a
@@ -41,14 +50,27 @@ function tmpPath (name) {
 }
 
 test('IdMapIndex sub-export does not boot the BERT runtime', (t) => {
-  // The class should be constructible without any model file or
-  // backend initialization. If this throws, the binding accidentally
-  // pulled in BERT init.
+  // 1. Construct path: zero-arg + tiny-arg ctors must succeed without
+  //    loading any model or running addon-side BERT init.
   const idx = new IdMapIndex({ dim: DIM, bitWidth: 4 })
   t.is(idx.dim, DIM, 'dim getter')
   t.is(idx.bitWidth, 4, 'bitWidth getter')
   t.is(idx.length, 0, 'starts empty')
   idx.dispose()
+
+  // 2. Module-cache invariant: requiring `./idMapIndex` must NOT have
+  //    transitively loaded the GGMLBert entry (`./index.js`) or the
+  //    BertInterface plumbing (`./addon.js`). If a future refactor wires
+  //    BERT init into the IdMapIndex path, one of these files will be
+  //    in the cache after the require above.
+  t.ok(require.cache[KEY_IDMAP],
+    'sub-export module loaded (sanity)')
+  t.ok(require.cache[KEY_BINDING],
+    'native binding loaded (sanity)')
+  t.absent(require.cache[KEY_INDEX],
+    'GGMLBert entry (index.js) NOT loaded by ./idMapIndex')
+  t.absent(require.cache[KEY_ADDON],
+    'BertInterface plumbing (addon.js) NOT loaded by ./idMapIndex')
 })
 
 test('IdMapIndex: add + search + remove + persistence round-trip', async (t) => {

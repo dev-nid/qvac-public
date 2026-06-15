@@ -144,15 +144,16 @@ class IdMapIndex {
   get bitWidth () { return binding.idx_bit_width(ensureHandle(this)) }
 
   /**
-   * Release the native handle. After dispose, calls to other methods throw.
-   * The finalizer on the underlying external will also free the handle if
-   * dispose is never called, but explicit dispose drops memory sooner.
+   * Mark the instance as unusable. The native handle is owned by a
+   * JS-side external whose finalizer runs at GC time; this method only
+   * drops the local reference so subsequent calls throw (`ensureHandle`).
+   * No memory is reclaimed synchronously — that requires a finalizer
+   * pass. Kept as a method for API stability; future versions may add
+   * a safe early-free path (wrapper object + sentinel) without changing
+   * the call sites.
    */
   async dispose () {
-    const handle = this[HANDLE]
-    if (handle == null) return
     this[HANDLE] = null
-    binding.idx_destroy(handle)
   }
 }
 

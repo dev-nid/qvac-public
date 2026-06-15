@@ -17,19 +17,19 @@ find_package(cmake-vcpkg REQUIRED PATHS node_modules/cmake-vcpkg)
 
 set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/triplets;${VCPKG_OVERLAY_TRIPLETS}")
 
-# Local overlay-port loop for fabric (turbovec POC). The overlay at
-# `vcpkg/ports/qvac-fabric/` builds qvac-fabric from the sibling
-# `qvac-fabric-llm.cpp` checkout instead of fetching a tagged release, so
-# fabric C++ edits flow into addon builds without a registry publish.
+# Local overlay-port for fabric (turbovec POC). The overlay at
+# `vcpkg/ports/qvac-fabric/` carries the POC fabric build because the public
+# `tetherto/qvac-registry-vcpkg` qvac-fabric port has no 8828.x line yet and
+# this manifest pins `>=8828.1.0`. By default the overlay fetches from
+# `dev-nid/qvac-fabric-llm.cpp` (poc/turbovec-embed branch) at a pinned
+# commit + SHA512. Drop this overlay once the registry publishes 8828.x.
 #
-# Cache-invalidation: vcpkg's ABI hash for an overlay port is computed from
-# its portfile.cmake contents, NOT from the source tree the portfile copies
-# in. So after editing fabric C/C++, regenerate the embedded source hash
-# inside `vcpkg/ports/qvac-fabric/portfile.cmake` via:
-#   ./scripts/sync-fabric-overlay.sh
-# which rewrites a single hash comment line and trips vcpkg into rebuilding
-# the port. The companion helper `./scripts/rebuild-fabric.sh` chains
-# sync + generate + build for the inner-loop iteration use case.
+# Local-iteration override: set `QVAC_FABRIC_LOCAL_PATH=/path/to/fabric` to
+# build from a working tree instead. In that mode, run
+# `./scripts/sync-fabric-overlay.sh` after each edit to bump the
+# portfile-tracked source hash (vcpkg derives ABI from portfile contents,
+# not from the source it copies in). `./scripts/rebuild-fabric.sh` chains
+# sync + generate + build + install for the inner-loop case.
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/ports;${VCPKG_OVERLAY_PORTS}")
 
 project(embed-llamacpp C CXX)

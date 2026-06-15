@@ -218,9 +218,10 @@ class GGMLBert {
 module.exports = GGMLBert
 module.exports.pickPrimaryGgufPath = pickPrimaryGgufPath
 
-// IdMapIndex (turbovec POC) lives in a sibling module so consumers that
-// only need the ANN index can `require('@qvac/embed-llamacpp/idMapIndex')`
-// and never even touch this file's `require('./addon')` import chain.
-// `GGMLBert` users still get IdMapIndex as a named export here for
-// discoverability.
+// IdMapIndex (turbovec POC) is also re-exported here as a named property
+// for discoverability when consumers `require('@qvac/embed-llamacpp')`.
+// Consumers that want the ANN index WITHOUT loading this file's GGMLBert /
+// addon require chain should import it directly via the package's
+// `./idMapIndex` sub-export — that path goes straight to `./binding` and
+// never touches `./addon`, satisfying the POC's lifecycle-isolation invariant.
 module.exports.IdMapIndex = require('./idMapIndex')

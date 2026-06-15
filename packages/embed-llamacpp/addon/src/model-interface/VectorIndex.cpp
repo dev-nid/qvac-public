@@ -47,7 +47,7 @@ int VectorIndex::remove(uint64_t id) noexcept {
   return ggml_vec_index_remove(handle_, id);
 }
 
-bool VectorIndex::contains(uint64_t id) noexcept {
+bool VectorIndex::contains(uint64_t id) const noexcept {
   return ggml_vec_index_contains(handle_, id) != 0;
 }
 
@@ -58,7 +58,7 @@ int VectorIndex::search(
     int n_q,
     int k,
     float* outScores,
-    uint64_t* outIds) noexcept {
+    uint64_t* outIds) const noexcept {
   return ggml_vec_index_search(
       handle_, queries, n_q, k, outScores, outIds);
 }

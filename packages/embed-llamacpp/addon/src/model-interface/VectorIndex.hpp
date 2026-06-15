@@ -7,7 +7,6 @@
 
 #include <ggml-vector-index.h>
 
-#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -35,7 +34,7 @@ public:
   // Returns 1 / 0 (removed / not present), negative on error.
   int remove(uint64_t id) noexcept;
 
-  bool contains(uint64_t id) noexcept;
+  [[nodiscard]] bool contains(uint64_t id) const noexcept;
 
   void prepare() noexcept;
 
@@ -45,12 +44,13 @@ public:
       int n_q,
       int k,
       float* outScores,
-      uint64_t* outIds) noexcept;
+      uint64_t* outIds) const noexcept;
 
   // Persists to disk. Returns 0 on success.
   int write(const std::string& path) noexcept;
 
-  // Reads from disk. Returns a fresh wrapper or nullptr on failure.
+  // Reads from disk. On failure returns a wrapper whose `valid()` is false;
+  // callers must check before using the instance.
   static VectorIndex load(const std::string& path) noexcept;
 
   // Stats.

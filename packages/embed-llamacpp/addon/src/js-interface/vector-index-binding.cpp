@@ -2,7 +2,7 @@
 //
 // N-API surface for the `IdMapIndex` JS class. Registers a small set of free
 // functions on the embed-llamacpp addon's exports; the JS wrapper in
-// `index-only.js` ties them into a class shape.
+// `idMapIndex.js` ties them into a class shape.
 //
 // Lifecycle isolation: this binding deliberately depends ONLY on the
 // VectorIndex C++ wrapper (which in turn depends only on fabric's
@@ -13,13 +13,11 @@
 
 #include <bare.h>
 
-#include <cfloat>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <new>
+#include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "../addon/VectorIndexErrors.hpp"
 #include "../model-interface/VectorIndex.hpp"
@@ -71,27 +69,6 @@ bool read_int_prop(
     return false;
   }
   return js_get_value_int32(env, val, out) == 0;
-}
-
-bool read_utf8_prop(
-    js_env_t* env, js_value_t* obj, const char* name, std::string* out) {
-  js_value_t* val = nullptr;
-  if (js_get_named_property(env, obj, name, &val) != 0) {
-    return false;
-  }
-  size_t len = 0;
-  if (js_get_value_string_utf8(env, val, nullptr, 0, &len) != 0) {
-    return false;
-  }
-  out->resize(len);
-  size_t copied = 0;
-  if (js_get_value_string_utf8(
-          env, val,
-          reinterpret_cast<utf8_t*>(out->data()), len + 1, &copied) != 0) {
-    return false;
-  }
-  out->resize(copied);
-  return true;
 }
 
 void throw_status(js_env_t* env, int code) {
@@ -170,29 +147,6 @@ js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
   // Move the wrapper onto the heap so we can hand JS an owning external.
   auto* heap = new VectorIndex(std::move(loaded));
   return wrap(env, heap);
-}
-
-// idx_destroy(handle) -> undefined. Explicit teardown; finalizer is also
-// wired, but JS can call this to release memory sooner.
-js_value_t* idx_destroy(js_env_t* env, js_callback_info_t* info) {
-  size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
-  if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
-    return nullptr;
-  }
-  VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) {
-    return nullptr;
-  }
-  // No-op for now: explicit double-dispose is risky because the JS external
-  // still holds the same data pointer and its finalizer will run later.
-  // Safe path: rely entirely on the finalizer. This export is preserved for
-  // forward compatibility so the JS API can stabilize on a `dispose()`
-  // method.
-  (void) idx;
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
 }
 
 // idx_add(handle, Float32Array vectors, BigUint64Array ids) -> undefined
@@ -517,7 +471,6 @@ void registerBindings(js_env_t* env, js_value_t* exports) {
 
   V("idx_create",    idx_create);
   V("idx_load",      idx_load);
-  V("idx_destroy",   idx_destroy);
   V("idx_add",       idx_add);
   V("idx_search",    idx_search);
   V("idx_remove",    idx_remove);
