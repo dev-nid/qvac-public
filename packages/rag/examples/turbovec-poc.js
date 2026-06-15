@@ -92,18 +92,12 @@ async function main () {
   // ---------------------------------------------------------------------
   // Step 1: lifecycle isolation
   // ---------------------------------------------------------------------
-  // Spy on GGMLBert via Proxy; if the adapter (or its transitive deps)
-  // even imports `@qvac/embed-llamacpp`'s main entry that loads GGMLBert,
-  // we still want to ensure it never constructs one.
-  const embed = require('@qvac/embed-llamacpp')
-  let bertCtorCalled = false
-  const OrigGGMLBert = embed
-  // Wrapping is awkward in CommonJS; instead track via a flag the user
-  // can flip by patching the property if needed. For the POC we rely on
-  // the absence of any explicit construction in the adapter, plus the
-  // assertion below that adapter open doesn't pull GGMLBert into the
-  // require chain (it uses the @qvac/embed-llamacpp/idMapIndex sub-export).
-  ;(void OrigGGMLBert)
+  // Authoritative lifecycle-isolation coverage lives in the embed-llamacpp
+  // integration test (`test/integration/id-map-index.test.js`), which
+  // asserts via `require.cache` that importing the IdMapIndex sub-export
+  // never loads `index.js` (GGMLBert entry) or `addon.js`. This script
+  // exercises the same code path via the adapter; that test gates the
+  // architectural invariant.
 
   // ---------------------------------------------------------------------
   // Step 2: ingest
@@ -135,8 +129,6 @@ async function main () {
     embeddingModelId: MODEL_ID
   })
   await adapter.ready()
-  assert(!bertCtorCalled,
-    'no GGMLBert constructor invoked during adapter open (lifecycle isolation)')
 
   const saved = await adapter.saveEmbeddings(docs)
   assert(saved.length === N, `all ${N} docs saved`)

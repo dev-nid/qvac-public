@@ -106,7 +106,8 @@ test('TurboVecHybridAdapter: save -> search -> delete -> reopen -> search', asyn
   // store; close the corestore too so the rocksdb FD lock can be reacquired
   // by the reopen-step Corestore below.
   await store1.close()
-  t.ok(fs.existsSync(indexPath), '.tvim file written on close')
+  t.ok(fs.existsSync(indexPath),
+    '.tvim file persisted (written by saveEmbeddings / deleteEmbeddings)')
 
   // Reopen: persistence survived close+reopen.
   const store2 = new Corestore(tmpDir)

@@ -63,7 +63,7 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
         adds: 'TurboVecHybridAdapter: `store` is required'
       })
     }
-    if (typeof config.dim !== 'number' || config.dim <= 0) {
+    if (!Number.isInteger(config.dim) || config.dim <= 0) {
       throw new QvacErrorRAG({
         code: ERR_CODES.INVALID_PARAMS,
         adds: 'TurboVecHybridAdapter: `dim` must be a positive integer'
@@ -102,50 +102,67 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
 
   async _open () {
     this.logger.info('TurboVecHybridAdapter: opening')
-    await this.store.ready()
-    this.hypercore = this.store.get({ name: this.dbName })
-    this.db = HyperDB.bee(this.hypercore, dbSpec, { autoUpdate: true })
-    await this.db.ready()
+    try {
+      await this.store.ready()
+      this.hypercore = this.store.get({ name: this.dbName })
+      this.db = HyperDB.bee(this.hypercore, dbSpec, { autoUpdate: true })
+      await this.db.ready()
 
-    // Load or create the IdMapIndex. The .tvim file may not exist on
-    // first open; in that case start fresh and let `write()` create it.
-    const fs = await this._fs()
-    if (this.indexPath && fs.existsSync(this.indexPath)) {
-      this.logger.debug(
-        `TurboVecHybridAdapter: loading index from ${this.indexPath}`)
-      this.idx = await IdMapIndex.load(this.indexPath)
-      if (this.idx.dim !== this.dim) {
-        await this.idx.dispose()
-        await this.db.close()
-        throw new QvacErrorRAG({
-          code: ERR_CODES.INVALID_PARAMS,
-          adds: `TurboVecHybridAdapter: on-disk dim (${this.idx.dim}) ` +
-            `does not match constructor dim (${this.dim})`
-        })
+      // Load or create the IdMapIndex. The .tvim file may not exist on
+      // first open; in that case start fresh and let `write()` create it.
+      const fs = this._fs()
+      if (this.indexPath && fs.existsSync(this.indexPath)) {
+        this.logger.debug(
+          `TurboVecHybridAdapter: loading index from ${this.indexPath}`)
+        this.idx = await IdMapIndex.load(this.indexPath)
+        if (this.idx.dim !== this.dim) {
+          throw new QvacErrorRAG({
+            code: ERR_CODES.INVALID_PARAMS,
+            adds: `TurboVecHybridAdapter: on-disk dim (${this.idx.dim}) ` +
+              `does not match constructor dim (${this.dim})`
+          })
+        }
+      } else {
+        this.logger.debug('TurboVecHybridAdapter: creating fresh index')
+        this.idx = new IdMapIndex({ dim: this.dim, bitWidth: this.bitWidth })
       }
-    } else {
-      this.logger.debug('TurboVecHybridAdapter: creating fresh index')
-      this.idx = new IdMapIndex({ dim: this.dim, bitWidth: this.bitWidth })
-    }
 
-    await this._rebuildReverseMap()
-    this.isInitialized = true
-    this.logger.info(
-      `TurboVecHybridAdapter: open (n=${this.idx.length} vectors)`)
+      await this._rebuildReverseMap()
+      this.isInitialized = true
+      this.logger.info(
+        `TurboVecHybridAdapter: open (n=${this.idx.length} vectors)`)
+    } catch (err) {
+      // Best-effort cleanup so a half-opened adapter doesn't leave
+      // dangling native handles / open hypercores. Subsequent calls
+      // (incl. `close()`) become safe no-ops because every reference
+      // is nulled.
+      await this._teardown()
+      throw err
+    }
+  }
+
+  /**
+   * Reset every owned resource to a fresh-construction state. Idempotent
+   * — safe to call from both `_close` and the `_open` failure path.
+   * @private
+   */
+  async _teardown () {
+    if (this.idx) {
+      try { await this.idx.dispose() } catch (_) {}
+      this.idx = null
+    }
+    if (this.db) {
+      try { await this.db.close() } catch (_) {}
+      this.db = null
+    }
+    this.hypercore = null
+    this._u64ToStringId.clear()
+    this.isInitialized = false
   }
 
   async _close () {
     this.logger.info('TurboVecHybridAdapter: closing')
-    if (this.idx) {
-      await this.idx.dispose()
-      this.idx = null
-    }
-    if (this.db) {
-      await this.db.close()
-      this.db = null
-    }
-    this._u64ToStringId.clear()
-    this.isInitialized = false
+    await this._teardown()
   }
 
   /**
@@ -180,20 +197,22 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
       return []
     }
 
-    // Per-batch model-id sanity (mirrors HyperDBAdapter's contract).
-    const modelIds = new Set(
-      embeddedDocs.map((d) => d.embeddingModelId).filter(Boolean))
-    if (modelIds.size > 1) {
-      throw new QvacErrorRAG({
-        code: ERR_CODES.INVALID_PARAMS,
-        adds: 'TurboVecHybridAdapter: all docs in one batch must share embeddingModelId'
-      })
-    }
-    if (modelIds.size === 1 &&
-        !modelIds.has(this.embeddingModelId)) {
-      this.logger.warn(
-        `TurboVecHybridAdapter: doc embeddingModelId ${Array.from(modelIds)[0]} ` +
-        `differs from adapter ${this.embeddingModelId}; using adapter value`)
+    // Per-batch model-id sanity. The adapter is bound to one model
+    // (its constructor `embeddingModelId`). If any doc declares a
+    // different model, fail loudly rather than silently picking one —
+    // mixed-model corpora are not a supported configuration for the
+    // POC and silently choosing would produce hard-to-debug recall
+    // problems downstream.
+    for (const doc of embeddedDocs) {
+      if (doc.embeddingModelId &&
+          doc.embeddingModelId !== this.embeddingModelId) {
+        throw new QvacErrorRAG({
+          code: ERR_CODES.INVALID_PARAMS,
+          adds: `TurboVecHybridAdapter: doc ${doc.id} declares ` +
+            `embeddingModelId "${doc.embeddingModelId}" but the adapter ` +
+            `is bound to "${this.embeddingModelId}"`
+        })
+      }
     }
 
     const now = new Date()
@@ -240,10 +259,11 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
       for (const { id, doc, u64 } of docMeta) {
         const metadata = { ...(doc.metadata || {}) }
         metadata[U64_META_KEY] = u64.toString(10)
-        // Stash embeddingModelId in metadata too (the documents schema
-        // doesn't have a dedicated column, but we want it on each row
-        // for parity with HyperDBAdapter consumers).
-        metadata.embeddingModelId = doc.embeddingModelId || this.embeddingModelId
+        // Stash embeddingModelId in metadata so downstream consumers
+        // (incl. HyperDBAdapter readers) can identify the model. The
+        // adapter-level value is the source of truth — per-doc overrides
+        // were rejected upfront in the validation loop above.
+        metadata.embeddingModelId = this.embeddingModelId
         await tx.insert(this.documentsTable, {
           id,
           content: doc.content ?? '',
@@ -267,8 +287,19 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
     }
 
     // Persist the index after a successful batch. POC: full rewrite each
-    // call — simple, correct, slow. Optimization phase replaces this with
-    // either an append-only journal or a delta log.
+    // call — simple, correct, slow. Two durability gaps acknowledged
+    // here, both deferred to the optimization phase and intentionally
+    // owned by fabric rather than this adapter:
+    //   (a) `ggml_vec_index_write` is not atomic — a crash mid-write
+    //       leaves a truncated .tvim that fails on load. Fix is a
+    //       write-to-tmp + rename inside the C impl so all consumers
+    //       benefit.
+    //   (b) HyperDB tx.flush() above and idx.write() here are not
+    //       atomic relative to each other. A crash between them leaves
+    //       HyperDB ahead of the .tvim by one batch; on re-open the
+    //       reverse map will list the new docs but the index won't have
+    //       their vectors. Fix is a journaled / two-phase write or a
+    //       delta log on the .tvim side.
     this.idx.write(this.indexPath)
 
     return docMeta.map(({ id }) => ({ id, status: 'fulfilled' }))
@@ -276,6 +307,10 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
 
   async search (query, queryVector, params = {}) {
     const topK = params.topK || 5
+    const signal = params.signal
+    if (signal?.aborted) {
+      throw new QvacErrorRAG({ code: ERR_CODES.OPERATION_CANCELLED })
+    }
     if (!queryVector || queryVector.length !== this.dim) {
       throw new QvacErrorRAG({
         code: ERR_CODES.INVALID_PARAMS,
@@ -289,23 +324,26 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
 
     const { scores, ids } = this.idx.search(f32, topK)
 
+    if (signal?.aborted) {
+      throw new QvacErrorRAG({ code: ERR_CODES.OPERATION_CANCELLED })
+    }
+
+    // Resolve doc rows in parallel. Each top-k slot is independent so
+    // serializing them was wasted round-trip latency on HyperDB reads.
     const snapshot = this.db.snapshot()
-    const results = []
+    const slots = new Array(topK)
     for (let i = 0; i < topK; i++) {
       const u64 = ids[i]
-      if (u64 === U64_SENTINEL) continue
+      if (u64 === U64_SENTINEL) { slots[i] = null; continue }
       const stringId = this._u64ToStringId.get(u64)
-      if (!stringId) continue // stale reverse-map entry; skip silently
-      const row = await snapshot.get(this.documentsTable, { id: stringId })
-      if (!row) continue
-      results.push({
-        id: stringId,
-        content: row.content,
-        score: scores[i],
-        metadata: row.metadata
-      })
+      if (!stringId) { slots[i] = null; continue }
+      slots[i] = snapshot.get(this.documentsTable, { id: stringId })
+        .then((row) => row
+          ? { id: stringId, content: row.content, score: scores[i], metadata: row.metadata }
+          : null)
     }
-    return results
+    const resolved = await Promise.all(slots)
+    return resolved.filter((r) => r !== null)
   }
 
   async deleteEmbeddings (ids) {
@@ -343,8 +381,8 @@ class TurboVecHybridAdapter extends BaseDBAdapter {
   // Lazy fs accessor — both Bare and Node ship a file API. Using
   // `bare-fs` directly works under Bare; on Node, `fs` is the equivalent.
   // The adapter only needs `existsSync` so the resolution surface stays
-  // tiny.
-  async _fs () {
+  // tiny. Sync because `require` is sync; no need for an async wrapper.
+  _fs () {
     if (this._fsCache) return this._fsCache
     try {
       this._fsCache = require('bare-fs')
