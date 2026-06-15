@@ -66,6 +66,35 @@ TEST_F(ChatTemplateUtilsTest, IsMedPsyBasenameRejectsOtherNames) {
   EXPECT_FALSE(isMedPsyBasename("NotMedPsy"));
 }
 
+TEST_F(ChatTemplateUtilsTest, IsGemma4ModelWithNullptr) {
+  EXPECT_FALSE(isGemma4Model(nullptr));
+}
+
+TEST_F(ChatTemplateUtilsTest, IsGemma4BasenameEmpty) {
+  EXPECT_FALSE(isGemma4Basename(std::string_view{}));
+  EXPECT_FALSE(isGemma4Basename(""));
+}
+
+TEST_F(ChatTemplateUtilsTest, IsGemma4BasenameAcceptsKnownPatterns) {
+  EXPECT_TRUE(isGemma4Basename("gemma-4"));
+  EXPECT_TRUE(isGemma4Basename("Gemma 4"));
+  EXPECT_TRUE(isGemma4Basename("Gemma 4 E2B it"));
+  EXPECT_TRUE(isGemma4Basename("google_gemma-4-E2B-it"));
+  EXPECT_TRUE(isGemma4Basename("GEMMA-4-E4B"));
+  EXPECT_TRUE(isGemma4Basename("gemma4"));
+}
+
+TEST_F(ChatTemplateUtilsTest, IsGemma4BasenameRejectsOtherFamilies) {
+  EXPECT_FALSE(isGemma4Basename("Gemma 2"));
+  EXPECT_FALSE(isGemma4Basename("gemma-3"));
+  EXPECT_FALSE(isGemma4Basename("Qwen3"));
+  EXPECT_FALSE(isGemma4Basename("Llama-3.1"));
+}
+
+TEST_F(ChatTemplateUtilsTest, SelectReasoningTagsForNullModelReturnsNullopt) {
+  EXPECT_FALSE(selectReasoningTagsForModel(nullptr).has_value());
+}
+
 TEST_F(
     ChatTemplateUtilsTest, SupportsToolsCompactForModelMetadataByArchitecture) {
   EXPECT_TRUE(supportsToolsCompactForModelMetadata(std::string("qwen3")));

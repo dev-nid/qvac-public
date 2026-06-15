@@ -1,6 +1,7 @@
 #include "ChatTemplateUtils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <ranges>
 #include <string_view>
@@ -23,6 +24,13 @@ namespace {
 // `general.basename` GGUF metadata to identify MedPsy models.
 inline constexpr std::string_view MEDPSY_BASENAME_LOWER{"medpsy"};
 
+// Substrings searched case-insensitively against `general.basename` to
+// identify Gemma 4 GGUFs that ship before llama.cpp has a dedicated
+// `LLM_ARCH_GEMMA4` enum. Covers bartowski's
+// `google_gemma-4-E2B-it-*.gguf` family (basename "Gemma 4 E2B it").
+inline constexpr std::array<std::string_view, 3> kGemma4BasenameMarkers{
+    "gemma-4", "gemma 4", "gemma4"};
+
 std::string toLower(std::string_view value) {
   std::string lowered(value.size(), '\0');
   std::ranges::transform(value, lowered.begin(), [](unsigned char ch) {
@@ -41,6 +49,10 @@ bool isQwen3Architecture(std::string_view architecture) {
 
 bool isHarmonyArchitecture(std::string_view architecture) {
   return normalizeArchitecture(architecture) == "gpt-oss";
+}
+
+bool isGemma4Architecture(std::string_view architecture) {
+  return normalizeArchitecture(architecture) == "gemma4";
 }
 
 std::optional<std::string>
@@ -101,12 +113,40 @@ bool isMedPsyModel(const ::llama_model* model) {
   return isMedPsyBasename(getModelBasename(model).value_or(""));
 }
 
+bool isGemma4Basename(std::string_view basename) {
+  if (basename.empty()) {
+    return false;
+  }
+  const std::string lowered = toLower(basename);
+  for (std::string_view marker : kGemma4BasenameMarkers) {
+    if (lowered.find(marker) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool isHarmonyModel(const ::llama_model* model) {
   if (model == nullptr) {
     return false;
   }
   std::optional<std::string> arch = getModelArchitecture(model);
   return arch.has_value() && isHarmonyArchitecture(arch.value());
+}
+
+bool isGemma4Model(const ::llama_model* model) {
+  if (model == nullptr) {
+    return false;
+  }
+  // Prefer the explicit architecture signal when llama.cpp exposes
+  // `LLM_ARCH_GEMMA4`; fall back to basename matching for GGUFs that
+  // ship before the arch enum is in place (bartowski's
+  // google_gemma-4-* packs).
+  const std::optional<std::string> arch = getModelArchitecture(model);
+  if (arch.has_value() && isGemma4Architecture(arch.value())) {
+    return true;
+  }
+  return isGemma4Basename(getModelBasename(model).value_or(""));
 }
 
 llama_token getHarmonyCallToken(::llama_context* lctx) {
@@ -129,6 +169,31 @@ std::optional<std::string> selectToolsCompactMarkerForModelMetadata(
     return std::nullopt;
   }
   return std::string("<tool_call>");
+}
+
+std::optional<ReasoningTags>
+selectReasoningTagsForModel(const ::llama_model* model) {
+  if (model == nullptr) {
+    return std::nullopt;
+  }
+  if (isQwen3Model(model)) {
+    // Qwen3 family (Qwen3, Qwen3.x, MedPsy fine-tunes, etc.). Both
+    // markers tokenise to a single special token under the Qwen3
+    // tokenizer, so the EOS-inside-reasoning replacement path is
+    // active.
+    return ReasoningTags{.open = "<think>", .close = "</think>"};
+  }
+  if (isGemma4Model(model)) {
+    // Gemma 4 emits a channel block of the form
+    // `<|channel>thought ... <channel|>`. The opening marker may
+    // tokenise to multiple BPE pieces under Gemma's tokenizer; the
+    // closing marker is asymmetric (`<channel|>` with a trailing
+    // pipe). `initializeReasoningState` will tokenise both at runtime
+    // to populate the per-state token counts.
+    return ReasoningTags{
+        .open = "<|channel>thought", .close = "<channel|>"};
+  }
+  return std::nullopt;
 }
 
 std::string getChatTemplateForModel(

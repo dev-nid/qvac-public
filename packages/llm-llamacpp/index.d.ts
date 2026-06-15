@@ -168,6 +168,21 @@ export interface GenerationParams {
    * value is restored afterwards.
    */
   reasoning_budget?: number
+  /**
+   * When the model emits a reasoning block during generation (e.g.
+   * `<think>...</think>` for Qwen3, `<|channel>thought ... <channel|>`
+   * for Gemma 4), drop those tokens from the KV cache at end-of-generation
+   * so subsequent turns do not accumulate reasoning history.
+   *
+   * Defaults to `true`. Set to `false` to keep the reasoning tokens in
+   * the cache (matches the legacy behaviour, useful when downstream
+   * needs the model to "remember" its prior chain-of-thought).
+   *
+   * Only applies to text models with a recognised reasoning channel
+   * (see `selectReasoningTagsForModel`). For models without a built-in
+   * reasoning channel and for multimodal contexts, the flag is a no-op.
+   */
+  remove_thinking_from_context?: boolean
 }
 
 export interface RunOptions {
@@ -210,6 +225,15 @@ export interface RuntimeStats {
   promptTokens: number
   /** Context-window slides for single requests, or the sum across completed batch slots. */
   contextSlides: number
+  /**
+   * Number of `<think>` (or model-equivalent) reasoning blocks dropped
+   * from the KV cache at end-of-generation by the
+   * `remove_thinking_from_context` feature. Per-inference for single
+   * requests; summed across completed slots for batch requests. 0 when
+   * the model has no recognised reasoning channel, when the feature
+   * was disabled per-request, or when no reasoning blocks were emitted.
+   */
+  thinkingBlockDiscards: number
   /**
    * Average active sequences decoded together during the last request,
    * including overlapping requests from other callers.

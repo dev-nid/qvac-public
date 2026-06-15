@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 
+#include "Qwen3ReasoningUtils.hpp"
 #include "common/chat.h"
 #include "common/common.h"
 
@@ -16,10 +17,34 @@ namespace utils {
 
 bool isQwen3Model(const ::llama_model* model);
 bool isHarmonyModel(const ::llama_model* model);
+/// True when the model is a Gemma 4 variant. Detection combines the
+/// GGUF `general.architecture` value (`"gemma4"` when llama.cpp has a
+/// dedicated arch enum) and the `general.basename` metadata (covers
+/// pre-arch-enum packs like bartowski's `google_gemma-4-*` GGUFs that
+/// still report a generic Gemma architecture).
+bool isGemma4Model(const ::llama_model* model);
 llama_token getHarmonyCallToken(::llama_context* lctx);
 std::optional<std::string> getModelArchitecture(const ::llama_model* model);
 bool supportsToolsCompactForModelMetadata(
     const std::optional<std::string>& architecture);
+
+/// Returns the reasoning channel open / close markers for a model
+/// family that exposes a built-in reasoning channel.
+///
+/// Currently recognised families:
+///   * Qwen3 family (incl. fine-tunes) -> `<think>` / `</think>`
+///   * Gemma 4                         -> `<|channel>thought` / `<channel|>`
+///
+/// Returns `std::nullopt` for any other model. Callers should treat
+/// that as "no reasoning channel" and skip detection / KV-compaction
+/// rather than guessing tags (a wrong-guess produces silent KV cache
+/// corruption, whereas missing detection is harmless).
+///
+/// Add new families by extending this function. Per-family token-count
+/// metadata that depends on the active tokenizer is captured separately
+/// in `ReasoningState` by `initializeReasoningState`.
+std::optional<ReasoningTags>
+selectReasoningTagsForModel(const ::llama_model* model);
 
 /**
  * @brief Returns true when the GGUF metadata basename identifies a MedPsy
@@ -38,6 +63,14 @@ bool isMedPsyBasename(std::string_view basename);
  * Qwen3 templates.
  */
 bool isMedPsyModel(const ::llama_model* model);
+
+/**
+ * @brief Returns true when `basename` (case-insensitive) contains one of
+ * the Gemma 4 marker substrings ("gemma-4", "gemma 4", "gemma4"). Exposed
+ * for unit testing without requiring a real ::llama_model. Empty input
+ * returns false.
+ */
+bool isGemma4Basename(std::string_view basename);
 
 std::optional<std::string> selectToolsCompactMarkerForModelMetadata(
     const std::optional<std::string>& architecture);
