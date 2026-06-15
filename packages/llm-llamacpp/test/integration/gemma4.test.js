@@ -273,6 +273,77 @@ test('Gemma 4 supports tool calling', {
   }
 })
 
+test('Gemma 4 remove_thinking_from_context compacts cache after channel close', {
+  timeout: 1_800_000
+}, async t => {
+  const [modelName, dirPath] = await ensureModel(GEMMA4_MODEL.llmModel)
+  const modelPath = path.join(dirPath, modelName)
+
+  const baseConfig = {
+    device: useCpu ? 'cpu' : 'gpu',
+    gpu_layers: '999',
+    ctx_size: '2048',
+    n_predict: '256',
+    temp: '0',
+    seed: '42',
+    verbosity: '0'
+  }
+
+  async function runOnce (runOptions) {
+    const addon = new LlmLlamacpp({
+      files: { model: [modelPath] },
+      config: baseConfig,
+      logger: createLogger(),
+      opts: { stats: true }
+    })
+    try {
+      await addon.load()
+      const response = await addon.run([
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: 'What is the capital of France? Answer in one word.' }
+      ], runOptions)
+      let output = ''
+      const ticker = setInterval(() => {}, 50)
+      try {
+        await response.onUpdate(token => { output += token }).await()
+      } finally {
+        clearInterval(ticker)
+      }
+      return { output, stats: response.stats || {} }
+    } finally {
+      await addon.unload().catch(() => {})
+    }
+  }
+
+  const toNum = v => typeof v === 'number' ? v : Number(v || 0)
+
+  // Default — compaction enabled.
+  const defaultRun = await runOnce()
+  t.comment(`default (${defaultRun.output.length} chars): ${defaultRun.output.slice(0, 200)}`)
+  t.comment(`default stats: ${JSON.stringify(defaultRun.stats)}`)
+
+  // Gemma 4 emits the reasoning channel only when it deems the question
+  // worth deliberating about; if the baseline did not engage the channel,
+  // there is nothing to compact and the rest of the assertions become
+  // vacuous.
+  if (/<\|channel>thought/i.test(defaultRun.output)) {
+    t.ok(toNum(defaultRun.stats.thinkingBlockDiscards) >= 1,
+      `default run should compact at least one channel block (got ${defaultRun.stats.thinkingBlockDiscards})`)
+
+    // Opt-out — compaction disabled.
+    const disabledRun = await runOnce({
+      generationParams: { remove_thinking_from_context: false }
+    })
+    t.comment(`disabled (${disabledRun.output.length} chars): ${disabledRun.output.slice(0, 200)}`)
+    t.comment(`disabled stats: ${JSON.stringify(disabledRun.stats)}`)
+    t.is(toNum(disabledRun.stats.thinkingBlockDiscards), 0,
+      `disabled run should report 0 discards (got ${disabledRun.stats.thinkingBlockDiscards})`)
+  } else {
+    t.comment('Gemma 4 did not emit <|channel>thought — skipping compaction assertions')
+    t.pass('compaction assertions skipped (channel not engaged)')
+  }
+})
+
 test('Gemma 4 reasoning-budget=0 disables thinking', {
   timeout: 1_800_000
 }, async t => {

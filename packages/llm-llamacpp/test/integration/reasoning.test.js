@@ -59,8 +59,8 @@ async function setupReasoningModel (t, toolsEnabled) {
 }
 
 // Shared helper: Run a completion and collect response
-async function runCompletion (inference, messages) {
-  const result = await inference.run(messages)
+async function runCompletion (inference, messages, runOptions) {
+  const result = await inference.run(messages, runOptions)
   let response = ''
   await result
     .onUpdate(token => {
@@ -69,6 +69,18 @@ async function runCompletion (inference, messages) {
     .await()
   return response
 }
+
+// Shared helper: Run a completion and return both response text + runtime stats.
+async function runCompletionWithStats (inference, messages, runOptions) {
+  const result = await inference.run(messages, runOptions)
+  let response = ''
+  await result
+    .onUpdate(token => { response += token })
+    .await()
+  return { response, stats: result.stats || {} }
+}
+
+const toNumber = value => typeof value === 'number' ? value : Number(value || 0)
 
 // Shared helper: Verify reasoning tags in response
 function verifyReasoningTags (t, response, testName) {
@@ -239,4 +251,128 @@ safeTest('Qwen3 reasoning-budget=0 disables thinking', {
     `disabled output should not contain </think>: "${disabled.slice(0, 200)}"`)
   t.ok(disabled.length < baseline.length / 4,
     `disabled (${disabled.length}) should be substantially shorter than baseline (${baseline.length})`)
+})
+
+// Compaction-on-by-default: after a Qwen3 turn that emits <think>...</think>,
+// the runtime stats should report at least one thinking block discarded, and
+// the cache after the turn should be smaller than the naive sum of prompt +
+// generated tokens (since the thinking span was dropped).
+safeTest('remove_thinking_from_context defaults on for Qwen3', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false)
+
+  const messages = createInitialMessages()
+  const { response, stats } = await runCompletionWithStats(inference, messages)
+  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`stats: ${JSON.stringify(stats)}`)
+
+  verifyReasoningTags(t, response, 'default compaction')
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.ok(thinkingDiscards >= 1,
+    `default run should report at least one compaction (got ${thinkingDiscards})`)
+
+  // CacheTokens should be smaller than prompt + generated: the discarded
+  // thinking span is no longer accounted for in the residual cache.
+  const cacheTokens = toNumber(stats.CacheTokens)
+  const promptTokens = toNumber(stats.promptTokens)
+  const generatedTokens = toNumber(stats.generatedTokens)
+  t.ok(cacheTokens > 0, `cacheTokens should be positive (got ${cacheTokens})`)
+  t.ok(cacheTokens < promptTokens + generatedTokens,
+    `cacheTokens (${cacheTokens}) should be < prompt (${promptTokens}) + generated (${generatedTokens}) when thinking was compacted out`)
+})
+
+// Opt-out path: when the caller explicitly disables the compaction, the
+// runtime stats should report no discards and the cache should retain the
+// full prompt + generated span (modulo the existing protected-first-message
+// trimming the tools_compact controller already performs).
+safeTest('remove_thinking_from_context=false keeps thinking in cache', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false)
+
+  const messages = createInitialMessages()
+  const { response, stats } = await runCompletionWithStats(
+    inference,
+    messages,
+    { generationParams: { remove_thinking_from_context: false } }
+  )
+  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`stats: ${JSON.stringify(stats)}`)
+
+  verifyReasoningTags(t, response, 'compaction disabled')
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.is(thinkingDiscards, 0,
+    `compaction disabled should report 0 discards (got ${thinkingDiscards})`)
+})
+
+// reasoning_budget=0 short-circuits the channel before any tokens are
+// emitted, so the compaction feature has nothing to do and reports 0
+// discards even with the default `remove_thinking_from_context: true`.
+safeTest('remove_thinking_from_context is a no-op when reasoning_budget=0', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false)
+
+  const messages = createInitialMessages()
+  const { response, stats } = await runCompletionWithStats(
+    inference,
+    messages,
+    { generationParams: { reasoning_budget: 0 } }
+  )
+  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`stats: ${JSON.stringify(stats)}`)
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.is(thinkingDiscards, 0,
+    `reasoning_budget=0 should report 0 discards (got ${thinkingDiscards})`)
+  t.absent(/<think>/.test(response),
+    `reasoning_budget=0 output should not contain <think>: "${response.slice(0, 200)}"`)
+})
+
+// Multi-turn cache growth comparison. With compaction enabled (default), the
+// turn-2 CacheTokens should be smaller than what we would see if the turn-1
+// thinking block remained in the cache. We anchor the assertion against the
+// turn-1 stats so the test is independent of the model's specific verbosity.
+safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 900_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false)
+
+  const messages1 = createInitialMessages()
+  const { response: response1, stats: stats1 } = await runCompletionWithStats(
+    inference,
+    messages1
+  )
+  verifyReasoningTags(t, response1, 'turn 1')
+  t.ok(toNumber(stats1.thinkingBlockDiscards) >= 1,
+    'turn 1 should compact at least one thinking block')
+
+  const messages2 = createFollowUpMessages(messages1, response1)
+  const { response: response2, stats: stats2 } = await runCompletionWithStats(
+    inference,
+    messages2
+  )
+  verifyReasoningTags(t, response2, 'turn 2')
+
+  const cache1 = toNumber(stats1.CacheTokens)
+  const cache2 = toNumber(stats2.CacheTokens)
+  const promptTokens2 = toNumber(stats2.promptTokens)
+  const generatedTokens2 = toNumber(stats2.generatedTokens)
+
+  t.comment(`turn1: cache=${cache1} stats=${JSON.stringify(stats1)}`)
+  t.comment(`turn2: cache=${cache2} stats=${JSON.stringify(stats2)}`)
+
+  // Even after adding turn 2's prompt + generated tokens, the new cache
+  // should be less than a naive accumulation that would include turn 1's
+  // thinking block (we compacted it).
+  const naive = cache1 + promptTokens2 + generatedTokens2
+  t.ok(cache2 < naive,
+    `turn 2 cache (${cache2}) should be < naive accumulation (${naive}) — proves turn 1 thinking was compacted out`)
 })

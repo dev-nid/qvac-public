@@ -381,6 +381,13 @@ inline void parseGenerationParams(
     }
     overrides.reasoning_budget = static_cast<int>(*reasoningBudget);
   }
+
+  auto removeThinkingFromContext =
+      configObj->getOptionalPropertyAs<js::Boolean, bool>(
+          env, "remove_thinking_from_context");
+  if (removeThinkingFromContext.has_value()) {
+    overrides.remove_thinking_from_context = *removeThinkingFromContext;
+  }
 }
 
 inline std::vector<std::pair<std::string, js::Object>>
