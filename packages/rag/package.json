@@ -40,6 +40,9 @@
     "./errors.js": {
       "types": "./src/errors.d.ts",
       "default": "./src/errors.js"
+    },
+    "./turbovec": {
+      "default": "./src/adapters/database/TurboVecHybridAdapter.js"
     }
   },
   "imports": {
