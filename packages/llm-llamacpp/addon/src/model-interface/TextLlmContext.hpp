@@ -7,7 +7,7 @@
 #include <llama.h>
 
 #include "../utils/ChatTemplateUtils.hpp"
-#include "../utils/Qwen3ReasoningUtils.hpp"
+#include "../utils/ReasoningUtils.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
 #include "LlmContext.hpp"
 #include "SequenceDriver.hpp"

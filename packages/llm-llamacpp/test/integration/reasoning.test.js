@@ -365,6 +365,59 @@ safeTest('remove_thinking_from_context=false is honoured in batch path', {
     `batch path with compaction disabled should report 0 discards (got ${thinkingDiscards})`)
 })
 
+// Mixed-slot batch path: per-slot drivers honour their own
+// `remove_thinking_from_context` overrides independently. Slot A defaults
+// to compaction-on (1 discard), slot B explicitly opts out (0 discards);
+// the scheduler's `accumulateSlotRuntimeStats` sums per-slot
+// `getThinkingBlockDiscards()` so the aggregate must be exactly 1.
+safeTest('batch path aggregates per-slot remove_thinking_from_context independently', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false, { configOverrides: { parallel: '2' } })
+
+  const batchInput = [
+    {
+      id: 'slot-on',
+      prompt: createInitialMessages()
+      // No runOptions → compaction defaults to on for this slot.
+    },
+    {
+      id: 'slot-off',
+      prompt: [
+        { role: 'system', content: 'You are an AI assistant. Always provide a clear answer after thinking' },
+        { role: 'user', content: 'What is the capital of Spain?' }
+      ],
+      runOptions: { generationParams: { remove_thinking_from_context: false } }
+    }
+  ]
+
+  const batchResponse = await inference.run(batchInput)
+  const outputsById = new Map()
+  await batchResponse
+    .onUpdate(({ id, chunk }) => {
+      outputsById.set(id, (outputsById.get(id) || '') + chunk)
+    })
+    .await()
+  const stats = batchResponse.stats || {}
+  t.comment(`mixed-slot batch stats: ${JSON.stringify(stats)}`)
+
+  for (const item of batchInput) {
+    const output = outputsById.get(item.id) || ''
+    t.comment(`mixed-slot ${item.id} (len=${output.length}): ${output.slice(0, 160)}...`)
+    t.ok(output.includes('<think>') && output.includes('</think>'),
+      `mixed-slot ${item.id} output should contain <think>...</think>`)
+  }
+
+  // Slot A (default-on) contributes 1; slot B (opt-out) contributes 0.
+  // Sum across slots must equal 1 — proves per-slot independence AND
+  // that `accumulateSlot` actually sums the per-slot value (not max / overwrite).
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.is(thinkingDiscards, 1,
+    'mixed-slot batch should aggregate to exactly 1 discard ' +
+    `(slot-on=1, slot-off=0), got ${thinkingDiscards}`)
+})
+
 // reasoning_budget=0 short-circuits the channel before any tokens are
 // emitted, so the compaction feature has nothing to do and reports 0
 // discards even with the default `remove_thinking_from_context: true`.
@@ -422,6 +475,13 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
     { cacheKey: sessionA }
   )
   verifyReasoningTags(t, a2.response, 'A turn 2')
+  // Symmetric guard on turn 2: the cross-turn delta below assumes BOTH
+  // turns of run A produced and compacted a thinking block. Without this
+  // guard, a turn-2 that silently skipped thinking would still pass the
+  // `cacheA2 < cacheB2` assertion (turn-1 delta alone is enough), but the
+  // test would have lost half its discriminating power.
+  t.ok(toNumber(a2.stats.thinkingBlockDiscards) >= 1,
+    'A turn 2 should also compact at least one thinking block')
 
   // Run B — same flow, compaction OFF.
   const { inference: infB } = await setupReasoningModel(t, false)

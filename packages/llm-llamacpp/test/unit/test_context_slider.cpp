@@ -647,3 +647,215 @@ TEST_F(ContextSliderTest, CompactKvRange_TailExactlyAtEnd_NoShiftNeeded) {
   EXPECT_EQ(ops.seqAddCalls()[0].endPos, 180);
   EXPECT_EQ(ops.seqAddCalls()[0].delta, -80);
 }
+
+// ---------------------------------------------------------------------------
+// runReasoningCompaction — thinking-block span orchestration. This is the
+// part of `TextLlmContext::compactThinkSpans` that used to be a hand-rolled
+// loop and is now extracted so the per-span semantics (reverse-walk,
+// firstMsgTokens shrink, onSlide args, skip rules) can be unit-tested
+// without a real llama context. Tests below pass deterministic fake
+// `compactOp` / `onSlide` callables and assert on the result state +
+// recorded calls.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct CompactOpCall {
+  llama_pos start;
+  llama_pos end;
+  llama_pos nPast;
+};
+
+struct SlideCall {
+  int discarded;
+  llama_pos start;
+};
+
+// Fake compactor: always succeeds and shifts nPast by `end - start`.
+// Records each call so tests can assert the reverse-walk order.
+struct AlwaysCompactingFake {
+  std::vector<CompactOpCall> calls;
+  CompactRangeOutcome operator()(
+      llama_pos start, llama_pos end, llama_pos nPast) {
+    calls.push_back({start, end, nPast});
+    const llama_pos discarded = end - start;
+    return {CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
+  }
+};
+
+} // namespace
+
+TEST_F(ContextSliderTest, ReasoningCompaction_SingleSpan_UpdatesStateAndNotifies) {
+  AlwaysCompactingFake compactor;
+  std::vector<SlideCall> slides;
+  // Span [120, 200) inside the active tail (firstMsgTokens=80, nPast=240).
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{{120, 200}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/240,
+      /*firstMsgTokens=*/80,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  EXPECT_EQ(result.newNPast, 160);             // 240 - 80
+  EXPECT_EQ(result.newFirstMsgTokens, 80);     // unchanged (span past prefix)
+  EXPECT_EQ(result.discardsApplied, 1);
+  ASSERT_EQ(result.entries.size(), 1u);
+  EXPECT_EQ(result.entries[0].status,
+            ReasoningCompactionEntry::Status::Compacted);
+  EXPECT_EQ(result.entries[0].discarded, 80);
+  ASSERT_EQ(slides.size(), 1u);
+  EXPECT_EQ(slides[0].discarded, 80);
+  EXPECT_EQ(slides[0].start, 120);
+}
+
+TEST_F(ContextSliderTest, ReasoningCompaction_SpanBeforeFirstMsg_ShrinksPrefix) {
+  AlwaysCompactingFake compactor;
+  std::vector<SlideCall> slides;
+  // Template-forced open span at [50, 130): start < firstMsgTokens (80).
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{{50, 130}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/200,
+      /*firstMsgTokens=*/80,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  EXPECT_EQ(result.newNPast, 120);             // 200 - 80
+  EXPECT_EQ(result.newFirstMsgTokens, 50);     // clamped down to span start
+  EXPECT_EQ(result.discardsApplied, 1);
+  ASSERT_EQ(slides.size(), 1u);
+  EXPECT_EQ(slides[0].discarded, 80);
+  EXPECT_EQ(slides[0].start, 50);
+}
+
+TEST_F(ContextSliderTest, ReasoningCompaction_MultipleSpans_ReverseDropOrder) {
+  AlwaysCompactingFake compactor;
+  std::vector<SlideCall> slides;
+  // Two spans recorded in forward order: [100, 130), [180, 220). Walk must
+  // process the LATER span first so the earlier span's positions stay
+  // valid for its own seqRm call.
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{{100, 130}, {180, 220}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/250,
+      /*firstMsgTokens=*/50,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  // First call should be the later span [180, 220) against nPast=250.
+  ASSERT_EQ(compactor.calls.size(), 2u);
+  EXPECT_EQ(compactor.calls[0].start, 180);
+  EXPECT_EQ(compactor.calls[0].end, 220);
+  EXPECT_EQ(compactor.calls[0].nPast, 250);
+  // Second call should be the earlier span [100, 130) against the updated
+  // nPast (250 - 40 = 210).
+  EXPECT_EQ(compactor.calls[1].start, 100);
+  EXPECT_EQ(compactor.calls[1].end, 130);
+  EXPECT_EQ(compactor.calls[1].nPast, 210);
+
+  EXPECT_EQ(result.newNPast, 180);             // 250 - 40 - 30
+  EXPECT_EQ(result.discardsApplied, 2);
+  ASSERT_EQ(slides.size(), 2u);
+  EXPECT_EQ(slides[0].start, 180);
+  EXPECT_EQ(slides[1].start, 100);
+}
+
+TEST_F(ContextSliderTest, ReasoningCompaction_OpenSpan_Skipped) {
+  AlwaysCompactingFake compactor;
+  std::vector<SlideCall> slides;
+  // Span with end < 0 (close was never captured) plus a real one.
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{
+      {120, static_cast<llama_pos>(-1)}, {180, 220}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/250,
+      /*firstMsgTokens=*/50,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  // Only the closed span hit the compactor.
+  ASSERT_EQ(compactor.calls.size(), 1u);
+  EXPECT_EQ(compactor.calls[0].start, 180);
+  EXPECT_EQ(result.discardsApplied, 1);
+  ASSERT_EQ(slides.size(), 1u);
+  // Reverse walk: the open span is the second entry in `result.entries`
+  // (walked first, recorded second).
+  ASSERT_EQ(result.entries.size(), 2u);
+  EXPECT_EQ(result.entries[0].status,
+            ReasoningCompactionEntry::Status::Compacted);
+  EXPECT_EQ(result.entries[1].status,
+            ReasoningCompactionEntry::Status::Skipped);
+}
+
+TEST_F(ContextSliderTest, ReasoningCompaction_DegenerateSpan_Skipped) {
+  AlwaysCompactingFake compactor;
+  std::vector<SlideCall> slides;
+  // end == start (empty) and end < start (inverted) — both must skip
+  // without invoking compactOp.
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{
+      {100, 100}, {150, 130}, {180, 220}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/250,
+      /*firstMsgTokens=*/50,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  ASSERT_EQ(compactor.calls.size(), 1u);
+  EXPECT_EQ(compactor.calls[0].start, 180);
+  EXPECT_EQ(result.discardsApplied, 1);
+  ASSERT_EQ(result.entries.size(), 3u);
+  // Reverse walk: real span processed first → entries[0]. Two skipped
+  // degenerate spans follow.
+  EXPECT_EQ(result.entries[0].status,
+            ReasoningCompactionEntry::Status::Compacted);
+  EXPECT_EQ(result.entries[1].status,
+            ReasoningCompactionEntry::Status::Skipped);
+  EXPECT_EQ(result.entries[2].status,
+            ReasoningCompactionEntry::Status::Skipped);
+}
+
+TEST_F(ContextSliderTest, ReasoningCompaction_MemoryOperationFailed_NoStateChange) {
+  // Fake that fails the FIRST call (the later span in reverse walk).
+  struct FailingFake {
+    std::vector<CompactOpCall> calls;
+    CompactRangeOutcome operator()(
+        llama_pos start, llama_pos end, llama_pos nPast) {
+      calls.push_back({start, end, nPast});
+      if (calls.size() == 1) {
+        return {CompactRangeOutcome::Kind::MemoryOperationFailed, nPast, 0};
+      }
+      const llama_pos discarded = end - start;
+      return {
+          CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
+    }
+  } compactor;
+  std::vector<SlideCall> slides;
+  const std::vector<std::pair<llama_pos, llama_pos>> spans{{100, 130}, {180, 220}};
+
+  const auto result = runReasoningCompaction(
+      spans,
+      /*nPast=*/250,
+      /*firstMsgTokens=*/50,
+      std::ref(compactor),
+      [&](int d, llama_pos s) { slides.push_back({d, s}); });
+
+  // First (reverse) span failed: nPast unchanged for that step. Second
+  // (earlier) span proceeds normally against the still-untouched tail.
+  EXPECT_EQ(result.newNPast, 220);             // 250 - 30 only
+  EXPECT_EQ(result.discardsApplied, 1);
+  ASSERT_EQ(result.entries.size(), 2u);
+  EXPECT_EQ(result.entries[0].status,
+            ReasoningCompactionEntry::Status::MemoryOperationFailed);
+  EXPECT_EQ(result.entries[1].status,
+            ReasoningCompactionEntry::Status::Compacted);
+  // onSlide only fires for the successful compaction.
+  ASSERT_EQ(slides.size(), 1u);
+  EXPECT_EQ(slides[0].start, 100);
+}

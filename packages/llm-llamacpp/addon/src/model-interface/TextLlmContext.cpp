@@ -18,7 +18,7 @@
 #include "inference-addon-cpp/Logger.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
-#include "utils/Qwen3ReasoningUtils.hpp"
+#include "utils/ReasoningUtils.hpp"
 
 using namespace qvac_lib_inference_addon_llama::errors;
 using namespace qvac_lib_inference_addon_cpp::logger;
@@ -84,9 +84,24 @@ void TextLlmContext::initializeCommonState() {
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
               modelCtx_.model);
   if (reasoningTags.has_value()) {
-    qvac_lib_inference_addon_llama::utils::initializeReasoningState(
-        modelCtx_.lctx, reasoningState_, *reasoningTags);
-    reasoningEnabled_ = true;
+    // Gate on the init return: if the open marker doesn't tokenise to a
+    // sequence of registered special tokens, the span-start math would
+    // silently drift and corrupt the KV cache, so disable detection
+    // (compaction stays a no-op) and surface a warning.
+    const bool reasoningInitOk =
+        qvac_lib_inference_addon_llama::utils::initializeReasoningState(
+            modelCtx_.lctx, reasoningState_, *reasoningTags);
+    if (reasoningInitOk) {
+      reasoningEnabled_ = true;
+    } else {
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[TextLlm] reasoning detection disabled: open marker '%s' "
+              "does not tokenise to special tokens under this vocab; "
+              "thinking-block compaction will be skipped\n",
+              reasoningTags->open.c_str()));
+    }
   }
 
   isHarmonyModel_ =
@@ -865,47 +880,50 @@ void TextLlmContext::compactThinkSpans() {
     return;
   }
 
-  // Walk in reverse so earlier spans' positions stay valid as later
-  // ones collapse.
-  for (auto it = thinkSpans_.rbegin(); it != thinkSpans_.rend(); ++it) {
-    const llama_pos start = it->first;
-    const llama_pos end = it->second;
-    // Single validation backstop for all close-capture sites — none of
-    // them validate `end > start` themselves.
-    if (end < 0 || end <= start) {
-      continue;
-    }
-    const CompactRangeOutcome outcome =
-        compactKvRange(modelCtx_.lctx, seqId_, start, end, nPast_);
-    if (outcome.kind == CompactRangeOutcome::Kind::Compacted) {
-      nPast_ = outcome.newNPast;
-      if (start < firstMsgTokens_) {
-        firstMsgTokens_ = start;
-      }
-      if (tools_.enabled()) {
-        tools_.onSlide(outcome.discarded, start);
-      }
-      ++thinkingBlockDiscards_;
+  // Orchestration is unit-tested in `test_context_slider.cpp` via
+  // `runReasoningCompaction`. Here we only wire it to the live llama
+  // context (`compactKvRange`) and tools_compact controller, plus emit
+  // per-span logs from the returned entries.
+  const ReasoningCompactionResult result = runReasoningCompaction(
+      thinkSpans_,
+      nPast_,
+      firstMsgTokens_,
+      [this](llama_pos start, llama_pos end, llama_pos curNPast) {
+        return compactKvRange(modelCtx_.lctx, seqId_, start, end, curNPast);
+      },
+      [this](int discarded, llama_pos start) {
+        if (tools_.enabled()) {
+          tools_.onSlide(discarded, start);
+        }
+      });
+  nPast_ = result.newNPast;
+  firstMsgTokens_ = result.newFirstMsgTokens;
+  thinkingBlockDiscards_ += result.discardsApplied;
+
+  for (const ReasoningCompactionEntry& entry : result.entries) {
+    if (entry.status == ReasoningCompactionEntry::Status::Compacted) {
+      // Per-span running state — matches the pre-refactor log content.
       QLOG_IF(
           Priority::DEBUG,
           string_format(
               "[TextLlm] thinking-block compaction: dropped %d tokens "
               "[%d, %d), nPast=%d, firstMsgTokens=%d\n",
-              outcome.discarded,
-              start,
-              end,
-              nPast_,
-              firstMsgTokens_));
+              entry.discarded,
+              entry.start,
+              entry.end,
+              entry.nPastAfter,
+              entry.firstMsgTokensAfter));
     } else if (
-        outcome.kind == CompactRangeOutcome::Kind::MemoryOperationFailed) {
+        entry.status ==
+        ReasoningCompactionEntry::Status::MemoryOperationFailed) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
               "[TextLlm] thinking-block compaction failed: seqRm rejected "
               "range [%d, %d) (nPast=%d, seqId=%d)\n",
-              start,
-              end,
-              nPast_,
+              entry.start,
+              entry.end,
+              entry.nPastAfter,
               seqId_));
     }
   }
