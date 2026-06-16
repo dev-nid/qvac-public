@@ -51,12 +51,18 @@ bool isGemma4Architecture(std::string_view architecture) {
   return normalizeArchitecture(architecture) == "gemma4";
 }
 
-// Matches the Qwen3 family for reasoning detection: qwen3, qwen35,
-// qwen35moe, qwen36, ... All emit `<think>`/`</think>`. Broader than
-// `isQwen3Architecture` (which is exact-match "qwen3" for the
-// tools_compact path).
+// Architectures in the Qwen3 family that emit `<think>`/`</think>` for
+// reasoning. Broader than `isQwen3Architecture` (which is exact-match
+// "qwen3" for the tools_compact path). Add new arch strings here as
+// llama.cpp introduces them; an explicit list (vs. prefix match) keeps
+// unrelated `qwen3*`-named archs from silently getting the wrong tags.
+inline constexpr std::array<std::string_view, 4> kQwen3ReasoningFamilyArches{
+    "qwen3", "qwen3moe", "qwen35", "qwen35moe"};
+
 bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
-  return normalizeArchitecture(architecture).starts_with("qwen3");
+  const std::string normalised = normalizeArchitecture(architecture);
+  return std::ranges::find(kQwen3ReasoningFamilyArches, normalised) !=
+         kQwen3ReasoningFamilyArches.end();
 }
 
 std::optional<std::string>

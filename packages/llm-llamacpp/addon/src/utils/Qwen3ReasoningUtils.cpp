@@ -20,16 +20,18 @@ void initializeReasoningState(
     return;
   }
 
+  // Standalone counts match the in-context emission iff `tags.open` is a
+  // registered special token (BPE-merge barrier under parse_special=true).
   std::vector<llama_token> openTokens =
-      common_tokenize(lctx, std::string(tags.open), false, true);
+      common_tokenize(lctx, tags.open, false, true);
   state.openTokenCount = static_cast<int>(openTokens.size());
 
   std::vector<llama_token> forcedOpenTokens =
-      common_tokenize(lctx, std::string(tags.open) + "\n", false, true);
+      common_tokenize(lctx, tags.open + "\n", false, true);
   state.forcedOpenTokenCount = static_cast<int>(forcedOpenTokens.size());
 
   std::vector<llama_token> closeTokens =
-      common_tokenize(lctx, std::string(tags.close), false, true);
+      common_tokenize(lctx, tags.close, false, true);
   if (closeTokens.size() == 1) {
     state.cached_close_tag_token = closeTokens[0];
   }
