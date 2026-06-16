@@ -53,10 +53,6 @@ public:
 
   [[nodiscard]] virtual int32_t getNSlides() const = 0;
 
-  /// Number of `<think>` reasoning blocks compacted out of this
-  /// sequence's KV cache during the current run. Aggregated by the
-  /// scheduler into `RuntimeStatsSnapshot::thinkingBlockDiscards`.
-  /// Defaults to 0 for drivers without reasoning channel support.
   [[nodiscard]] virtual int32_t getThinkingBlockDiscards() const { return 0; }
 
   /// Reject prompts that violate per-sequence admission policy (size,

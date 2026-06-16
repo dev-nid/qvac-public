@@ -111,38 +111,20 @@ ContextSlideOutcome trySlideGeneration(
 /// Outcome of an in-place KV-cache range compaction.
 struct CompactRangeOutcome {
   enum class Kind {
-    NoOp,                  ///< Empty / inverted range; cache untouched.
-    Compacted,             ///< Range removed and tail shifted; `newNPast`
-                           ///< reflects the new top.
-    MemoryOperationFailed, ///< `seqRm` rejected the request; cache
-                           ///< unchanged.
+    NoOp,                  // Empty / inverted range; cache untouched
+    Compacted,             // Range removed and tail shifted
+    MemoryOperationFailed, // seqRm rejected the request
   };
 
   Kind kind = Kind::NoOp;
-  llama_pos newNPast = 0; ///< Updated `nPast` after the compaction.
-  llama_pos discarded = 0; ///< Number of tokens removed (end - start).
+  llama_pos newNPast = 0;
+  llama_pos discarded = 0;
 };
 
-/// Drop `[startPos, endPos)` from `seqId`'s KV cache and shift the tail
-/// `[endPos, nPast)` down so positions remain contiguous. Returns
-/// `newNPast = nPast - (endPos - startPos)`.
-///
-/// This is the same low-level `seqRm` + `seqAdd` primitive the regular
-/// `trySlide*` helpers use, exposed as a standalone operation for
-/// callers that have *already* decided which window to discard (e.g.
-/// the thinking-block compaction at end-of-generation). It performs no
-/// overflow / policy checks of its own — those belong to the caller.
-///
-/// Pre-conditions:
-///   * `0 <= startPos <= endPos <= nPast`.
-///   * The caller has already updated any external bookkeeping
-///     (`firstMsgTokens`, `tools_compact` anchor) that depends on the
-///     range being valid.
-///
-/// Returns `NoOp` when the range is empty / inverted (no operation
-/// performed). Returns `MemoryOperationFailed` when `seqRm` rejects the
-/// range; the cache is left untouched and the caller should not adjust
-/// its bookkeeping.
+/// Drops `[startPos, endPos)` from `seqId`'s KV cache and shifts the tail
+/// `[endPos, nPast)` down. Pure primitive; the caller owns policy
+/// (overflow checks, `firstMsgTokens` / tools_compact accounting).
+/// Returns NoOp for empty / out-of-range inputs without touching the cache.
 CompactRangeOutcome compactKvRange(
     llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
     llama_pos endPos, llama_pos nPast,

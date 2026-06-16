@@ -39,14 +39,10 @@ struct GenerationParams {
   // override is applied to `params_.reasoning_budget` for the duration of the
   // request and restored on completion.
   std::optional<int> reasoning_budget;
-  // Per-request override for the post-generation thinking-block KV cache
-  // compaction. When true (the default), any reasoning block emitted
-  // during this generation (e.g. `<think>...</think>` for Qwen3,
-  // `<|channel>thought ... <channel|>` for Gemma 4) is dropped from the
-  // KV cache at end-of-generation so subsequent turns don't accumulate
-  // reasoning history. When false, the block is left in place. The
-  // override is restored at end-of-request. Only meaningful for text
-  // contexts; multimodal contexts ignore it.
+  // Per-request override for the post-generation thinking-block KV
+  // cache compaction. Defaults to true at the context level; passing
+  // false here leaves the reasoning block in the cache for this
+  // request. Restored at end-of-request.
   std::optional<bool> remove_thinking_from_context;
 
   [[nodiscard]] bool hasOverrides() const {
@@ -291,17 +287,11 @@ public:
   virtual void resetNSlides() = 0;
 
   /**
-   * Get the number of `<think>` reasoning blocks compacted out of the
-   * KV cache during the most recent generation. Defaults to 0 for
-   * contexts without recognised reasoning channel support (e.g.
-   * multimodal). Overridden by `TextLlmContext`.
+   * Number of `<think>` reasoning blocks compacted out of the KV
+   * cache during the most recent generation. 0 for contexts without
+   * reasoning channel support.
    */
   [[nodiscard]] virtual int32_t getThinkingBlockDiscards() const { return 0; }
-
-  /**
-   * Reset the thinking-block compaction counter to zero. No-op for
-   * contexts without recognised reasoning channel support.
-   */
   virtual void resetThinkingBlockDiscards() {}
 
   /**

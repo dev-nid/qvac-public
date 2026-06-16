@@ -79,15 +79,12 @@ void TextLlmContext::initializeCommonState() {
     modelCtx_.vocab = llama_model_get_vocab(modelCtx_.model);
   }
 
-  // Resolve the active model's reasoning channel markers (Qwen3 /
-  // Gemma 4 / etc.). When the model has no recognised reasoning
-  // channel, `tags` is empty and the per-token detection / EOS
-  // replacement paths become no-ops.
-  if (auto tags = qvac_lib_inference_addon_llama::utils::
+  const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
+      reasoningTags = qvac_lib_inference_addon_llama::utils::
           selectReasoningTagsForModel(modelCtx_.model);
-      tags.has_value()) {
+  if (reasoningTags.has_value()) {
     qvac_lib_inference_addon_llama::utils::initializeReasoningState(
-        modelCtx_.lctx, reasoningState_, *tags);
+        modelCtx_.lctx, reasoningState_, *reasoningTags);
     reasoningEnabled_ = true;
   }
 
@@ -519,26 +516,20 @@ void TextLlmContext::onPrefillComplete(
   }
   tools_.onEvalComplete(nPast_, static_cast<llama_pos>(prefillTokenCount));
 
-  // Reset per-inference reasoning detection state here (not in
-  // `generateResponse`) so the continuous-batching path — which never
-  // calls `generateResponse` — gets the same fresh slate.
+  // Reset per-inference reasoning detection state here (shared by the
+  // single-prompt and continuous-batching paths).
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
   thinkSpans_.clear();
   pendingThinkCloseCapture_ = false;
 
-  // When the chat template force-opened the reasoning channel in the
-  // assistant prefix (`<think>\n` for Qwen3 / DeepSeek-R1), the
-  // opening tokens have already been written into the KV cache by
-  // prefill. Record their span here so `compactThinkSpans` can drop
-  // them at end-of-generation. Also flip `inside_reasoning` so the
-  // first model-emitted token is treated as reasoning body rather
-  // than as a fresh assistant turn — matters in batch mode where
-  // `generateResponse`'s equivalent setup never runs.
+  // Template force-opened the reasoning channel (e.g. Qwen3 / DeepSeek-R1
+  // assistant prefix ends with `<think>\n`): the opening tokens are
+  // already in the KV cache, record their span so compactThinkSpans
+  // can drop them at end-of-generation.
   if (thinkingForcedOpen_ && reasoningEnabled_) {
-    if (removeThinkingFromContext_) {
-      captureForcedOpenThinkSpanStart();
-    }
+    pushOpenThinkSpan(
+        nPast_ - static_cast<llama_pos>(reasoningState_.forcedOpenTokenCount));
     reasoningState_.inside_reasoning = true;
   }
 }
@@ -579,15 +570,10 @@ llama_pos TextLlmContext::applyContextDiscard() {
   if (outcome.kind == ContextSlideOutcome::Kind::Slid) {
     nPast_ = outcome.newNPast;
     ++nSlides_;
-    // The slide moves token positions; recorded think-block spans are
-    // no longer valid in absolute terms. Drop them rather than try to
-    // shift each one — for the rare case where generation hits
-    // context overflow, losing per-block compaction this turn is a
-    // fair trade for not corrupting the cache via stale spans.
-    if (!thinkSpans_.empty() || pendingThinkCloseCapture_) {
-      thinkSpans_.clear();
-      pendingThinkCloseCapture_ = false;
-    }
+    // Recorded span positions are no longer valid after the shift;
+    // drop them rather than try to fix them up.
+    thinkSpans_.clear();
+    pendingThinkCloseCapture_ = false;
     QLOG_IF(
         Priority::DEBUG,
         string_format(
@@ -629,22 +615,15 @@ bool TextLlmContext::generateResponse(
   LlamaBatch batch(1, 0, 1); // batch for next token generation
   unsigned generatedAfterAccept = 0;
 
-  // `inside_reasoning`, `recent_output_buffer`, `thinkSpans_` and
-  // `pendingThinkCloseCapture_` are reset in `onPrefillComplete` so
-  // both single-prompt and batch paths start from the same baseline.
-  // We only reset state owned exclusively by the single-prompt loop
-  // here.
   forcedTokens_.clear();
   assistantOutput_.clear();
   generationStarted_ = false;
 
   // The chat template force-opened the reasoning channel in the prompt (e.g.
-  // Qwen3-style / DeepSeek-R1 templates end with "<think>\n"), so the model
-  // resumes generation INSIDE the reasoning block. (Gemma4's reasoning channel
-  // is model-emitted upstream and does not set this flag.)
-  // The matching `inside_reasoning` flag and forced-open span capture
-  // already happened in `onPrefillComplete`; here we only emit the
-  // user-visible "<think>\n" so callers see a balanced tag pair.
+  // Qwen3 / DeepSeek-R1 templates end with "<think>\n"). Emit the matching
+  // opener to the visible stream so consumers see a balanced tag pair;
+  // `inside_reasoning` and the span capture were already set in
+  // `onPrefillComplete`.
   if (thinkingForcedOpen_ && outputCallback) {
     outputCallback("<think>\n");
   }
@@ -699,9 +678,8 @@ SequenceStepResult TextLlmContext::onLogitsReady(
     int logitIdx, unsigned generatedAfterAccept,
     const std::function<void(const std::string&)>& outputCallback,
     LlamaBatch* inlineDecodeBatch) {
-  // Materialise any close-position capture deferred from the previous
-  // iteration: by now the close-marker token has been committed to
-  // the KV cache and `nPast_` points one past it.
+  // Finalise the previous iteration's deferred close-position capture;
+  // the close-marker token has been committed by now.
   capturePendingThinkClose();
 
   if (stopGeneration_.load()) {
@@ -761,15 +739,14 @@ SequenceStepResult TextLlmContext::onLogitsReady(
         tokenStr, reasoningState_);
     const bool nowInside = reasoningState_.inside_reasoning;
     if (!wasInside && nowInside) {
-      // Buffer matched the open marker — record the span start. The
-      // current sampled token is the LAST piece of the open marker
-      // and will be batch-added at `nPast_` by the caller.
-      captureModelOpenThinkSpanStart();
+      // The current sampled token is the LAST piece of the open marker;
+      // earlier pieces (openTokenCount - 1) are already in the cache.
+      pushOpenThinkSpan(
+          nPast_ - static_cast<llama_pos>(reasoningState_.openTokenCount - 1));
     }
     if (wasInside && !nowInside) {
-      // Defer the end capture: the close-marker token hasn't been
-      // committed to the cache yet (the caller's batch_add runs after
-      // this function returns).
+      // Defer end capture — the close-marker token has not yet been
+      // committed to the cache.
       pendingThinkCloseCapture_ = true;
     }
   }
@@ -792,9 +769,6 @@ SequenceStepResult TextLlmContext::onLogitsReady(
       tokenStr =
           common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
       reasoningState_.inside_reasoning = false;
-      // The close-marker token will be committed by the caller's
-      // batch_add path; capture the end at the top of the next
-      // `onLogitsReady` once that's happened.
       pendingThinkCloseCapture_ = true;
       if (reasoningState_.cached_newline_token != LLAMA_TOKEN_NULL) {
         forcedTokens_.push_back(reasoningState_.cached_newline_token);
@@ -839,26 +813,16 @@ void TextLlmContext::onSequenceEnd(
 
 void TextLlmContext::onGenerationFinished(
     const std::function<void(const std::string&)>& outputCallback) {
-  // Materialise any close-position capture deferred from the last
-  // decoded iteration. The close marker has been committed by now
-  // (the scheduler / single-prompt loop drained the batch before
-  // arriving here), so `nPast_` is one past the last token of the
-  // reasoning block.
   capturePendingThinkClose();
-
   onSequenceEnd(outputCallback);
   if (generationStarted_) {
     onGenerationCompletePolicy(assistantOutput_);
     assistantOutput_.clear();
     generationStarted_ = false;
   }
-
-  // Drop the recorded think-block spans last so the
-  // `onGenerationCompletePolicy` tail-trim above sees the pre-
-  // compaction `nPast_` (and tail offsets remain consistent with
-  // `assistantOutput_`). Spans below `firstMsgTokens_` shrink the
-  // protected prefix in step with the cache to keep the slider's
-  // accounting valid for the next turn.
+  // Compact after the tools-compact tail trim so that pass sees the
+  // pre-compaction `nPast_` (its offsets are computed against
+  // `assistantOutput_`).
   compactThinkSpans();
 }
 
@@ -867,44 +831,10 @@ void TextLlmContext::onCancel(
   onGenerationFinished(outputCallback);
 }
 
-void TextLlmContext::captureForcedOpenThinkSpanStart() {
-  if (!removeThinkingFromContext_ || !reasoningEnabled_) {
+void TextLlmContext::pushOpenThinkSpan(llama_pos start) {
+  if (!removeThinkingFromContext_ || !reasoningEnabled_ || start < 0) {
     return;
   }
-  const int forcedCount = reasoningState_.forcedOpenTokenCount;
-  if (forcedCount <= 0) {
-    return;
-  }
-  const llama_pos start = nPast_ - static_cast<llama_pos>(forcedCount);
-  if (start < 0) {
-    return;
-  }
-  thinkSpans_.emplace_back(start, static_cast<llama_pos>(-1));
-}
-
-void TextLlmContext::captureModelOpenThinkSpanStart() {
-  if (!removeThinkingFromContext_ || !reasoningEnabled_) {
-    return;
-  }
-  const int openCount = reasoningState_.openTokenCount;
-  if (openCount <= 0) {
-    return;
-  }
-  // The sampled token currently held by the caller is the LAST piece
-  // of the open marker; the preceding `openCount - 1` pieces are
-  // already in the cache. The current token will land at `nPast_`
-  // after the caller's batch_add, so the span starts `openCount - 1`
-  // positions before `nPast_`.
-  const llama_pos start =
-      nPast_ - static_cast<llama_pos>(openCount - 1);
-  if (start < 0) {
-    return;
-  }
-  // Defend against opening a second span while one is already open
-  // (shouldn't happen — `inside_reasoning` would have been true and
-  // `updateReasoningBuffer` skips the false->true edge — but the
-  // guard keeps the data structure self-consistent under unexpected
-  // model output).
   if (!thinkSpans_.empty() && thinkSpans_.back().second < 0) {
     return;
   }
@@ -919,7 +849,7 @@ void TextLlmContext::capturePendingThinkClose() {
   if (!removeThinkingFromContext_ || thinkSpans_.empty()) {
     return;
   }
-  auto& back = thinkSpans_.back();
+  std::pair<llama_pos, llama_pos>& back = thinkSpans_.back();
   if (back.second < 0) {
     back.second = nPast_;
   }
@@ -932,15 +862,11 @@ void TextLlmContext::compactThinkSpans() {
   }
 
   // Walk in reverse so earlier spans' positions stay valid as later
-  // spans collapse. Each compaction shrinks `nPast_` (and possibly
-  // `firstMsgTokens_`) for the subsequent calls.
+  // ones collapse.
   for (auto it = thinkSpans_.rbegin(); it != thinkSpans_.rend(); ++it) {
     const llama_pos start = it->first;
     const llama_pos end = it->second;
     if (end < 0 || end <= start) {
-      // Incomplete or degenerate span (e.g. model hit n_predict before
-      // emitting the close marker). Leave the tokens in cache — we
-      // cannot reliably guess where the block should have ended.
       continue;
     }
     const CompactRangeOutcome outcome = compactKvRange(
@@ -948,16 +874,9 @@ void TextLlmContext::compactThinkSpans() {
     if (outcome.kind == CompactRangeOutcome::Kind::Compacted) {
       nPast_ = outcome.newNPast;
       if (start < firstMsgTokens_) {
-        // The span straddled (or sat entirely inside) the protected
-        // first-message region — typical for a turn-1 forced-open
-        // `<think>\n` prefix tacked onto the system + user prompt.
-        // Shrink the protected boundary to keep its invariant
-        // (`[0, firstMsgTokens_)` is contiguous and untouched).
         firstMsgTokens_ = start;
       }
       if (tools_.enabled()) {
-        // Keep the tools_compact anchor's relative offset consistent
-        // with the new cache layout so future slides stay sane.
         tools_.onSlide(outcome.discarded, start);
       }
       ++thinkingBlockDiscards_;
@@ -1230,10 +1149,8 @@ bool TextLlmContext::handleReasoningEOS(
         "[TextLlm] Failed to decode closing tag during replacement\n");
   }
 
-  // Close marker just committed — capture the end of the active
-  // think-block span now, BEFORE the trailing newlines below. The
-  // injected newlines are deliberately excluded from the span so they
-  // stay in the cache as structural separators.
+  // Close marker just committed — record span end before injecting
+  // the trailing newlines (they are excluded from the span).
   if (removeThinkingFromContext_ && !thinkSpans_.empty() &&
       thinkSpans_.back().second < 0) {
     thinkSpans_.back().second = nPast;
