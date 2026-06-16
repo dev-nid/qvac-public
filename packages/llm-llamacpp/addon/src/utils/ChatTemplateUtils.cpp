@@ -52,13 +52,27 @@ bool isGemma4Architecture(std::string_view architecture) {
   return normalizeArchitecture(architecture) == "gemma4";
 }
 
-// Architectures in the Qwen3 family that emit `<think>`/`</think>` for
-// reasoning. Broader than `isQwen3Architecture` (which is exact-match
-// "qwen3" for the tools_compact path). Add new arch strings here as
-// llama.cpp introduces them; an explicit list (vs. prefix match) keeps
-// unrelated `qwen3*`-named archs from silently getting the wrong tags.
-inline constexpr std::array<std::string_view, 4> kQwen3ReasoningFamilyArches{
-    "qwen3", "qwen3moe", "qwen35", "qwen35moe"};
+// Architectures in the Qwen3 family that emit `<think>`/`</think>` AND
+// tolerate the thinking-block KV-cache compaction. Broader than
+// `isQwen3Architecture` (which is exact-match "qwen3" for the
+// tools_compact path) but deliberately narrower than the full `qwen3*`
+// HuggingFace lineage.
+//
+// `qwen35` / `qwen35moe` are intentionally excluded: Qwen3.5 is a hybrid
+// SSM + attention model with multi-dimensional M-RoPE
+// (`rope.dimension_sections = [n,n,n,0]`) and recurrent SSM state
+// (`ssm.conv_kernel`, `ssm.state_size`). Compaction works by editing the
+// KV cache in place with `llama_memory_seq_rm` + `llama_memory_seq_add`
+// (re-rotate tail K vectors), which assumes pure-attention transformers
+// with simple 1-D RoPE. On 3.5 the in-place edit silently desyncs the
+// cache (M-RoPE sections aren't all re-rotated; SSM state still carries
+// contributions from the dropped tokens), corrupting any subsequent
+// inference that reads the compacted cache.
+//
+// Add new arch strings here only after end-to-end multi-turn validation
+// against the architecture in question.
+inline constexpr std::array<std::string_view, 2> kQwen3ReasoningFamilyArches{
+    "qwen3", "qwen3moe"};
 
 bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
   const std::string normalised = normalizeArchitecture(architecture);

@@ -324,7 +324,7 @@ safeTest('remove_thinking_from_context=false is honoured in batch path', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
 }, async t => {
-  const { inference } = await setupReasoningModel(t, false, { parallel: '2' })
+  const { inference } = await setupReasoningModel(t, false, { configOverrides: { parallel: '2' } })
 
   const batchInput = [
     {
@@ -452,23 +452,24 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
 })
 
 // ---------------------------------------------------------------------------
-// Qwen3.5 coverage. The compaction path is enabled for the whole `qwen3*`
-// family via the architecture-prefix match, but the only behavioural proof in
-// this PR is on Qwen3-0.6B. Qwen3.5 historically drives the KV cache
-// differently (iM-RoPE position handling, longer thinking traces), which is
-// exactly where an in-place mid-sequence `seq_rm` + `seq_add` renumber is most
-// likely to break. These two tests run the same default-on and multi-turn
-// cache-growth checks against a real Qwen3.5 checkpoint.
+// Qwen3.5 coverage. Qwen3.5 is intentionally excluded from the reasoning /
+// compaction family allow-list in `kQwen3ReasoningFamilyArches`: it is a
+// hybrid SSM + attention model with multi-dimensional M-RoPE, and the
+// in-place `seq_rm` + `seq_add` cache edit silently desyncs the K/V state on
+// that architecture (manifests as runaway turn-2 generation against a
+// reloaded cache). These tests lock in the architectural gate end-to-end:
+// turn 1 still produces a `<think>...</think>` block, but `thinkingBlockDiscards`
+// stays at 0 and multi-turn cache reuse remains coherent.
 //
 // Qwen3.5 thinking traces can run well past 1k tokens before `</think>`, so we
-// give a larger n_predict (otherwise the close marker is cut off, the span is
-// left incomplete, and compaction is correctly skipped — masking the feature).
+// give a larger n_predict; runaway generation under a broken compaction would
+// also hit this cap, which is the failure mode the multi-turn test catches.
 const QWEN35_REASONING_CONFIG = {
   ctx_size: '8192',
   n_predict: '3072'
 }
 
-safeTest('remove_thinking_from_context defaults on for Qwen3.5', {
+safeTest('remove_thinking_from_context is disabled for Qwen3.5 (architectural gate)', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 900_000
 }, async t => {
@@ -482,21 +483,20 @@ safeTest('remove_thinking_from_context defaults on for Qwen3.5', {
   t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
   t.comment(`stats: ${JSON.stringify(stats)}`)
 
-  verifyReasoningTags(t, response, 'Qwen3.5 default compaction')
+  verifyReasoningTags(t, response, 'Qwen3.5 reasoning output')
 
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
-  t.ok(thinkingDiscards >= 1,
-    `Qwen3.5 default run should report at least one compaction (got ${thinkingDiscards}) — ` +
-    'a 0 here means the qwen3* family is detected but the span was never dropped')
+  t.is(thinkingDiscards, 0,
+    `Qwen3.5 should report 0 discards (got ${thinkingDiscards}) — compaction must stay disabled ` +
+    'on the SSM/M-RoPE hybrid; a non-zero here means the family gate regressed')
 })
 
-// The headline cross-turn test for Qwen3.5: the same two-turn flow run with
-// compaction ON (default) vs OFF. If 3.5's position handling does not tolerate
-// the mid-sequence renumber, the ON run either fails to shrink the cache (no
-// reduction vs OFF) or corrupts turn 2 (no balanced reasoning tags / empty
-// answer). Asserting both the discard count and the cache delta catches the
-// "straight compaction silently fails on 3.5" failure mode directly.
-safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)', {
+// Multi-turn safety check on Qwen3.5: with the architectural gate in place,
+// `remove_thinking_from_context: true` (the default) is a no-op on this family,
+// so the same two-turn flow must produce identical behaviour to the explicit
+// OFF run — no compaction, no runaway, balanced reasoning tags in turn 2,
+// and a turn-2 cache size within a small tolerance of the OFF run.
+safeTest('Qwen3.5 multi-turn cache reuse stays coherent (gate honours cacheKey)', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
 }, async t => {
@@ -511,26 +511,33 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)
 
   const messages1 = createInitialMessages()
 
-  // Run A — compaction ON (default).
+  // Run A — default (`remove_thinking_from_context: true`). The Qwen3.5 gate
+  // should turn the toggle into a no-op so both turns complete cleanly with 0
+  // discards. Without the gate this branch ran away on turn 2 (no clean
+  // </think>, generation hit the predict cap).
   const { inference: infA } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
   })
   const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA })
   verifyReasoningTags(t, a1.response, 'Qwen3.5 A turn 1')
-  t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
-    'Qwen3.5 A turn 1 should compact at least one thinking block')
+  t.is(toNumber(a1.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 A turn 1 should report 0 discards under the architectural gate')
   const a2 = await runCompletionWithStats(
     infA,
     createFollowUpMessages(messages1, a1.response),
     { cacheKey: sessionA }
   )
-  // Turn 2 must still produce a well-formed reasoning turn after the turn-1
-  // cache was edited in place — this is the assertion that fails if the
-  // renumber desynced 3.5's cache.
+  // The critical assertion: turn 2 produces a balanced reasoning block.
+  // Without the gate, the corrupted cache caused turn 2 to never emit
+  // </think> and to run until the n_predict cap.
   verifyReasoningTags(t, a2.response, 'Qwen3.5 A turn 2')
+  t.is(toNumber(a2.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 A turn 2 should also report 0 discards')
 
-  // Run B — same flow, compaction OFF.
+  // Run B — explicit `remove_thinking_from_context: false`. Should behave
+  // identically to Run A on Qwen3.5: the gate makes the default-on equivalent
+  // to opt-out, so cache sizes must match within a small tolerance.
   const { inference: infB } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
@@ -543,7 +550,7 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)
   )
   verifyReasoningTags(t, b1.response, 'Qwen3.5 B turn 1')
   t.is(toNumber(b1.stats.thinkingBlockDiscards), 0,
-    'Qwen3.5 B turn 1 with compaction off should report 0 discards')
+    'Qwen3.5 B turn 1 with explicit OFF should also report 0 discards')
   const b2 = await runCompletionWithStats(
     infB,
     createFollowUpMessages(messages1, b1.response),
@@ -553,11 +560,18 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)
 
   const cacheA2 = toNumber(a2.stats.CacheTokens)
   const cacheB2 = toNumber(b2.stats.CacheTokens)
-  t.comment(`Qwen3.5 compaction ON  turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
-  t.comment(`Qwen3.5 compaction OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
+  t.comment(`Qwen3.5 default turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
+  t.comment(`Qwen3.5 explicit-OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
 
-  t.ok(cacheA2 > 0, `Qwen3.5 compaction-on turn 2 should have non-zero cache (got ${cacheA2})`)
-  t.ok(cacheB2 > 0, `Qwen3.5 compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
-  t.ok(cacheA2 < cacheB2,
-    `Qwen3.5 turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
+  t.ok(cacheA2 > 0, `Qwen3.5 default turn 2 should have non-zero cache (got ${cacheA2})`)
+  t.ok(cacheB2 > 0, `Qwen3.5 explicit-OFF turn 2 should have non-zero cache (got ${cacheB2})`)
+  // Cache sizes are content-dependent (greedy decoding may diverge between
+  // separate model instances), so allow a generous tolerance. The point of
+  // the assertion is "no runaway under the gate" — without it, cacheA2 would
+  // be in the multi-thousands while cacheB2 stays small.
+  const ratio = cacheA2 / cacheB2
+  t.ok(ratio < 1.5 && ratio > 0.66,
+    'Qwen3.5 default and explicit-OFF turn-2 caches should match within tolerance ' +
+    `(default=${cacheA2}, off=${cacheB2}, ratio=${ratio.toFixed(2)}) — a >1.5x ratio ` +
+    'indicates the gate has regressed and compaction is corrupting turn 2')
 })
