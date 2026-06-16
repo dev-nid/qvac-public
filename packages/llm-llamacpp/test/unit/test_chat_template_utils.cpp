@@ -95,6 +95,26 @@ TEST_F(ChatTemplateUtilsTest, SelectReasoningTagsForNullModelReturnsNullopt) {
   EXPECT_FALSE(selectReasoningTagsForModel(nullptr).has_value());
 }
 
+TEST_F(ChatTemplateUtilsTest, SelectReasoningTagsForArchitectureQwen3Family) {
+  for (std::string_view arch : {"qwen3", "qwen35", "qwen35moe", "qwen36"}) {
+    const std::optional<ReasoningTags> tags =
+        selectReasoningTagsForArchitecture(std::string(arch));
+    ASSERT_TRUE(tags.has_value()) << "arch=" << arch;
+    EXPECT_EQ(tags->open, "<think>") << "arch=" << arch;
+    EXPECT_EQ(tags->close, "</think>") << "arch=" << arch;
+  }
+}
+
+TEST_F(ChatTemplateUtilsTest, SelectReasoningTagsForArchitectureRejectsOthers) {
+  EXPECT_FALSE(
+      selectReasoningTagsForArchitecture(std::string("llama")).has_value());
+  EXPECT_FALSE(
+      selectReasoningTagsForArchitecture(std::string("gemma3")).has_value());
+  EXPECT_FALSE(
+      selectReasoningTagsForArchitecture(std::string("gpt-oss")).has_value());
+  EXPECT_FALSE(selectReasoningTagsForArchitecture(std::nullopt).has_value());
+}
+
 TEST_F(
     ChatTemplateUtilsTest, SupportsToolsCompactForModelMetadataByArchitecture) {
   EXPECT_TRUE(supportsToolsCompactForModelMetadata(std::string("qwen3")));

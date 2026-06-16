@@ -165,10 +165,6 @@ ContextSlideOutcome trySlidePrefill(
 CompactRangeOutcome compactKvRange(
     llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
     llama_pos endPos, llama_pos nPast, const IContextSliderOps& ops) {
-  // Empty / inverted ranges and out-of-bound endpoints are silently a
-  // no-op: the caller decides when to compact, and an empty range
-  // (e.g. an incomplete reasoning block whose close marker never
-  // arrived) should not perturb the cache.
   if (endPos <= startPos || startPos < 0 || endPos > nPast) {
     return {CompactRangeOutcome::Kind::NoOp, nPast, 0};
   }
@@ -178,10 +174,6 @@ CompactRangeOutcome compactKvRange(
   if (!ops.seqRm(mem, seqId, startPos, endPos)) {
     return {CompactRangeOutcome::Kind::MemoryOperationFailed, nPast, 0};
   }
-  // Shift the surviving tail `[endPos, nPast)` down so positions remain
-  // contiguous after the removed window. `seqAdd` with a negative
-  // delta is the standard primitive for this; the slider's regular
-  // slide path does the same thing.
   ops.seqAdd(mem, seqId, endPos, nPast, -discarded);
   return {
       CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};

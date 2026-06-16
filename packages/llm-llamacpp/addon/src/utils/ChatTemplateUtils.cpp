@@ -24,10 +24,7 @@ namespace {
 // `general.basename` GGUF metadata to identify MedPsy models.
 inline constexpr std::string_view MEDPSY_BASENAME_LOWER{"medpsy"};
 
-// Substrings searched case-insensitively against `general.basename` to
-// identify Gemma 4 GGUFs that ship before llama.cpp has a dedicated
-// `LLM_ARCH_GEMMA4` enum. Covers bartowski's
-// `google_gemma-4-E2B-it-*.gguf` family (basename "Gemma 4 E2B it").
+// Basename substrings used to identify Gemma 4 GGUFs by `general.basename`.
 inline constexpr std::array<std::string_view, 3> kGemma4BasenameMarkers{
     "gemma-4", "gemma 4", "gemma4"};
 
@@ -53,6 +50,14 @@ bool isHarmonyArchitecture(std::string_view architecture) {
 
 bool isGemma4Architecture(std::string_view architecture) {
   return normalizeArchitecture(architecture) == "gemma4";
+}
+
+// Matches the Qwen3 family for reasoning detection: qwen3, qwen35,
+// qwen35moe, qwen36, ... All emit `<think>`/`</think>`. Broader than
+// `isQwen3Architecture` (which is exact-match "qwen3" for the
+// tools_compact path).
+bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
+  return normalizeArchitecture(architecture).starts_with("qwen3");
 }
 
 std::optional<std::string>
@@ -138,10 +143,6 @@ bool isGemma4Model(const ::llama_model* model) {
   if (model == nullptr) {
     return false;
   }
-  // Prefer the explicit architecture signal when llama.cpp exposes
-  // `LLM_ARCH_GEMMA4`; fall back to basename matching for GGUFs that
-  // ship before the arch enum is in place (bartowski's
-  // google_gemma-4-* packs).
   const std::optional<std::string> arch = getModelArchitecture(model);
   if (arch.has_value() && isGemma4Architecture(arch.value())) {
     return true;
@@ -171,27 +172,27 @@ std::optional<std::string> selectToolsCompactMarkerForModelMetadata(
   return std::string("<tool_call>");
 }
 
+std::optional<ReasoningTags> selectReasoningTagsForArchitecture(
+    const std::optional<std::string>& architecture) {
+  if (architecture.has_value() &&
+      isQwen3ReasoningFamilyArchitecture(architecture.value())) {
+    return ReasoningTags{.open = "<think>", .close = "</think>"};
+  }
+  return std::nullopt;
+}
+
 std::optional<ReasoningTags>
 selectReasoningTagsForModel(const ::llama_model* model) {
   if (model == nullptr) {
     return std::nullopt;
   }
-  if (isQwen3Model(model)) {
-    // Qwen3 family (Qwen3, Qwen3.x, MedPsy fine-tunes, etc.). Both
-    // markers tokenise to a single special token under the Qwen3
-    // tokenizer, so the EOS-inside-reasoning replacement path is
-    // active.
-    return ReasoningTags{.open = "<think>", .close = "</think>"};
+  const std::optional<ReasoningTags> archTags =
+      selectReasoningTagsForArchitecture(getModelArchitecture(model));
+  if (archTags.has_value()) {
+    return archTags;
   }
   if (isGemma4Model(model)) {
-    // Gemma 4 emits a channel block of the form
-    // `<|channel>thought ... <channel|>`. The opening marker may
-    // tokenise to multiple BPE pieces under Gemma's tokenizer; the
-    // closing marker is asymmetric (`<channel|>` with a trailing
-    // pipe). `initializeReasoningState` will tokenise both at runtime
-    // to populate the per-state token counts.
-    return ReasoningTags{
-        .open = "<|channel>thought", .close = "<channel|>"};
+    return ReasoningTags{.open = "<|channel>thought", .close = "<channel|>"};
   }
   return std::nullopt;
 }

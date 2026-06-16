@@ -64,9 +64,6 @@ struct SubmitRequest {
 struct RuntimeStatsSnapshot {
   int64_t cacheTokens = 0;
   int64_t contextSlides = 0;
-  /// Aggregated `<think>` reasoning blocks compacted out of slot KV
-  /// caches across all completed slots in this epoch. Mirrors how
-  /// `contextSlides` is aggregated.
   int64_t thinkingBlockDiscards = 0;
   int64_t generatedTokens = 0;
   int64_t promptTokens = 0;
