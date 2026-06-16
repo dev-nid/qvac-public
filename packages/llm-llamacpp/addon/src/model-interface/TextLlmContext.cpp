@@ -80,8 +80,9 @@ void TextLlmContext::initializeCommonState() {
   }
 
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
-      reasoningTags = qvac_lib_inference_addon_llama::utils::
-          selectReasoningTagsForModel(modelCtx_.model);
+      reasoningTags =
+          qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
+              modelCtx_.model);
   if (reasoningTags.has_value()) {
     qvac_lib_inference_addon_llama::utils::initializeReasoningState(
         modelCtx_.lctx, reasoningState_, *reasoningTags);
@@ -869,8 +870,8 @@ void TextLlmContext::compactThinkSpans() {
     if (end < 0 || end <= start) {
       continue;
     }
-    const CompactRangeOutcome outcome = compactKvRange(
-        modelCtx_.lctx, seqId_, start, end, nPast_);
+    const CompactRangeOutcome outcome =
+        compactKvRange(modelCtx_.lctx, seqId_, start, end, nPast_);
     if (outcome.kind == CompactRangeOutcome::Kind::Compacted) {
       nPast_ = outcome.newNPast;
       if (start < firstMsgTokens_) {
@@ -890,8 +891,8 @@ void TextLlmContext::compactThinkSpans() {
               end,
               nPast_,
               firstMsgTokens_));
-    } else if (outcome.kind ==
-               CompactRangeOutcome::Kind::MemoryOperationFailed) {
+    } else if (
+        outcome.kind == CompactRangeOutcome::Kind::MemoryOperationFailed) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
@@ -910,7 +911,9 @@ int32_t TextLlmContext::getThinkingBlockDiscards() const {
   return thinkingBlockDiscards_;
 }
 
-void TextLlmContext::resetThinkingBlockDiscards() { thinkingBlockDiscards_ = 0; }
+void TextLlmContext::resetThinkingBlockDiscards() {
+  thinkingBlockDiscards_ = 0;
+}
 
 void TextLlmContext::validatePromptPolicy(
     const std::vector<common_chat_msg>& chatMsgs,

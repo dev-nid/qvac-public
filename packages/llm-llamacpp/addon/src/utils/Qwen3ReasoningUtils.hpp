@@ -49,8 +49,7 @@ void initializeReasoningState(
 // Append `tokenStr` to the rolling buffer and flip
 // `state.inside_reasoning` when the buffer first contains the
 // configured open / close markers. No-op when tags are unset.
-void updateReasoningBuffer(
-    const std::string& tokenStr, ReasoningState& state);
+void updateReasoningBuffer(const std::string& tokenStr, ReasoningState& state);
 
 } // namespace utils
 } // namespace qvac_lib_inference_addon_llama
