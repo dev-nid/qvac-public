@@ -164,17 +164,14 @@ export interface GenerationParams {
   reasoning_budget?: -1 | 0
   /**
    * When the model emits a reasoning block during generation (e.g.
-   * `<think>...</think>` for Qwen3, `<|channel>thought ... <channel|>`
-   * for Gemma 4), drop those tokens from the KV cache at end-of-generation
-   * so subsequent turns do not accumulate reasoning history.
+   * `<think>...</think>` for the Qwen3 family, `<|channel>thought ...
+   * <channel|>` for Gemma 4), drop those tokens from the KV cache at
+   * end-of-generation so subsequent turns do not accumulate reasoning
+   * history.
    *
    * Defaults to `true`. Set to `false` to keep the reasoning tokens in
-   * the cache (matches the legacy behaviour, useful when downstream
-   * needs the model to "remember" its prior chain-of-thought).
-   *
-   * Only applies to text models with a recognised reasoning channel
-   * (see `selectReasoningTagsForModel`). For models without a built-in
-   * reasoning channel and for multimodal contexts, the flag is a no-op.
+   * the cache. No-op for text models without a recognised reasoning
+   * channel and for multimodal contexts.
    */
   remove_thinking_from_context?: boolean
 }
