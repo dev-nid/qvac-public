@@ -52,7 +52,18 @@ struct ReasoningState {
 // Initialise `state` with `tags`. Tokenises both markers under
 // `lctx`'s vocab to populate the cached counts and ids. Empty
 // `tags.open`/`tags.close` leave the state in a disabled mode.
-void initializeReasoningState(
+//
+// Returns `true` iff the open marker satisfies the BPE-merge-barrier
+// invariant required by the span-start arithmetic in
+// `TextLlmContext::onLogitsReady` (`nPast_ - (openTokenCount - 1)`):
+//   - openTokenCount >= 1, AND
+//   - every piece tokenises to a CONTROL or USER_DEFINED token, so the
+//     standalone tokenisation matches the in-context emission piece-for-
+//     piece (no BPE merges across surrounding text bytes).
+// Returns `false` (and clears markers / token counts) if the invariant is
+// violated — callers should disable reasoning detection in that case to
+// avoid corrupting the KV cache with an off-by-one span start.
+[[nodiscard]] bool initializeReasoningState(
     ::llama_context* lctx, ReasoningState& state, ReasoningTags tags);
 
 // Append `tokenStr` to the rolling buffer and flip

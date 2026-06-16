@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-#include "Qwen3ReasoningUtils.hpp"
+#include "ReasoningUtils.hpp"
 #include "common/chat.h"
 #include "common/common.h"
 

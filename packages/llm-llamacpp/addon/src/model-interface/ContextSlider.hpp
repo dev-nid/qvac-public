@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <utility>
+#include <vector>
+
 #include <llama.h>
 
 class ToolsCompactController;
@@ -129,3 +134,66 @@ CompactRangeOutcome compactKvRange(
     llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
     llama_pos endPos, llama_pos nPast,
     const IContextSliderOps& ops = defaultContextSliderOps());
+
+/// Per-span outcome record produced by `runReasoningCompaction`. Kept so
+/// callers (production: `TextLlmContext`) can emit per-span logs without
+/// pulling logging into the orchestration core. `nPastAfter` /
+/// `firstMsgTokensAfter` capture the running state right after this
+/// span's compaction so per-span log output matches the pre-refactor
+/// hand-rolled loop.
+struct ReasoningCompactionEntry {
+  llama_pos start = 0;
+  llama_pos end = 0;
+  enum class Status {
+    Skipped,               // end < 0 (still open) or end <= start (degenerate)
+    Compacted,             // KV range removed, tail shifted
+    MemoryOperationFailed, // seqRm rejected the request
+    NoOp,                  // compactOp returned NoOp (defensive guard)
+  };
+  Status status = Status::Skipped;
+  llama_pos discarded = 0;
+  // Running state right after this entry was processed. Only meaningful
+  // for Compacted entries; for Skipped / Failed / NoOp these mirror the
+  // pre-step state (nothing changed).
+  llama_pos nPastAfter = 0;
+  llama_pos firstMsgTokensAfter = 0;
+};
+
+/// Aggregated result of `runReasoningCompaction`: updated state values plus
+/// the per-span entries.
+struct ReasoningCompactionResult {
+  llama_pos newNPast = 0;
+  llama_pos newFirstMsgTokens = 0;
+  int32_t discardsApplied = 0;
+  std::vector<ReasoningCompactionEntry> entries;
+};
+
+/// Callable for per-span KV compaction. Production wires this to
+/// `compactKvRange`; tests inject deterministic fakes.
+using ReasoningCompactionOp = std::function<
+    CompactRangeOutcome(llama_pos start, llama_pos end, llama_pos nPast)>;
+
+/// Callable for tools_compact-style controller notification. Production
+/// wires this to `ToolsCompactController::onSlide`; tests record args.
+using ReasoningSlideNotifier =
+    std::function<void(int discarded, llama_pos start)>;
+
+/// Walk `spans` in reverse and compact each via `compactOp`. On each
+/// successful compaction:
+///   - `nPast` shrinks by `discarded`
+///   - `firstMsgTokens` clamps down to `start` if `start < firstMsgTokens`
+///   - `onSlide(discarded, start)` is invoked (callers gate on whether the
+///     downstream controller is enabled)
+///   - `discardsApplied` increments
+/// Spans with `end < 0` (still open) or `end <= start` (degenerate) are
+/// skipped without invoking `compactOp` — the single backstop for all the
+/// close-capture sites in TextLlmContext.
+///
+/// Reverse iteration is required: compacting a later span shifts no
+/// earlier-span positions because the operation only renumbers tokens
+/// after `end`. Walking forwards would invalidate the recorded `start`
+/// of every span after the first.
+ReasoningCompactionResult runReasoningCompaction(
+    const std::vector<std::pair<llama_pos, llama_pos>>& spans, llama_pos nPast,
+    llama_pos firstMsgTokens, const ReasoningCompactionOp& compactOp,
+    const ReasoningSlideNotifier& onSlide);
