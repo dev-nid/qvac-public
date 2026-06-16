@@ -148,6 +148,8 @@ public:
   [[nodiscard]] int32_t getThinkingBlockDiscards() const override;
   void resetThinkingBlockDiscards() override;
 
+  void setRemoveThinkingFromContext(bool value) override;
+
   /**
    * The reset state method. It resets the context.
    *

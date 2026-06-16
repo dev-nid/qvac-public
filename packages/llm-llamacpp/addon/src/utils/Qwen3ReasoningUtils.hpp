@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <string_view>
 
 #include "common/common.h"
 
@@ -15,10 +14,18 @@ namespace utils {
 
 // Open / close substring markers used to detect a model's reasoning
 // channel in the streamed output (Qwen3 `<think>`/`</think>`,
-// Gemma 4 `<|channel>thought`/`<channel|>`, ...).
+// Gemma 4 `<|channel>thought`/`<channel|>`, ...). Owning strings so
+// callers can safely construct from temporaries.
+//
+// Two invariants when adding a new family in `selectReasoningTagsForModel`:
+//   - Both markers must fit comfortably within `ReasoningState::BUFFER_SIZE`
+//     (substring detection runs over the last BUFFER_SIZE chars).
+//   - `tags.open` must be a registered special token so the cached
+//     `openTokenCount` matches the model's in-context emission — the
+//     span start-position arithmetic relies on this alignment.
 struct ReasoningTags {
-  std::string_view open;
-  std::string_view close;
+  std::string open;
+  std::string close;
 };
 
 struct ReasoningState {
@@ -37,6 +44,8 @@ struct ReasoningState {
   bool inside_reasoning = false;
   std::string recent_output_buffer;
 
+  // Rolling-window size for substring matching. Must exceed the longest
+  // configured marker plus the worst-case partial-token tail.
   static constexpr size_t BUFFER_SIZE = 50;
 };
 

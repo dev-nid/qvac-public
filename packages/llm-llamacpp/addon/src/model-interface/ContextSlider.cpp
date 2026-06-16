@@ -174,6 +174,7 @@ CompactRangeOutcome compactKvRange(
   if (!ops.seqRm(mem, seqId, startPos, endPos)) {
     return {CompactRangeOutcome::Kind::MemoryOperationFailed, nPast, 0};
   }
+  // llama_memory_seq_add is void / infallible by API contract.
   ops.seqAdd(mem, seqId, endPos, nPast, -discarded);
   return {CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
 }

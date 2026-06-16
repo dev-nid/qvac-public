@@ -316,6 +316,54 @@ safeTest('remove_thinking_from_context=false keeps thinking in cache', {
     `compaction disabled should report 0 discards (got ${thinkingDiscards})`)
 })
 
+// Batch path opt-out: when the continuous-batching scheduler admits a
+// request with `remove_thinking_from_context: false`, the per-slot driver
+// must honour the toggle. Aggregated batch stats sum across slots, so a
+// 0 here proves no slot dropped its thinking block.
+safeTest('remove_thinking_from_context=false is honoured in batch path', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false, { parallel: '2' })
+
+  const batchInput = [
+    {
+      id: 'q-france',
+      prompt: createInitialMessages(),
+      runOptions: { generationParams: { remove_thinking_from_context: false } }
+    },
+    {
+      id: 'q-spain',
+      prompt: [
+        { role: 'system', content: 'You are an AI assistant. Always provide a clear answer after thinking' },
+        { role: 'user', content: 'What is the capital of Spain?' }
+      ],
+      runOptions: { generationParams: { remove_thinking_from_context: false } }
+    }
+  ]
+
+  const batchResponse = await inference.run(batchInput)
+  const outputsById = new Map()
+  await batchResponse
+    .onUpdate(({ id, chunk }) => {
+      outputsById.set(id, (outputsById.get(id) || '') + chunk)
+    })
+    .await()
+  const stats = batchResponse.stats || {}
+  t.comment(`batch stats: ${JSON.stringify(stats)}`)
+
+  for (const item of batchInput) {
+    const output = outputsById.get(item.id) || ''
+    t.comment(`batch ${item.id} (len=${output.length}): ${output.slice(0, 160)}...`)
+    t.ok(output.includes('<think>') && output.includes('</think>'),
+      `batch ${item.id} should retain <think>...</think> tags`)
+  }
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.is(thinkingDiscards, 0,
+    `batch path with compaction disabled should report 0 discards (got ${thinkingDiscards})`)
+})
+
 // reasoning_budget=0 short-circuits the channel before any tokens are
 // emitted, so the compaction feature has nothing to do and reports 0
 // discards even with the default `remove_thinking_from_context: true`.

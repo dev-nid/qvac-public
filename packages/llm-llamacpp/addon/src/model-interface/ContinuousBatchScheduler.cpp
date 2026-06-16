@@ -277,6 +277,16 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
       seqId,
       static_cast<llama_pos>(perSeqMaxTokens_));
 
+  // `applyGenerationParamsToContext` above resolves the sampling/n_predict/
+  // reasoning_budget overrides into `tmpParams` (which the driver copies),
+  // but `remove_thinking_from_context` is a TextLlmContext-level toggle that
+  // sits outside `common_params`. Apply it directly to the slot driver here.
+  // No restore needed: the driver is destroyed when the slot is freed.
+  if (request.overrides.remove_thinking_from_context) {
+    driver->setRemoveThinkingFromContext(
+        *request.overrides.remove_thinking_from_context);
+  }
+
   bool hasKvCacheContext = false;
   if (!request.cacheKey.empty()) {
     std::error_code ec;

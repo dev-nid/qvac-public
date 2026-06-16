@@ -861,6 +861,9 @@ void TextLlmContext::onCancel(
 }
 
 void TextLlmContext::pushOpenThinkSpan(llama_pos start) {
+  // `start < 0` only for degenerate templates whose entire rendered
+  // prompt is the forced-open suffix; drop the span and leave the
+  // tokens in cache.
   if (!removeThinkingFromContext_ || !reasoningEnabled_ || start < 0) {
     return;
   }
@@ -895,6 +898,8 @@ void TextLlmContext::compactThinkSpans() {
   for (auto it = thinkSpans_.rbegin(); it != thinkSpans_.rend(); ++it) {
     const llama_pos start = it->first;
     const llama_pos end = it->second;
+    // Single validation backstop for all close-capture sites — none of
+    // them validate `end > start` themselves.
     if (end < 0 || end <= start) {
       continue;
     }
@@ -941,6 +946,10 @@ int32_t TextLlmContext::getThinkingBlockDiscards() const {
 
 void TextLlmContext::resetThinkingBlockDiscards() {
   thinkingBlockDiscards_ = 0;
+}
+
+void TextLlmContext::setRemoveThinkingFromContext(bool value) {
+  removeThinkingFromContext_ = value;
 }
 
 void TextLlmContext::validatePromptPolicy(
@@ -1040,7 +1049,7 @@ TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
   const bool savedRemoveThinking = removeThinkingFromContext_;
   bool toggled = false;
   if (overrides.remove_thinking_from_context) {
-    removeThinkingFromContext_ = *overrides.remove_thinking_from_context;
+    setRemoveThinkingFromContext(*overrides.remove_thinking_from_context);
     toggled = true;
   }
 
@@ -1052,7 +1061,7 @@ TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
           restoreSampler = std::move(restoreSampler),
           savedRemoveThinking]() {
     restoreSampler();
-    removeThinkingFromContext_ = savedRemoveThinking;
+    setRemoveThinkingFromContext(savedRemoveThinking);
   };
 }
 
