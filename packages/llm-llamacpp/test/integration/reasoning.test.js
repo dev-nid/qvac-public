@@ -16,10 +16,21 @@ const MODEL = {
   url: 'https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf'
 }
 
-async function setupReasoningModel (t, toolsEnabled) {
+// Qwen3.5 is a separate family checkpoint: the PR widened reasoning detection
+// from exact-match `qwen3` to a `qwen3*` prefix to cover it, and 3.5 is known
+// to drive the KV cache differently (iM-RoPE / longer thinking traces), so the
+// compaction path needs its own end-to-end coverage and not just the
+// architecture-string unit test.
+const QWEN35_MODEL = {
+  name: 'Qwen3.5-0.8B-Q8_0.gguf',
+  url: 'https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf'
+}
+
+async function setupReasoningModel (t, toolsEnabled, opts = {}) {
+  const { modelDef = MODEL, configOverrides = {} } = opts
   const [modelName, dirPath] = await ensureModel({
-    modelName: MODEL.name,
-    downloadUrl: MODEL.url
+    modelName: modelDef.name,
+    downloadUrl: modelDef.url
   })
 
   const modelPath = path.join(dirPath, modelName)
@@ -34,7 +45,8 @@ async function setupReasoningModel (t, toolsEnabled) {
     top_p: '1',
     device: useCpu ? 'cpu' : 'gpu',
     verbosity: '2',
-    tools: toolsEnabled ? 'true' : 'false'
+    tools: toolsEnabled ? 'true' : 'false',
+    ...configOverrides
   }
 
   const inference = new LlmLlamacpp({
@@ -390,4 +402,115 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
   t.ok(cacheB2 > 0, `compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
   t.ok(cacheA2 < cacheB2,
     `turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
+})
+
+// ---------------------------------------------------------------------------
+// Qwen3.5 coverage. The compaction path is enabled for the whole `qwen3*`
+// family via the architecture-prefix match, but the only behavioural proof in
+// this PR is on Qwen3-0.6B. Qwen3.5 historically drives the KV cache
+// differently (iM-RoPE position handling, longer thinking traces), which is
+// exactly where an in-place mid-sequence `seq_rm` + `seq_add` renumber is most
+// likely to break. These two tests run the same default-on and multi-turn
+// cache-growth checks against a real Qwen3.5 checkpoint.
+//
+// Qwen3.5 thinking traces can run well past 1k tokens before `</think>`, so we
+// give a larger n_predict (otherwise the close marker is cut off, the span is
+// left incomplete, and compaction is correctly skipped — masking the feature).
+const QWEN35_REASONING_CONFIG = {
+  ctx_size: '8192',
+  n_predict: '3072'
+}
+
+safeTest('remove_thinking_from_context defaults on for Qwen3.5', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 900_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+
+  const messages = createInitialMessages()
+  const { response, stats } = await runCompletionWithStats(inference, messages)
+  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`stats: ${JSON.stringify(stats)}`)
+
+  verifyReasoningTags(t, response, 'Qwen3.5 default compaction')
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.ok(thinkingDiscards >= 1,
+    `Qwen3.5 default run should report at least one compaction (got ${thinkingDiscards}) — ` +
+    'a 0 here means the qwen3* family is detected but the span was never dropped')
+})
+
+// The headline cross-turn test for Qwen3.5: the same two-turn flow run with
+// compaction ON (default) vs OFF. If 3.5's position handling does not tolerate
+// the mid-sequence renumber, the ON run either fails to shrink the cache (no
+// reduction vs OFF) or corrupts turn 2 (no balanced reasoning tags / empty
+// answer). Asserting both the discard count and the cache delta catches the
+// "straight compaction silently fails on 3.5" failure mode directly.
+safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 1_800_000
+}, async t => {
+  const sessionA = path.join(os.tmpdir(), `qvac-think-compact-on-35-${Date.now()}.bin`)
+  const sessionB = path.join(os.tmpdir(), `qvac-think-compact-off-35-${Date.now() + 1}.bin`)
+
+  t.teardown(() => {
+    for (const p of [sessionA, sessionB]) {
+      try { require('bare-fs').unlinkSync(p) } catch {}
+    }
+  })
+
+  const messages1 = createInitialMessages()
+
+  // Run A — compaction ON (default).
+  const { inference: infA } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA })
+  verifyReasoningTags(t, a1.response, 'Qwen3.5 A turn 1')
+  t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
+    'Qwen3.5 A turn 1 should compact at least one thinking block')
+  const a2 = await runCompletionWithStats(
+    infA,
+    createFollowUpMessages(messages1, a1.response),
+    { cacheKey: sessionA }
+  )
+  // Turn 2 must still produce a well-formed reasoning turn after the turn-1
+  // cache was edited in place — this is the assertion that fails if the
+  // renumber desynced 3.5's cache.
+  verifyReasoningTags(t, a2.response, 'Qwen3.5 A turn 2')
+
+  // Run B — same flow, compaction OFF.
+  const { inference: infB } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
+  const b1 = await runCompletionWithStats(
+    infB,
+    messages1,
+    { cacheKey: sessionB, ...overridesOff }
+  )
+  verifyReasoningTags(t, b1.response, 'Qwen3.5 B turn 1')
+  t.is(toNumber(b1.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 B turn 1 with compaction off should report 0 discards')
+  const b2 = await runCompletionWithStats(
+    infB,
+    createFollowUpMessages(messages1, b1.response),
+    { cacheKey: sessionB, ...overridesOff }
+  )
+  verifyReasoningTags(t, b2.response, 'Qwen3.5 B turn 2')
+
+  const cacheA2 = toNumber(a2.stats.CacheTokens)
+  const cacheB2 = toNumber(b2.stats.CacheTokens)
+  t.comment(`Qwen3.5 compaction ON  turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
+  t.comment(`Qwen3.5 compaction OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
+
+  t.ok(cacheA2 > 0, `Qwen3.5 compaction-on turn 2 should have non-zero cache (got ${cacheA2})`)
+  t.ok(cacheB2 > 0, `Qwen3.5 compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
+  t.ok(cacheA2 < cacheB2,
+    `Qwen3.5 turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
 })
