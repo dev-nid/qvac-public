@@ -41,8 +41,7 @@ void initializeReasoningState(
   }
 }
 
-void updateReasoningBuffer(
-    const std::string& tokenStr, ReasoningState& state) {
+void updateReasoningBuffer(const std::string& tokenStr, ReasoningState& state) {
   if (tokenStr.empty()) {
     return;
   }

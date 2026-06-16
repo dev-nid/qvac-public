@@ -175,8 +175,7 @@ CompactRangeOutcome compactKvRange(
     return {CompactRangeOutcome::Kind::MemoryOperationFailed, nPast, 0};
   }
   ops.seqAdd(mem, seqId, endPos, nPast, -discarded);
-  return {
-      CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
+  return {CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
 }
 
 ContextSlideOutcome trySlideGeneration(

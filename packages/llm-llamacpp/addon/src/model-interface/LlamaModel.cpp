@@ -915,8 +915,7 @@ LlamaModel::singleRuntimeStatsLocked() const {
       {"contextSlides",
        static_cast<int64_t>(state_->llmContext_->getNSlides())},
       {"thinkingBlockDiscards",
-       static_cast<int64_t>(
-           state_->llmContext_->getThinkingBlockDiscards())},
+       static_cast<int64_t>(state_->llmContext_->getThinkingBlockDiscards())},
       {"avgConcurrentSeq", 1.0},
       {"backendDevice", runtimeBackendDevice_}};
 }
