@@ -567,11 +567,10 @@ const QWEN35_REASONING_CONFIG = {
   n_predict: '3072'
 }
 
-// Qwen3.5 is a hybrid SSM family: even when the caller opts into
-// compaction, the recurrent-memory gate in `compactThinkSpan` skips the
-// cache mutation to avoid SSM-state contamination across turns. So the
-// single-turn run should report 0 discards regardless of the toggle.
-safeTest('Qwen3.5 SSM gate suppresses compaction even when opted in', {
+// Qwen3.5 is a hybrid SSM family. `setRemoveThinkingFromContext(true)`
+// rejects on this model because `seq_rm + seq_add` leaves the SSM
+// hidden state contaminated. The leaving-it-off path still works.
+safeTest('Qwen3.5 rejects remove_thinking_from_context opt-in', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 900_000
 }, async t => {
@@ -581,99 +580,28 @@ safeTest('Qwen3.5 SSM gate suppresses compaction even when opted in', {
   })
 
   const messages = createInitialMessages()
-  const { response, stats } = await runCompletionWithStats(
-    inference,
-    messages,
-    { generationParams: { remove_thinking_from_context: true } }
-  )
-  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
-  t.comment(`stats: ${JSON.stringify(stats)}`)
 
-  verifyReasoningTags(t, response, 'Qwen3.5 opt-in (gated)')
+  let caught = null
+  try {
+    await runCompletionWithStats(
+      inference,
+      messages,
+      { generationParams: { remove_thinking_from_context: true } }
+    )
+  } catch (err) {
+    caught = err
+  }
+  t.ok(caught, 'opt-in on Qwen3.5 should throw')
+  t.ok(/recurrent memory|SSM/i.test(caught?.message || ''),
+    `error message should mention recurrent / SSM (got: ${caught?.message})`)
 
-  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
-  t.is(thinkingDiscards, 0,
-    `Qwen3.5 opt-in should still report 0 discards under the SSM gate (got ${thinkingDiscards})`)
-})
-
-// Qwen3.5 multi-turn behaviour under the SSM gate: caller asks for
-// compaction on slot A and explicitly disables it on slot B; the gate
-// turns slot A into a no-op, so both runs should behave identically
-// (no corruption, comparable cache size). This protects against the
-// regression where compaction-on slots produced runaway turn-2 output.
-safeTest('Qwen3.5 multi-turn is well-behaved under the SSM gate (opt-in == off)', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const sessionA = path.join(os.tmpdir(), `qvac-think-compact-on-35-${Date.now()}.bin`)
-  const sessionB = path.join(os.tmpdir(), `qvac-think-compact-off-35-${Date.now() + 1}.bin`)
-
-  t.teardown(() => {
-    for (const p of [sessionA, sessionB]) {
-      try { require('bare-fs').unlinkSync(p) } catch {}
-    }
-  })
-
-  const messages1 = createInitialMessages()
-  const overridesOn = { generationParams: { remove_thinking_from_context: true } }
-  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
-
-  // Run A — caller opts into compaction (gated off by the SSM check).
-  const { inference: infA } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_MODEL,
-    configOverrides: QWEN35_REASONING_CONFIG
-  })
-  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA, ...overridesOn })
-  t.comment(`A.turn1 stats: ${JSON.stringify(a1.stats)}`)
-  verifyReasoningTags(t, a1.response, 'Qwen3.5 A turn 1')
-  t.is(toNumber(a1.stats.thinkingBlockDiscards), 0,
-    'Qwen3.5 A turn 1: SSM gate should keep discards at 0 even with opt-in')
-  const a2 = await runCompletionWithStats(
-    infA,
-    createFollowUpMessages(messages1, a1.response),
-    { cacheKey: sessionA, ...overridesOn }
-  )
-  t.comment(`A.turn2 stats: ${JSON.stringify(a2.stats)}`)
-  verifyReasoningTags(t, a2.response, 'Qwen3.5 A turn 2')
-
-  // Run B — compaction OFF explicitly.
-  const { inference: infB } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_MODEL,
-    configOverrides: QWEN35_REASONING_CONFIG
-  })
-  const b1 = await runCompletionWithStats(
-    infB,
-    messages1,
-    { cacheKey: sessionB, ...overridesOff }
-  )
-  t.comment(`B.turn1 stats: ${JSON.stringify(b1.stats)}`)
-  verifyReasoningTags(t, b1.response, 'Qwen3.5 B turn 1')
-  t.is(toNumber(b1.stats.thinkingBlockDiscards), 0,
-    'Qwen3.5 B turn 1 with compaction off should report 0 discards')
-  const b2 = await runCompletionWithStats(
-    infB,
-    createFollowUpMessages(messages1, b1.response),
-    { cacheKey: sessionB, ...overridesOff }
-  )
-  t.comment(`B.turn2 stats: ${JSON.stringify(b2.stats)}`)
-  verifyReasoningTags(t, b2.response, 'Qwen3.5 B turn 2')
-
-  const cacheA2 = toNumber(a2.stats.CacheTokens)
-  const cacheB2 = toNumber(b2.stats.CacheTokens)
-  t.comment(`Qwen3.5 opt-in (gated) turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
-  t.comment(`Qwen3.5 off          turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
-
-  t.ok(cacheA2 > 0, `Qwen3.5 opt-in turn 2 should have non-zero cache (got ${cacheA2})`)
-  t.ok(cacheB2 > 0, `Qwen3.5 off turn 2 should have non-zero cache (got ${cacheB2})`)
-  // SSM gate means slot A's cache should be in the same ballpark as slot B's;
-  // anything dramatically larger would indicate runaway generation on turn 2.
-  // We compare via the smaller / larger ratio rather than equality because
-  // sampling can still produce small turn-by-turn deltas across runs.
-  const minCache = Math.min(cacheA2, cacheB2)
-  const maxCache = Math.max(cacheA2, cacheB2)
-  t.ok(maxCache / Math.max(minCache, 1) < 2,
-    `Qwen3.5 opt-in cache (${cacheA2}) should be within 2x of off cache (${cacheB2}) ` +
-    '— SSM gate prevents runaway')
+  // Default (no opt-in) must still work and just leave the thinking
+  // block in the cache.
+  const { response, stats } = await runCompletionWithStats(inference, messages)
+  t.comment(`default-off stats: ${JSON.stringify(stats)}`)
+  verifyReasoningTags(t, response, 'Qwen3.5 default-off')
+  t.is(toNumber(stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 default-off should report 0 discards')
 })
 
 // Qwen3-1.7B for a fairer same-class comparison against Qwen3.5-0.8B
@@ -732,50 +660,6 @@ safeTest('EXPERIMENT E: Qwen3-1.7B (pure attention) 3-turn with recommended para
     { cacheKey: sessionE, generationParams: thinkingParams })
   t.comment(`Qwen3Large.turn3 stats: ${JSON.stringify(t3.stats)}`)
   t.comment(`Qwen3Large.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
-
-  t.ok(true, 'experiment completed (see comments)')
-})
-
-// EXPERIMENT F: 3-turn run on Qwen3.5-2B (larger hybrid SSM). Probes
-// whether the multi-turn degradation seen on Qwen3.5-0.8B is
-// size-sensitive or fundamentally architecture-specific.
-safeTest('EXPERIMENT F: Qwen3.5-2B (larger hybrid) 3-turn with recommended params + compaction', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const sessionF = path.join(os.tmpdir(), `qvac-qwen35-large-recparams-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionF) } catch {}
-  })
-
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_LARGE_MODEL,
-    configOverrides: {
-      ctx_size: '8192',
-      n_predict: '3072',
-      temp: '1.0',
-      top_p: '0.95'
-    }
-  })
-
-  const messages1 = createInitialMessages()
-  const thinkingParams = { top_k: 20, presence_penalty: 1.5, remove_thinking_from_context: true }
-  const t1 = await runCompletionWithStats(
-    inference, messages1, { cacheKey: sessionF, generationParams: thinkingParams })
-  t.comment(`Qwen35Large.turn1 stats: ${JSON.stringify(t1.stats)}`)
-
-  const turn2Messages = createFollowUpMessages(messages1, t1.response)
-  const t2 = await runCompletionWithStats(
-    inference, turn2Messages,
-    { cacheKey: sessionF, generationParams: thinkingParams })
-  t.comment(`Qwen35Large.turn2 stats: ${JSON.stringify(t2.stats)}`)
-
-  const turn3Messages = createTurn3Messages(turn2Messages, t2.response)
-  const t3 = await runCompletionWithStats(
-    inference, turn3Messages,
-    { cacheKey: sessionF, generationParams: thinkingParams })
-  t.comment(`Qwen35Large.turn3 stats: ${JSON.stringify(t3.stats)}`)
-  t.comment(`Qwen35Large.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
 
   t.ok(true, 'experiment completed (see comments)')
 })
@@ -875,108 +759,5 @@ safeTest('EXPERIMENT D: Qwen3.5 multi-turn recommended params, compaction OFF', 
   t.comment(`RecParamsOff.turn3 stats: ${JSON.stringify(t3.stats)}`)
   t.comment(`RecParamsOff.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
 
-  t.ok(true, 'experiment completed (see comments)')
-})
-
-// EXPERIMENT C: Qwen3.5-0.8B's model card warns it is prone to
-// thinking loops under greedy decoding and recommends temperature=1.0,
-// top_p=0.95, top_k=20, presence_penalty=1.5. This test runs the
-// multi-turn compaction flow under those recommended params to
-// separate sampling instability from compaction-induced state issues.
-safeTest('EXPERIMENT C: Qwen3.5 multi-turn with recommended thinking sampling params', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const sessionA = path.join(os.tmpdir(), `qvac-qwen35-recparams-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionA) } catch {}
-  })
-
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_MODEL,
-    configOverrides: {
-      ...QWEN35_REASONING_CONFIG,
-      // Override to the model card's recommended thinking-mode params.
-      temp: '1.0',
-      top_p: '0.95'
-      // top_k / presence_penalty / min_p are per-request overrides only;
-      // we set them via generationParams below.
-    }
-  })
-
-  const messages1 = createInitialMessages()
-  const thinkingParams = {
-    top_k: 20,
-    presence_penalty: 1.5,
-    remove_thinking_from_context: true
-  }
-  const t1 = await runCompletionWithStats(
-    inference, messages1, { cacheKey: sessionA, generationParams: thinkingParams })
-  t.comment(`RecParams.turn1 stats: ${JSON.stringify(t1.stats)}`)
-
-  const turn2Messages = createFollowUpMessages(messages1, t1.response)
-  const t2 = await runCompletionWithStats(
-    inference, turn2Messages,
-    { cacheKey: sessionA, generationParams: thinkingParams })
-  t.comment(`RecParams.turn2 stats: ${JSON.stringify(t2.stats)}`)
-
-  const turn3Messages = createTurn3Messages(turn2Messages, t2.response)
-  const t3 = await runCompletionWithStats(
-    inference, turn3Messages,
-    { cacheKey: sessionA, generationParams: thinkingParams })
-  t.comment(`RecParams.turn3 stats: ${JSON.stringify(t3.stats)}`)
-  t.comment(`RecParams.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
-
-  t.ok(true, 'experiment completed (see comments)')
-})
-
-// EXPERIMENT B: Qwen3.5 multi-turn with compaction-on but turn 2 uses
-// `reasoning_budget: 0` so the chat template skips the forced
-// `<think>` re-open. Separates two possible failure modes: the
-// post-compaction SSM state itself vs. the chat template forcing the
-// model back into thinking mode.
-safeTest('EXPERIMENT: Qwen3.5 multi-turn, compaction on, turn 2 with reasoning_budget=0', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const session = path.join(os.tmpdir(), `qvac-qwen35-rb0-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(session) } catch {}
-  })
-
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_MODEL,
-    configOverrides: QWEN35_REASONING_CONFIG
-  })
-
-  const messages1 = createInitialMessages()
-  const t1 = await runCompletionWithStats(
-    inference,
-    messages1,
-    { cacheKey: session, generationParams: { remove_thinking_from_context: true } }
-  )
-  t.comment(`Turn 1 (compaction ON) stats: ${JSON.stringify(t1.stats)}`)
-  t.comment(`Turn 1 closed </think>: ${/<\/think>/.test(t1.response)}`)
-
-  // Turn 2: same session, reasoning_budget=0 forces NO thinking re-open.
-  const t2 = await runCompletionWithStats(
-    inference,
-    createFollowUpMessages(messages1, t1.response),
-    {
-      cacheKey: session,
-      generationParams: {
-        reasoning_budget: 0,
-        remove_thinking_from_context: true
-      }
-    }
-  )
-  t.comment(`Turn 2 (reasoning_budget=0) stats: ${JSON.stringify(t2.stats)}`)
-  t.comment(`Turn 2 contains <think>: ${/<think>/.test(t2.response)}`)
-
-  // Discriminator: small generatedTokens with coherent output means the
-  // post-compaction SSM state is fine and the previous turn-2 runaway
-  // was caused by the chat template forcing a `<think>` re-open. A
-  // turn-2 that still hits the n_predict cap points at the post-shift
-  // state itself.
   t.ok(true, 'experiment completed (see comments)')
 })

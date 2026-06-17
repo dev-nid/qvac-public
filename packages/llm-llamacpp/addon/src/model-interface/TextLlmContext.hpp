@@ -300,13 +300,12 @@ private:
 
   // True when the model uses recurrent memory (Mamba-style SSM layers
   // or hybrid SSM + attention like Qwen3.5). Detected at construction
-  // via `llama_model_is_recurrent`. The in-memory `seq_rm + seq_add`
-  // primitive succeeds on these models, but the SSM hidden state still
-  // carries contributions from the dropped tokens, so any downstream
-  // inference reading the post-shift state runs against contaminated
-  // state. `compactThinkSpan` skips the cache mutation entirely when
-  // this is true — pure-attention models (Qwen3, Qwen3-MoE, ...) are
-  // unaffected.
+  // via `llama_model_is_recurrent` plus an `<arch>.ssm.*` metadata
+  // probe. `setRemoveThinkingFromContext(true)` throws when this is
+  // true — `seq_rm + seq_add` succeeds on the attention KV but the SSM
+  // hidden state still carries the dropped tokens, so subsequent turns
+  // read contaminated state. Pure-attention models (Qwen3, Qwen3-MoE,
+  // Gemma 4, ...) are unaffected.
   bool hasRecurrentMemory_ = false;
 
   // [start, end) KV positions of the reasoning block emitted in this
