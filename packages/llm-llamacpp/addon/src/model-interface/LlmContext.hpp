@@ -47,11 +47,12 @@ struct GenerationParams {
   std::optional<bool> remove_thinking_from_context;
 
   // Reports overrides that need `applyGenerationParamsToContext` (sampler /
-  // common_params rebuild). Intentionally excludes `remove_thinking_from_context`
-  // — that toggle lives on `TextLlmContext`, not on `common_params`, and is
-  // applied directly via `setRemoveThinkingFromContext` on both the single-
-  // prompt and batch paths. Including it here would force a no-op
-  // `common_sampler_init` whenever it's the only override set.
+  // common_params rebuild). Intentionally excludes
+  // `remove_thinking_from_context` — that toggle lives on `TextLlmContext`, not
+  // on `common_params`, and is applied directly via
+  // `setRemoveThinkingFromContext` on both the single- prompt and batch paths.
+  // Including it here would force a no-op `common_sampler_init` whenever it's
+  // the only override set.
   [[nodiscard]] bool hasOverrides() const {
     return n_predict || temp || top_p || top_k || frequency_penalty ||
            presence_penalty || repeat_penalty || seed || grammar ||
