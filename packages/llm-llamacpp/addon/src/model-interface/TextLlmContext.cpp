@@ -104,10 +104,11 @@ void TextLlmContext::initializeCommonState() {
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
               modelCtx_.model);
   if (reasoningTags.has_value()) {
-    // Gate on the init return: if the open marker doesn't tokenise to a
-    // sequence of registered special tokens, the span-start math would
-    // silently drift and corrupt the KV cache, so disable detection
-    // (compaction stays a no-op) and surface a warning.
+    // Gate on the init return: if the open marker's first piece is not
+    // a CONTROL / USER_DEFINED special token, prior context could
+    // BPE-merge into the marker at runtime, the span-start math would
+    // silently drift, and the recorded range would drop the wrong KV
+    // window. Disable detection and surface a warning in that case.
     const bool reasoningInitOk =
         qvac_lib_inference_addon_llama::utils::initializeReasoningState(
             modelCtx_.lctx, reasoningState_, *reasoningTags);
@@ -117,8 +118,8 @@ void TextLlmContext::initializeCommonState() {
       QLOG_IF(
           Priority::WARNING,
           string_format(
-              "[TextLlm] reasoning detection disabled: open marker '%s' "
-              "does not tokenise to special tokens under this vocab; "
+              "[TextLlm] reasoning detection disabled: first piece of open "
+              "marker '%s' is not a special token under this vocab; "
               "thinking-block compaction will be skipped\n",
               reasoningTags->open.c_str()));
     }
@@ -1084,6 +1085,24 @@ void TextLlmContext::saveCache(const std::string& cacheKey) const {
 
 std::function<void()>
 TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
+  // Validate the recurrent-memory invariant BEFORE mutating any
+  // sampler / common params state. `setRemoveThinkingFromContext`
+  // throws on hybrid SSM models; if we let it throw after
+  // `applyGenerationParamsToContext` has already committed the sampler
+  // overrides, the throw escapes without returning the restore lambda
+  // and those mutations leak into subsequent requests. This duplicates
+  // the check in `setRemoveThinkingFromContext` but keeps that one as
+  // a backstop for direct callers (e.g. the batch path).
+  if (overrides.remove_thinking_from_context &&
+      *overrides.remove_thinking_from_context && hasRecurrentMemory_) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        qvac_errors::general_error::toString(
+            qvac_errors::general_error::InvalidArgument),
+        "remove_thinking_from_context is not supported on models with "
+        "recurrent memory (SSM / hybrid SSM such as Qwen3.5)");
+  }
+
   // Apply the sampler / `params_` overrides first so a malformed
   // `json_schema` throws before we touch our local toggle (otherwise
   // we would need a second try/catch here to roll the toggle back).
@@ -1092,7 +1111,8 @@ TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
 
   // Snapshot + apply the thinking-block compaction toggle. Restored
   // alongside the sampler at end-of-request via the composite lambda
-  // below.
+  // below. The setRemoveThinkingFromContext call cannot throw here
+  // because the recurrent-memory invariant was validated above.
   const bool savedRemoveThinking = removeThinkingFromContext_;
   bool toggled = false;
   if (overrides.remove_thinking_from_context) {
