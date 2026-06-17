@@ -99,14 +99,6 @@ void TextLlmContext::initializeCommonState() {
       }
     }
   }
-  if (hasRecurrentMemory_) {
-    QLOG_IF(
-        Priority::INFO,
-        "[TextLlm] thinking-block compaction disabled: model has recurrent "
-        "memory (SSM / hybrid SSM); reasoning detection stays active but the "
-        "KV cache will not be mutated on </think>\n");
-  }
-
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
       reasoningTags =
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
@@ -936,15 +928,6 @@ void TextLlmContext::compactThinkSpan() {
     thinkSpan_.reset();
     return;
   }
-  // Recurrent-memory gate: `seq_rm + seq_add` succeeds in-memory but
-  // the SSM hidden state still carries contributions from the dropped
-  // think block, so subsequent turns read contaminated state. Observed
-  // on the Qwen3.5 hybrid family (0.8B degrades severely, 2B is verbose
-  // but stable); pure-attention Qwen3 is unaffected.
-  if (hasRecurrentMemory_) {
-    thinkSpan_.reset();
-    return;
-  }
   const llama_pos start = thinkSpan_->first;
   const llama_pos end = thinkSpan_->second;
   thinkSpan_.reset();
@@ -999,6 +982,20 @@ void TextLlmContext::resetThinkingBlockDiscards() {
 }
 
 void TextLlmContext::setRemoveThinkingFromContext(bool value) {
+  // Reject opt-in for recurrent-memory models (Mamba / RWKV / hybrid
+  // SSM such as Qwen3.5). `seq_rm + seq_add` succeeds on the attention
+  // KV but the SSM hidden state still carries the dropped tokens, so
+  // subsequent turns read contaminated state. Surface a hard error
+  // here rather than silently dropping the flag so callers know the
+  // feature is unavailable for this model.
+  if (value && hasRecurrentMemory_) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        qvac_errors::general_error::toString(
+            qvac_errors::general_error::InvalidArgument),
+        "remove_thinking_from_context is not supported on models with "
+        "recurrent memory (SSM / hybrid SSM such as Qwen3.5)");
+  }
   removeThinkingFromContext_ = value;
 }
 

@@ -177,8 +177,11 @@ export interface GenerationParams {
    *
    * Defaults to `false`. Set to `true` to drop reasoning tokens from
    * the cache at end-of-generation. No-op for text models without a
-   * recognised reasoning channel, for multimodal contexts, and for
-   * models with recurrent memory (SSM / hybrid SSM).
+   * recognised reasoning channel and for multimodal contexts.
+   *
+   * Throws when set to `true` on models with recurrent memory
+   * (SSM / hybrid SSM such as Qwen3.5) — `seq_rm + seq_add` leaves the
+   * SSM hidden state contaminated, so the feature is unsupported there.
    */
   remove_thinking_from_context?: boolean
 }
