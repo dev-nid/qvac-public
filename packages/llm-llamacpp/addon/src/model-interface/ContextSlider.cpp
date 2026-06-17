@@ -179,66 +179,6 @@ CompactRangeOutcome compactKvRange(
   return {CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
 }
 
-ReasoningCompactionResult runReasoningCompaction(
-    const std::vector<std::pair<llama_pos, llama_pos>>& spans, llama_pos nPast,
-    llama_pos firstMsgTokens, const ReasoningCompactionOp& compactOp,
-    const ReasoningSlideNotifier& onSlide) {
-  ReasoningCompactionResult result{
-      .newNPast = nPast,
-      .newFirstMsgTokens = firstMsgTokens,
-      .discardsApplied = 0,
-      .entries = {}};
-  result.entries.reserve(spans.size());
-
-  // Reverse-walk: earlier spans' recorded positions stay valid only while
-  // later ones haven't shifted the tail down.
-  for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
-    const llama_pos start = it->first;
-    const llama_pos end = it->second;
-
-    ReasoningCompactionEntry entry{
-        .start = start,
-        .end = end,
-        .status = ReasoningCompactionEntry::Status::Skipped,
-        .discarded = 0,
-        .nPastAfter = result.newNPast,
-        .firstMsgTokensAfter = result.newFirstMsgTokens};
-
-    // Single validation backstop for every close-capture site — none of
-    // them validate `end > start` themselves.
-    if (end < 0 || end <= start) {
-      result.entries.push_back(entry);
-      continue;
-    }
-
-    const CompactRangeOutcome outcome = compactOp(start, end, result.newNPast);
-    switch (outcome.kind) {
-    case CompactRangeOutcome::Kind::Compacted:
-      result.newNPast = outcome.newNPast;
-      if (start < result.newFirstMsgTokens) {
-        result.newFirstMsgTokens = start;
-      }
-      if (onSlide) {
-        onSlide(outcome.discarded, start);
-      }
-      ++result.discardsApplied;
-      entry.status = ReasoningCompactionEntry::Status::Compacted;
-      entry.discarded = outcome.discarded;
-      entry.nPastAfter = result.newNPast;
-      entry.firstMsgTokensAfter = result.newFirstMsgTokens;
-      break;
-    case CompactRangeOutcome::Kind::MemoryOperationFailed:
-      entry.status = ReasoningCompactionEntry::Status::MemoryOperationFailed;
-      break;
-    case CompactRangeOutcome::Kind::NoOp:
-      entry.status = ReasoningCompactionEntry::Status::NoOp;
-      break;
-    }
-    result.entries.push_back(entry);
-  }
-  return result;
-}
-
 ContextSlideOutcome trySlideGeneration(
     llama_context* lctx, llama_seq_id seqId, llama_pos nPast,
     llama_pos firstMsgTokens, llama_pos nDiscarded,

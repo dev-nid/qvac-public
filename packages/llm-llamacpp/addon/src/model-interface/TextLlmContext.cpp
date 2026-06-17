@@ -79,6 +79,27 @@ void TextLlmContext::initializeCommonState() {
     modelCtx_.vocab = llama_model_get_vocab(modelCtx_.model);
   }
 
+  // `llama_model_is_recurrent` only flags fully-recurrent models (Mamba,
+  // RWKV). Hybrid SSM + attention models like Qwen3.5 — where the SSM
+  // layers still carry recurrent state — return false from that
+  // predicate but exhibit the same post-shift state contamination. Use
+  // direct metadata probing: any `<arch>.ssm.*` key indicates SSM layers
+  // in the model.
+  hasRecurrentMemory_ = llama_model_is_recurrent(modelCtx_.model);
+  if (!hasRecurrentMemory_) {
+    const std::optional<std::string> arch =
+        qvac_lib_inference_addon_llama::utils::getModelArchitecture(
+            modelCtx_.model);
+    if (arch.has_value()) {
+      const std::string ssmKey = arch.value() + ".ssm.state_size";
+      char buffer[32] = {0};
+      if (llama_model_meta_val_str(
+              modelCtx_.model, ssmKey.c_str(), buffer, sizeof(buffer)) > 0) {
+        hasRecurrentMemory_ = true;
+      }
+    }
+  }
+
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
       reasoningTags =
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
@@ -536,15 +557,15 @@ void TextLlmContext::onPrefillComplete(
   // single-prompt and continuous-batching paths).
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
-  thinkSpans_.clear();
+  thinkSpan_.reset();
   pendingThinkCloseCapture_ = false;
 
   // Template force-opened the reasoning channel (e.g. Qwen3 / DeepSeek-R1
   // assistant prefix ends with `<think>\n`): the opening tokens are
-  // already in the KV cache, record their span so compactThinkSpans
+  // already in the KV cache, record their span so compactThinkSpan
   // can drop them at end-of-generation.
   if (thinkingForcedOpen_ && reasoningEnabled_) {
-    pushOpenThinkSpan(
+    setOpenThinkSpan(
         nPast_ - static_cast<llama_pos>(reasoningState_.forcedOpenTokenCount));
     reasoningState_.inside_reasoning = true;
   }
@@ -588,7 +609,7 @@ llama_pos TextLlmContext::applyContextDiscard() {
     ++nSlides_;
     // Recorded span positions are no longer valid after the shift;
     // drop them rather than try to fix them up.
-    thinkSpans_.clear();
+    thinkSpan_.reset();
     pendingThinkCloseCapture_ = false;
     QLOG_IF(
         Priority::DEBUG,
@@ -757,7 +778,7 @@ SequenceStepResult TextLlmContext::onLogitsReady(
     if (!wasInside && nowInside) {
       // The current sampled token is the LAST piece of the open marker;
       // earlier pieces (openTokenCount - 1) are already in the cache.
-      pushOpenThinkSpan(
+      setOpenThinkSpan(
           nPast_ - static_cast<llama_pos>(reasoningState_.openTokenCount - 1));
     }
     if (wasInside && !nowInside) {
@@ -839,7 +860,7 @@ void TextLlmContext::onGenerationFinished(
   // Compact after the tools-compact tail trim so that pass sees the
   // pre-compaction `nPast_` (its offsets are computed against
   // `assistantOutput_`).
-  compactThinkSpans();
+  compactThinkSpan();
 }
 
 void TextLlmContext::onCancel(
@@ -847,17 +868,19 @@ void TextLlmContext::onCancel(
   onGenerationFinished(outputCallback);
 }
 
-void TextLlmContext::pushOpenThinkSpan(llama_pos start) {
+void TextLlmContext::setOpenThinkSpan(llama_pos start) {
   // `start < 0` only for degenerate templates whose entire rendered
   // prompt is the forced-open suffix; drop the span and leave the
   // tokens in cache.
   if (!removeThinkingFromContext_ || !reasoningEnabled_ || start < 0) {
     return;
   }
-  if (!thinkSpans_.empty() && thinkSpans_.back().second < 0) {
+  // Single-block policy: only the first `<think>...</think>` is tracked.
+  // Any later open marker emitted in the same inference is ignored.
+  if (thinkSpan_.has_value()) {
     return;
   }
-  thinkSpans_.emplace_back(start, static_cast<llama_pos>(-1));
+  thinkSpan_ = std::make_pair(start, static_cast<llama_pos>(-1));
 }
 
 void TextLlmContext::capturePendingThinkClose() {
@@ -865,69 +888,68 @@ void TextLlmContext::capturePendingThinkClose() {
     return;
   }
   pendingThinkCloseCapture_ = false;
-  if (!removeThinkingFromContext_ || thinkSpans_.empty()) {
+  if (!removeThinkingFromContext_ || !thinkSpan_.has_value()) {
     return;
   }
-  std::pair<llama_pos, llama_pos>& back = thinkSpans_.back();
-  if (back.second < 0) {
-    back.second = nPast_;
+  if (thinkSpan_->second < 0) {
+    thinkSpan_->second = nPast_;
   }
 }
 
-void TextLlmContext::compactThinkSpans() {
-  if (!removeThinkingFromContext_ || thinkSpans_.empty()) {
-    thinkSpans_.clear();
+void TextLlmContext::compactThinkSpan() {
+  if (!removeThinkingFromContext_ || !thinkSpan_.has_value()) {
+    thinkSpan_.reset();
+    return;
+  }
+  // TEMP-DISABLED: hybrid-SSM gate removed so the multi-turn Qwen3.5 test
+  // reproduces the SSM contamination failure for team confirmation.
+  // if (hasRecurrentMemory_) {
+  //   thinkSpan_.reset();
+  //   return;
+  // }
+  const llama_pos start = thinkSpan_->first;
+  const llama_pos end = thinkSpan_->second;
+  thinkSpan_.reset();
+
+  // Skip open (close never captured) or degenerate spans without
+  // touching the cache. This is the single validation backstop for all
+  // close-capture sites — none validate `end > start` themselves.
+  if (end < 0 || end <= start) {
     return;
   }
 
-  // Orchestration is unit-tested in `test_context_slider.cpp` via
-  // `runReasoningCompaction`. Here we only wire it to the live llama
-  // context (`compactKvRange`) and tools_compact controller, plus emit
-  // per-span logs from the returned entries.
-  const ReasoningCompactionResult result = runReasoningCompaction(
-      thinkSpans_,
-      nPast_,
-      firstMsgTokens_,
-      [this](llama_pos start, llama_pos end, llama_pos curNPast) {
-        return compactKvRange(modelCtx_.lctx, seqId_, start, end, curNPast);
-      },
-      [this](int discarded, llama_pos start) {
-        if (tools_.enabled()) {
-          tools_.onSlide(discarded, start);
-        }
-      });
-  nPast_ = result.newNPast;
-  firstMsgTokens_ = result.newFirstMsgTokens;
-  thinkingBlockDiscards_ += result.discardsApplied;
-
-  for (const ReasoningCompactionEntry& entry : result.entries) {
-    if (entry.status == ReasoningCompactionEntry::Status::Compacted) {
-      // Per-span running state — matches the pre-refactor log content.
-      QLOG_IF(
-          Priority::DEBUG,
-          string_format(
-              "[TextLlm] thinking-block compaction: dropped %d tokens "
-              "[%d, %d), nPast=%d, firstMsgTokens=%d\n",
-              entry.discarded,
-              entry.start,
-              entry.end,
-              entry.nPastAfter,
-              entry.firstMsgTokensAfter));
-    } else if (
-        entry.status ==
-        ReasoningCompactionEntry::Status::MemoryOperationFailed) {
-      QLOG_IF(
-          Priority::WARNING,
-          string_format(
-              "[TextLlm] thinking-block compaction failed: seqRm rejected "
-              "range [%d, %d) (nPast=%d, seqId=%d)\n",
-              entry.start,
-              entry.end,
-              entry.nPastAfter,
-              seqId_));
+  const CompactRangeOutcome outcome =
+      compactKvRange(modelCtx_.lctx, seqId_, start, end, nPast_);
+  if (outcome.kind == CompactRangeOutcome::Kind::Compacted) {
+    nPast_ = outcome.newNPast;
+    if (start < firstMsgTokens_) {
+      firstMsgTokens_ = start;
     }
+    if (tools_.enabled()) {
+      tools_.onSlide(outcome.discarded, start);
+    }
+    ++thinkingBlockDiscards_;
+    QLOG_IF(
+        Priority::DEBUG,
+        string_format(
+            "[TextLlm] thinking-block compaction: dropped %d tokens "
+            "[%d, %d), nPast=%d, firstMsgTokens=%d\n",
+            outcome.discarded,
+            start,
+            end,
+            nPast_,
+            firstMsgTokens_));
+  } else if (outcome.kind == CompactRangeOutcome::Kind::MemoryOperationFailed) {
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[TextLlm] thinking-block compaction failed: seqRm rejected "
+            "range [%d, %d) (nPast=%d, seqId=%d)\n",
+            start,
+            end,
+            nPast_,
+            seqId_));
   }
-  thinkSpans_.clear();
 }
 
 int32_t TextLlmContext::getThinkingBlockDiscards() const {
@@ -1080,7 +1102,7 @@ void TextLlmContext::resetState(bool resetStats) {
   forcedTokens_.clear();
   assistantOutput_.clear();
   generationStarted_ = false;
-  thinkSpans_.clear();
+  thinkSpan_.reset();
   pendingThinkCloseCapture_ = false;
 
   clearSequenceMemory(modelCtx_.lctx);
@@ -1181,9 +1203,9 @@ bool TextLlmContext::handleReasoningEOS(
 
   // Close marker just committed — record span end before injecting
   // the trailing newlines (they are excluded from the span).
-  if (removeThinkingFromContext_ && !thinkSpans_.empty() &&
-      thinkSpans_.back().second < 0) {
-    thinkSpans_.back().second = nPast;
+  if (removeThinkingFromContext_ && thinkSpan_.has_value() &&
+      thinkSpan_->second < 0) {
+    thinkSpan_->second = nPast;
   }
   pendingThinkCloseCapture_ = false;
 

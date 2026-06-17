@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -246,10 +247,12 @@ private:
   llama_pos applyContextDiscard();
   void handleStopRequestAndAddEot(LlamaBatch& batch);
 
-  // Reasoning-block KV-cache compaction helpers.
-  void pushOpenThinkSpan(llama_pos start);
+  // Reasoning-block KV-cache compaction helpers. Single-block policy:
+  // at most one `<think>...</think>` block is tracked per inference.
+  // `setOpenThinkSpan` is a no-op once a span has been captured.
+  void setOpenThinkSpan(llama_pos start);
   void capturePendingThinkClose();
-  void compactThinkSpans();
+  void compactThinkSpan();
 
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
@@ -294,9 +297,23 @@ private:
   // cache compaction. Default-on, flipped by `applyGenerationParams`.
   bool removeThinkingFromContext_ = true;
 
-  // [start, end) KV positions of each reasoning block emitted during
-  // the current generation. `end == -1` marks an open span.
-  std::vector<std::pair<llama_pos, llama_pos>> thinkSpans_;
+  // True when the model uses recurrent memory (Mamba-style SSM layers
+  // or hybrid SSM + attention like Qwen3.5). Detected at construction
+  // via `llama_model_is_recurrent`. The in-memory `seq_rm + seq_add`
+  // primitive succeeds on these models, but the SSM hidden state still
+  // carries contributions from the dropped tokens, so any downstream
+  // inference reading the post-shift state runs against contaminated
+  // state. `compactThinkSpan` skips the cache mutation entirely when
+  // this is true — pure-attention models (Qwen3, Qwen3-MoE, ...) are
+  // unaffected.
+  bool hasRecurrentMemory_ = false;
+
+  // [start, end) KV positions of the reasoning block emitted in this
+  // inference, if any. `end == -1` marks an open (still-being-emitted)
+  // span. Single-block policy: only the first `<think>...</think>` pair
+  // is tracked; later blocks (which no supported model currently emits)
+  // are ignored.
+  std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
   // True when the close marker was detected but its token has not yet
   // been committed to the KV cache; the next `onLogitsReady` records
   // the end position once the commit has happened.

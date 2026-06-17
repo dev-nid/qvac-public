@@ -92,31 +92,17 @@ void updateReasoningBuffer(const std::string& tokenStr, ReasoningState& state) {
     return;
   }
 
-  // The buffer is a rolling window, so a previous block's close marker can
-  // still linger when the next block's open marker arrives. A naive
-  // independent `find(open)` / `find(close)` would set inside_reasoning=true
-  // and then immediately back to false, suppressing the false→true edge and
-  // causing the second block to be missed entirely.
-  //
-  // Use the LATEST occurrence of each marker via `rfind` and let the larger
-  // position win — that reflects "the most recent transition wins", which
-  // is the right state for the detector consumers (edge-triggered open /
-  // close span capture in TextLlmContext::onLogitsReady).
-  const size_t lastOpen = state.recent_output_buffer.rfind(state.tags.open);
-  const size_t lastClose = state.recent_output_buffer.rfind(state.tags.close);
-
-  if (lastOpen == std::string::npos && lastClose == std::string::npos) {
-    return;
-  }
-  if (lastClose == std::string::npos) {
+  // Single-block policy in `TextLlmContext::setOpenThinkSpan`: only the
+  // first `<think>...</think>` per inference is tracked. A simple
+  // independent `find` for each marker is sufficient — the second-block
+  // edge case (stale close in buffer when a new open arrives) would
+  // matter only if we acted on a second open, which we don't.
+  if (state.recent_output_buffer.find(state.tags.open) != std::string::npos) {
     state.inside_reasoning = true;
-    return;
   }
-  if (lastOpen == std::string::npos) {
+  if (state.recent_output_buffer.find(state.tags.close) != std::string::npos) {
     state.inside_reasoning = false;
-    return;
   }
-  state.inside_reasoning = lastOpen > lastClose;
 }
 
 } // namespace utils
