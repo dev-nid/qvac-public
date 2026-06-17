@@ -10,24 +10,25 @@ namespace utils {
 
 namespace {
 
-// Returns true iff every piece in `tokens` has a CONTROL or USER_DEFINED
-// attribute — those are BPE-merge barriers under `parse_special=true`, so
-// the standalone tokenisation of a marker matches its in-context emission
-// piece-for-piece. Empty `tokens` returns false.
-bool allTokensAreSpecial(
+// Returns true iff the first piece in `tokens` has a CONTROL or
+// USER_DEFINED attribute. That attribute is a BPE-merge barrier under
+// `parse_special=true`, so a prior context token cannot absorb the start
+// of the marker — which is what the span-start math
+// `nPast_ - (openTokenCount - 1)` in TextLlmContext relies on. The
+// remaining pieces don't need to be special: BPE only merges across a
+// barrier when both sides are non-special, so once the first piece is a
+// barrier the rest of the marker tokenises identically standalone and
+// in-context (e.g. Gemma 4's `<|channel>thought` → [special, "thought"]).
+// Empty `tokens` returns false.
+bool firstTokenIsSpecial(
     const ::llama_vocab* vocab, const std::vector<llama_token>& tokens) {
   if (tokens.empty() || vocab == nullptr) {
     return false;
   }
   constexpr int specialMask =
       LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED;
-  for (const llama_token tok : tokens) {
-    const llama_token_attr attr = llama_vocab_get_attr(vocab, tok);
-    if ((static_cast<int>(attr) & specialMask) == 0) {
-      return false;
-    }
-  }
-  return true;
+  const llama_token_attr attr = llama_vocab_get_attr(vocab, tokens.front());
+  return (static_cast<int>(attr) & specialMask) != 0;
 }
 
 } // namespace
@@ -44,17 +45,19 @@ bool initializeReasoningState(
     return false;
   }
 
-  // Standalone counts match the in-context emission iff every piece of the
-  // open marker is a registered special token (CONTROL / USER_DEFINED acts
-  // as a BPE-merge barrier under parse_special=true). The span start math
-  // `nPast_ - (openTokenCount - 1)` in TextLlmContext relies on this — if a
-  // piece is normal text and BPE merges across the boundary at runtime, the
-  // in-context emission count would diverge from the standalone count and
-  // the recorded span would drop the wrong KV range.
+  // Span-start math `nPast_ - (openTokenCount - 1)` in TextLlmContext
+  // assumes the standalone tokenisation of the open marker matches its
+  // in-context emission piece-for-piece. The first piece being a
+  // CONTROL / USER_DEFINED special token is the load-bearing invariant:
+  // it acts as a BPE-merge barrier under `parse_special=true`, so the
+  // preceding context cannot absorb the start of the marker. Subsequent
+  // pieces don't need to be special — once the barrier is in place, the
+  // remaining bytes tokenise the same way standalone and in-context
+  // (Gemma 4's `<|channel>thought` is the canonical mixed case).
   std::vector<llama_token> openTokens =
       common_tokenize(lctx, tags.open, false, true);
   const ::llama_vocab* vocab = llama_model_get_vocab(llama_get_model(lctx));
-  if (!allTokensAreSpecial(vocab, openTokens)) {
+  if (!firstTokenIsSpecial(vocab, openTokens)) {
     state.tags = ReasoningTags{};
     return false;
   }

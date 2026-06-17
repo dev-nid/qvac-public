@@ -99,6 +99,13 @@ void TextLlmContext::initializeCommonState() {
       }
     }
   }
+  if (hasRecurrentMemory_) {
+    QLOG_IF(
+        Priority::INFO,
+        "[TextLlm] thinking-block compaction disabled: model has recurrent "
+        "memory (SSM / hybrid SSM); reasoning detection stays active but the "
+        "KV cache will not be mutated on </think>\n");
+  }
 
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
       reasoningTags =
@@ -929,12 +936,15 @@ void TextLlmContext::compactThinkSpan() {
     thinkSpan_.reset();
     return;
   }
-  // TEMP-DISABLED: hybrid-SSM gate removed so the multi-turn Qwen3.5 test
-  // reproduces the SSM contamination failure for team confirmation.
-  // if (hasRecurrentMemory_) {
-  //   thinkSpan_.reset();
-  //   return;
-  // }
+  // Recurrent-memory gate: `seq_rm + seq_add` succeeds in-memory but
+  // the SSM hidden state still carries contributions from the dropped
+  // think block, so subsequent turns read contaminated state. Observed
+  // on the Qwen3.5 hybrid family (0.8B degrades severely, 2B is verbose
+  // but stable); pure-attention Qwen3 is unaffected.
+  if (hasRecurrentMemory_) {
+    thinkSpan_.reset();
+    return;
+  }
   const llama_pos start = thinkSpan_->first;
   const llama_pos end = thinkSpan_->second;
   thinkSpan_.reset();
