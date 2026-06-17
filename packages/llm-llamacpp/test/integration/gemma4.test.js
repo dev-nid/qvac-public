@@ -317,23 +317,23 @@ test('Gemma 4 remove_thinking_from_context compacts cache after channel close', 
 
   const toNum = v => typeof v === 'number' ? v : Number(v || 0)
 
-  // Default — compaction enabled.
-  const defaultRun = await runOnce()
-  t.comment(`default (${defaultRun.output.length} chars): ${defaultRun.output.slice(0, 200)}`)
-  t.comment(`default stats: ${JSON.stringify(defaultRun.stats)}`)
+  // Opt-in — compaction enabled by passing the flag explicitly.
+  const compactRun = await runOnce({
+    generationParams: { remove_thinking_from_context: true }
+  })
+  t.comment(`compact (${compactRun.output.length} chars): ${compactRun.output.slice(0, 200)}`)
+  t.comment(`compact stats: ${JSON.stringify(compactRun.stats)}`)
 
   // Gemma 4 emits the reasoning channel only when it deems the question
-  // worth deliberating about; if the baseline did not engage the channel,
+  // worth deliberating about; if the opt-in run did not engage the channel,
   // there is nothing to compact and the rest of the assertions become
   // vacuous.
-  if (/<\|channel>thought/i.test(defaultRun.output)) {
-    t.ok(toNum(defaultRun.stats.thinkingBlockDiscards) >= 1,
-      `default run should compact at least one channel block (got ${defaultRun.stats.thinkingBlockDiscards})`)
+  if (/<\|channel>thought/i.test(compactRun.output)) {
+    t.ok(toNum(compactRun.stats.thinkingBlockDiscards) >= 1,
+      `opt-in run should compact at least one channel block (got ${compactRun.stats.thinkingBlockDiscards})`)
 
-    // Opt-out — compaction disabled.
-    const disabledRun = await runOnce({
-      generationParams: { remove_thinking_from_context: false }
-    })
+    // Default — compaction disabled (opt-in toggle left at false).
+    const disabledRun = await runOnce()
     t.comment(`disabled (${disabledRun.output.length} chars): ${disabledRun.output.slice(0, 200)}`)
     t.comment(`disabled stats: ${JSON.stringify(disabledRun.stats)}`)
     t.is(toNum(disabledRun.stats.thinkingBlockDiscards), 0,
@@ -342,6 +342,103 @@ test('Gemma 4 remove_thinking_from_context compacts cache after channel close', 
     t.comment('Gemma 4 did not emit <|channel>thought — skipping compaction assertions')
     t.pass('compaction assertions skipped (channel not engaged)')
   }
+})
+
+// Multi-turn cache-growth comparison for Gemma 4's channel marker.
+// Runs the same two-turn flow twice (compaction on vs off, both with
+// cacheKey) and verifies that turn-2 with compaction yields a smaller
+// cache and still produces coherent output.
+test('Gemma 4 multi-turn with remove_thinking_from_context reduces cache growth', {
+  timeout: 1_800_000
+}, async t => {
+  const [modelName, dirPath] = await ensureModel(GEMMA4_MODEL.llmModel)
+  const modelPath = path.join(dirPath, modelName)
+
+  const config = {
+    device: useCpu ? 'cpu' : 'gpu',
+    gpu_layers: '999',
+    ctx_size: '2048',
+    n_predict: '256',
+    temp: '0',
+    seed: '42',
+    verbosity: '0'
+  }
+
+  const toNum = v => typeof v === 'number' ? v : Number(v || 0)
+  const systemMsg = { role: 'system', content: 'You are a helpful assistant.' }
+  const userTurn1 = { role: 'user', content: 'What is the capital of France? Answer in one word.' }
+  const userTurn2Text = 'And what about Germany? Answer in one word.'
+
+  async function runTwoTurns (label, turnOptions) {
+    const sessionName = path.join(dirPath, `gemma4-compact-${label}.bin`)
+    cleanupIntegrationCacheFiles(sessionName)
+    const addon = new LlmLlamacpp({
+      files: { model: [modelPath] },
+      config,
+      logger: createLogger(),
+      opts: { stats: true }
+    })
+    try {
+      await addon.load()
+      const turn1Prompt = [systemMsg, userTurn1]
+      const r1 = await addon.run(turn1Prompt, { cacheKey: sessionName, ...turnOptions })
+      const o1 = await collectResponse(r1)
+      const turn2Prompt = [
+        systemMsg,
+        userTurn1,
+        { role: 'assistant', content: o1 },
+        { role: 'user', content: userTurn2Text }
+      ]
+      const r2 = await addon.run(turn2Prompt, { cacheKey: sessionName, ...turnOptions })
+      const o2 = await collectResponse(r2)
+      return {
+        t1: { output: o1, stats: r1.stats || {} },
+        t2: { output: o2, stats: r2.stats || {} }
+      }
+    } finally {
+      await addon.unload().catch(() => {})
+    }
+  }
+
+  const onRun = await runTwoTurns('on', {
+    generationParams: { remove_thinking_from_context: true }
+  })
+  const offRun = await runTwoTurns('off', {})
+
+  t.comment(`ON  t1 stats=${JSON.stringify(onRun.t1.stats)}`)
+  t.comment(`ON  t2 stats=${JSON.stringify(onRun.t2.stats)}`)
+  t.comment(`OFF t1 stats=${JSON.stringify(offRun.t1.stats)}`)
+  t.comment(`OFF t2 stats=${JSON.stringify(offRun.t2.stats)}`)
+  t.comment(`ON  t2 (${onRun.t2.output.length} chars): ${onRun.t2.output.slice(0, 200)}`)
+  t.comment(`OFF t2 (${offRun.t2.output.length} chars): ${offRun.t2.output.slice(0, 200)}`)
+
+  // Gemma 4 emits the channel only when it deems the question worth
+  // deliberating about. Skip the comparison if the model did not engage
+  // the channel in the ON run (compaction has nothing to do).
+  if (!/<\|channel>thought/i.test(onRun.t1.output)) {
+    t.comment('Gemma 4 did not engage thinking channel on turn 1 — skipping cache-delta assertions')
+    t.pass('multi-turn cache assertions skipped (channel not engaged)')
+    return
+  }
+
+  t.ok(toNum(onRun.t1.stats.thinkingBlockDiscards) >= 1,
+    `ON turn 1 should compact at least one thinking block (got ${onRun.t1.stats.thinkingBlockDiscards})`)
+  t.is(toNum(offRun.t1.stats.thinkingBlockDiscards), 0,
+    `OFF turn 1 should report 0 discards (got ${offRun.t1.stats.thinkingBlockDiscards})`)
+
+  const cacheOn2 = toNum(onRun.t2.stats.CacheTokens)
+  const cacheOff2 = toNum(offRun.t2.stats.CacheTokens)
+  t.ok(cacheOn2 > 0 && cacheOff2 > 0,
+    `both turn-2 runs should have non-zero cache (ON=${cacheOn2}, OFF=${cacheOff2})`)
+  t.ok(cacheOn2 < cacheOff2,
+    `turn 2 cache with compaction ON (${cacheOn2}) should be < OFF (${cacheOff2}) — proves turn 1 thinking was dropped`)
+
+  // Turn 2 must still be coherent — guard against the Qwen3.5-style
+  // runaway where post-compaction state goes off the rails.
+  t.ok(toNum(onRun.t2.stats.generatedTokens) > 0,
+    'ON turn 2 should generate at least one token')
+  t.ok(toNum(onRun.t2.stats.generatedTokens) < 256,
+    `ON turn 2 should not hit n_predict cap (got ${onRun.t2.stats.generatedTokens})`)
 })
 
 test('Gemma 4 reasoning-budget=0 disables thinking', {

@@ -169,9 +169,10 @@ export interface GenerationParams {
    * end-of-generation so subsequent turns do not accumulate reasoning
    * history.
    *
-   * Defaults to `true`. Set to `false` to keep the reasoning tokens in
-   * the cache. No-op for text models without a recognised reasoning
-   * channel and for multimodal contexts.
+   * Defaults to `false`. Set to `true` to drop reasoning tokens from
+   * the cache at end-of-generation. No-op for text models without a
+   * recognised reasoning channel, for multimodal contexts, and for
+   * models with recurrent memory (SSM / hybrid SSM).
    */
   remove_thinking_from_context?: boolean
 }

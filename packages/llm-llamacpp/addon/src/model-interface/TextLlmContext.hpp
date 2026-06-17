@@ -294,8 +294,9 @@ private:
   bool thinkingForcedOpen_ = false;
 
   // Per-request toggle for the post-generation thinking-block KV
-  // cache compaction. Default-on, flipped by `applyGenerationParams`.
-  bool removeThinkingFromContext_ = true;
+  // cache compaction. Default-off (opt-in via `generationParams`); set
+  // by `applyGenerationParams`.
+  bool removeThinkingFromContext_ = false;
 
   // True when the model uses recurrent memory (Mamba-style SSM layers
   // or hybrid SSM + attention like Qwen3.5). Detected at construction

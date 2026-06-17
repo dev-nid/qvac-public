@@ -289,7 +289,7 @@ safeTest('Qwen3 reasoning-budget=0 disables thinking', {
 // `nPast_` is 0 regardless of whether compaction happened. The cross-turn
 // effect of compaction is covered by the multi-turn test below, which uses
 // a `cacheKey` to keep the cache live between calls.
-safeTest('remove_thinking_from_context defaults on for Qwen3', {
+safeTest('remove_thinking_from_context defaults off for Qwen3', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
 }, async t => {
@@ -300,11 +300,35 @@ safeTest('remove_thinking_from_context defaults on for Qwen3', {
   t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
   t.comment(`stats: ${JSON.stringify(stats)}`)
 
-  verifyReasoningTags(t, response, 'default compaction')
+  verifyReasoningTags(t, response, 'default (no compaction)')
+
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.is(thinkingDiscards, 0,
+    `default run should report 0 discards (got ${thinkingDiscards})`)
+})
+
+// Opt-in path: explicitly enabling the toggle drops the reasoning span
+// from the KV cache. Mirrors the "defaults off" test but flips the flag.
+safeTest('remove_thinking_from_context=true opts into compaction for Qwen3', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false)
+
+  const messages = createInitialMessages()
+  const { response, stats } = await runCompletionWithStats(
+    inference,
+    messages,
+    { generationParams: { remove_thinking_from_context: true } }
+  )
+  t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`stats: ${JSON.stringify(stats)}`)
+
+  verifyReasoningTags(t, response, 'opt-in compaction')
 
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
   t.ok(thinkingDiscards >= 1,
-    `default run should report at least one compaction (got ${thinkingDiscards})`)
+    `opt-in run should report at least one compaction (got ${thinkingDiscards})`)
 })
 
 // Opt-out path: when the caller explicitly disables the compaction, the
@@ -382,8 +406,8 @@ safeTest('remove_thinking_from_context=false is honoured in batch path', {
 })
 
 // Mixed-slot batch path: per-slot drivers honour their own
-// `remove_thinking_from_context` overrides independently. Slot A defaults
-// to compaction-on (1 discard), slot B explicitly opts out (0 discards);
+// `remove_thinking_from_context` overrides independently. Slot A opts in
+// (1 discard), slot B leaves the toggle at its default-off (0 discards);
 // the scheduler's `accumulateSlotRuntimeStats` sums per-slot
 // `getThinkingBlockDiscards()` so the aggregate must be exactly 1.
 safeTest('batch path aggregates per-slot remove_thinking_from_context independently', {
@@ -395,16 +419,16 @@ safeTest('batch path aggregates per-slot remove_thinking_from_context independen
   const batchInput = [
     {
       id: 'slot-on',
-      prompt: createInitialMessages()
-      // No runOptions → compaction defaults to on for this slot.
+      prompt: createInitialMessages(),
+      runOptions: { generationParams: { remove_thinking_from_context: true } }
     },
     {
       id: 'slot-off',
       prompt: [
         { role: 'system', content: 'You are an AI assistant. Always provide a clear answer after thinking' },
         { role: 'user', content: 'What is the capital of Spain?' }
-      ],
-      runOptions: { generationParams: { remove_thinking_from_context: false } }
+      ]
+      // No runOptions → compaction stays at its default-off for this slot.
     }
   ]
 
@@ -425,7 +449,7 @@ safeTest('batch path aggregates per-slot remove_thinking_from_context independen
       `mixed-slot ${item.id} output should contain <think>...</think>`)
   }
 
-  // Slot A (default-on) contributes 1; slot B (opt-out) contributes 0.
+  // Slot A (opt-in) contributes 1; slot B (default-off) contributes 0.
   // Sum across slots must equal 1 — proves per-slot independence AND
   // that `accumulateSlot` actually sums the per-slot value (not max / overwrite).
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
@@ -436,7 +460,7 @@ safeTest('batch path aggregates per-slot remove_thinking_from_context independen
 
 // reasoning_budget=0 short-circuits the channel before any tokens are
 // emitted, so the compaction feature has nothing to do and reports 0
-// discards even with the default `remove_thinking_from_context: true`.
+// discards even when `remove_thinking_from_context: true` is opted in.
 safeTest('remove_thinking_from_context is a no-op when reasoning_budget=0', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
@@ -447,7 +471,12 @@ safeTest('remove_thinking_from_context is a no-op when reasoning_budget=0', {
   const { response, stats } = await runCompletionWithStats(
     inference,
     messages,
-    { generationParams: { reasoning_budget: 0 } }
+    {
+      generationParams: {
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
+      }
+    }
   )
   t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
   t.comment(`stats: ${JSON.stringify(stats)}`)
@@ -462,8 +491,8 @@ safeTest('remove_thinking_from_context is a no-op when reasoning_budget=0', {
 // Multi-turn cache growth comparison. Uses a `cacheKey` so the KV cache
 // persists across `run()` calls (without it the addon resets `nPast_` to 0
 // after every inference and the cross-turn effect is invisible). Runs the
-// same two-turn flow twice: once with compaction enabled (default) and once
-// disabled; the disabled run should have a larger residual cache.
+// same two-turn flow twice: once with compaction explicitly opted in and
+// once with compaction off; the off run should have a larger residual cache.
 safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_200_000
@@ -478,17 +507,18 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
   })
 
   const messages1 = createInitialMessages()
+  const overridesOn = { generationParams: { remove_thinking_from_context: true } }
 
-  // Run A — compaction ON (default).
+  // Run A — compaction ON (explicit opt-in).
   const { inference: infA } = await setupReasoningModel(t, false)
-  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA })
+  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA, ...overridesOn })
   verifyReasoningTags(t, a1.response, 'A turn 1')
   t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
     'A turn 1 should compact at least one thinking block')
   const a2 = await runCompletionWithStats(
     infA,
     createFollowUpMessages(messages1, a1.response),
-    { cacheKey: sessionA }
+    { cacheKey: sessionA, ...overridesOn }
   )
   verifyReasoningTags(t, a2.response, 'A turn 2')
   // Symmetric guard on turn 2: the cross-turn delta below assumes BOTH
@@ -528,16 +558,20 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
     `turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
 })
 
-// Qwen3.5 coverage — mirrors the Qwen3 tests against a real Qwen3.5
-// checkpoint to cover the full `qwen3*` family the allow-list opts in.
-// Qwen3.5 thinking traces can run past 1k tokens before `</think>`, so we
-// give a larger n_predict / ctx_size.
+// Qwen3.5 coverage — exercises the reasoning detection on a hybrid SSM
+// checkpoint and verifies the recurrent-memory gate keeps the cache
+// untouched. Qwen3.5 thinking traces can exceed 1k tokens before
+// `</think>` closes, so we give a larger n_predict / ctx_size.
 const QWEN35_REASONING_CONFIG = {
   ctx_size: '8192',
   n_predict: '3072'
 }
 
-safeTest('remove_thinking_from_context defaults on for Qwen3.5', {
+// Qwen3.5 is a hybrid SSM family: even when the caller opts into
+// compaction, the recurrent-memory gate in `compactThinkSpan` skips the
+// cache mutation to avoid SSM-state contamination across turns. So the
+// single-turn run should report 0 discards regardless of the toggle.
+safeTest('Qwen3.5 SSM gate suppresses compaction even when opted in', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 900_000
 }, async t => {
@@ -547,18 +581,27 @@ safeTest('remove_thinking_from_context defaults on for Qwen3.5', {
   })
 
   const messages = createInitialMessages()
-  const { response, stats } = await runCompletionWithStats(inference, messages)
+  const { response, stats } = await runCompletionWithStats(
+    inference,
+    messages,
+    { generationParams: { remove_thinking_from_context: true } }
+  )
   t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
   t.comment(`stats: ${JSON.stringify(stats)}`)
 
-  verifyReasoningTags(t, response, 'Qwen3.5 default compaction')
+  verifyReasoningTags(t, response, 'Qwen3.5 opt-in (gated)')
 
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
-  t.ok(thinkingDiscards >= 1,
-    `Qwen3.5 default run should compact at least one thinking block (got ${thinkingDiscards})`)
+  t.is(thinkingDiscards, 0,
+    `Qwen3.5 opt-in should still report 0 discards under the SSM gate (got ${thinkingDiscards})`)
 })
 
-safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)', {
+// Qwen3.5 multi-turn behaviour under the SSM gate: caller asks for
+// compaction on slot A and explicitly disables it on slot B; the gate
+// turns slot A into a no-op, so both runs should behave identically
+// (no corruption, comparable cache size). This protects against the
+// regression where compaction-on slots produced runaway turn-2 output.
+safeTest('Qwen3.5 multi-turn is well-behaved under the SSM gate (opt-in == off)', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
 }, async t => {
@@ -572,31 +615,32 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)
   })
 
   const messages1 = createInitialMessages()
+  const overridesOn = { generationParams: { remove_thinking_from_context: true } }
+  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
 
-  // Run A — compaction ON (default).
+  // Run A — caller opts into compaction (gated off by the SSM check).
   const { inference: infA } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
   })
-  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA })
+  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA, ...overridesOn })
   t.comment(`A.turn1 stats: ${JSON.stringify(a1.stats)}`)
   verifyReasoningTags(t, a1.response, 'Qwen3.5 A turn 1')
-  t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
-    'Qwen3.5 A turn 1 should compact at least one thinking block')
+  t.is(toNumber(a1.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 A turn 1: SSM gate should keep discards at 0 even with opt-in')
   const a2 = await runCompletionWithStats(
     infA,
     createFollowUpMessages(messages1, a1.response),
-    { cacheKey: sessionA }
+    { cacheKey: sessionA, ...overridesOn }
   )
   t.comment(`A.turn2 stats: ${JSON.stringify(a2.stats)}`)
   verifyReasoningTags(t, a2.response, 'Qwen3.5 A turn 2')
 
-  // Run B — same flow, compaction OFF.
+  // Run B — compaction OFF explicitly.
   const { inference: infB } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
   })
-  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
   const b1 = await runCompletionWithStats(
     infB,
     messages1,
@@ -616,14 +660,20 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth (Qwen3.5)
 
   const cacheA2 = toNumber(a2.stats.CacheTokens)
   const cacheB2 = toNumber(b2.stats.CacheTokens)
-  t.comment(`Qwen3.5 compaction ON  turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
-  t.comment(`Qwen3.5 compaction OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
+  t.comment(`Qwen3.5 opt-in (gated) turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
+  t.comment(`Qwen3.5 off          turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
 
-  t.ok(cacheA2 > 0, `Qwen3.5 compaction-on turn 2 should have non-zero cache (got ${cacheA2})`)
-  t.ok(cacheB2 > 0, `Qwen3.5 compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
-  t.ok(cacheA2 < cacheB2,
-    `Qwen3.5 turn 2 cache with compaction ON (${cacheA2}) should be < OFF (${cacheB2}) — ` +
-    'proves turn 1 thinking was dropped from the cache')
+  t.ok(cacheA2 > 0, `Qwen3.5 opt-in turn 2 should have non-zero cache (got ${cacheA2})`)
+  t.ok(cacheB2 > 0, `Qwen3.5 off turn 2 should have non-zero cache (got ${cacheB2})`)
+  // SSM gate means slot A's cache should be in the same ballpark as slot B's;
+  // anything dramatically larger would indicate runaway generation on turn 2.
+  // We compare via the smaller / larger ratio rather than equality because
+  // sampling can still produce small turn-by-turn deltas across runs.
+  const minCache = Math.min(cacheA2, cacheB2)
+  const maxCache = Math.max(cacheA2, cacheB2)
+  t.ok(maxCache / Math.max(minCache, 1) < 2,
+    `Qwen3.5 opt-in cache (${cacheA2}) should be within 2x of off cache (${cacheB2}) ` +
+    '— SSM gate prevents runaway')
 })
 
 // Qwen3-1.7B for a fairer same-class comparison against Qwen3.5-0.8B
@@ -641,12 +691,10 @@ const QWEN35_LARGE_MODEL = {
   url: 'https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf'
 }
 
-// EXPERIMENT E: same 3-turn flow as EXPERIMENT C, but on a
-// pure-attention Qwen3 model of comparable scale to Qwen3.5-0.8B.
-// If turn 3 thinking is coherent here (vs the 1095-token rambling on
-// Qwen3.5), the degradation is hybrid-SSM-specific. If Qwen3 also
-// degrades, it's a general "compacted history confuses the model"
-// effect not tied to the architecture.
+// EXPERIMENT E: 3-turn run on a pure-attention Qwen3 of comparable
+// scale to Qwen3.5-0.8B. Control for EXPERIMENT C — isolates whether
+// the multi-turn degradation observed there is hybrid-SSM-specific or
+// a general effect of running with compacted history.
 safeTest('EXPERIMENT E: Qwen3-1.7B (pure attention) 3-turn with recommended params + compaction', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -667,7 +715,7 @@ safeTest('EXPERIMENT E: Qwen3-1.7B (pure attention) 3-turn with recommended para
   })
 
   const messages1 = createInitialMessages()
-  const thinkingParams = { top_k: 20, presence_penalty: 1.5 }
+  const thinkingParams = { top_k: 20, presence_penalty: 1.5, remove_thinking_from_context: true }
   const t1 = await runCompletionWithStats(
     inference, messages1, { cacheKey: sessionE, generationParams: thinkingParams })
   t.comment(`Qwen3Large.turn1 stats: ${JSON.stringify(t1.stats)}`)
@@ -688,11 +736,9 @@ safeTest('EXPERIMENT E: Qwen3-1.7B (pure attention) 3-turn with recommended para
   t.ok(true, 'experiment completed (see comments)')
 })
 
-// EXPERIMENT F: same 3-turn flow as EXPERIMENT C but on Qwen3.5-2B
-// (larger hybrid SSM). Tests whether the rambling we observed on
-// Qwen3.5-0.8B was size-sensitive (small hybrid degrades more) or
-// genuinely architecture-specific (any hybrid degrades regardless of
-// size).
+// EXPERIMENT F: 3-turn run on Qwen3.5-2B (larger hybrid SSM). Probes
+// whether the multi-turn degradation seen on Qwen3.5-0.8B is
+// size-sensitive or fundamentally architecture-specific.
 safeTest('EXPERIMENT F: Qwen3.5-2B (larger hybrid) 3-turn with recommended params + compaction', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -713,7 +759,7 @@ safeTest('EXPERIMENT F: Qwen3.5-2B (larger hybrid) 3-turn with recommended param
   })
 
   const messages1 = createInitialMessages()
-  const thinkingParams = { top_k: 20, presence_penalty: 1.5 }
+  const thinkingParams = { top_k: 20, presence_penalty: 1.5, remove_thinking_from_context: true }
   const t1 = await runCompletionWithStats(
     inference, messages1, { cacheKey: sessionF, generationParams: thinkingParams })
   t.comment(`Qwen35Large.turn1 stats: ${JSON.stringify(t1.stats)}`)
@@ -735,10 +781,9 @@ safeTest('EXPERIMENT F: Qwen3.5-2B (larger hybrid) 3-turn with recommended param
 })
 
 // EXPERIMENT G: Qwen3.5-2B 3-turn baseline with compaction OFF.
-// Direct control for EXPERIMENT F — same model, same params, same
-// turns, but thinking blocks are kept in cache. Isolates whether the
-// self-verification ("wait, but...") thinking shape in F is from
-// compaction or just how this model thinks.
+// Control for EXPERIMENT F — isolates whether the verbose
+// self-verification thinking pattern in F is caused by compaction or
+// is just how this model reasons.
 safeTest('EXPERIMENT G: Qwen3.5-2B 3-turn recommended params, compaction OFF', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -785,10 +830,9 @@ safeTest('EXPERIMENT G: Qwen3.5-2B 3-turn recommended params, compaction OFF', {
   t.ok(true, 'experiment completed (see comments)')
 })
 
-// EXPERIMENT D: same recommended sampling params as EXPERIMENT C but
-// compaction OFF — control for whether the "first interaction" phrasing
-// in C's output is just model style or actually because the model loses
-// turn-1 context when thinking is compacted out.
+// EXPERIMENT D: recommended sampling params, compaction OFF. Control
+// for EXPERIMENT C — isolates whether any turn-1 context loss in C is
+// caused by compaction or is intrinsic to the model.
 safeTest('EXPERIMENT D: Qwen3.5 multi-turn recommended params, compaction OFF', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -834,15 +878,11 @@ safeTest('EXPERIMENT D: Qwen3.5 multi-turn recommended params, compaction OFF', 
   t.ok(true, 'experiment completed (see comments)')
 })
 
-// EXPERIMENT C: Qwen3.5-0.8B is documented to have a thinking-loop
-// problem at greedy decoding (model card explicitly warns this 0.8B
-// variant is more prone to thinking loops). Their recommended thinking-
-// mode sampling for text: temperature=1.0, top_p=0.95, top_k=20,
-// presence_penalty=1.5. presence_penalty in particular penalises token
-// repetition — exactly the mechanism that would break our loop. If the
-// multi-turn ON case generates cleanly under these params, the loop is
-// the documented sampling-instability issue, not a compaction-specific
-// state corruption.
+// EXPERIMENT C: Qwen3.5-0.8B's model card warns it is prone to
+// thinking loops under greedy decoding and recommends temperature=1.0,
+// top_p=0.95, top_k=20, presence_penalty=1.5. This test runs the
+// multi-turn compaction flow under those recommended params to
+// separate sampling instability from compaction-induced state issues.
 safeTest('EXPERIMENT C: Qwen3.5 multi-turn with recommended thinking sampling params', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -867,7 +907,8 @@ safeTest('EXPERIMENT C: Qwen3.5 multi-turn with recommended thinking sampling pa
   const messages1 = createInitialMessages()
   const thinkingParams = {
     top_k: 20,
-    presence_penalty: 1.5
+    presence_penalty: 1.5,
+    remove_thinking_from_context: true
   }
   const t1 = await runCompletionWithStats(
     inference, messages1, { cacheKey: sessionA, generationParams: thinkingParams })
@@ -889,13 +930,11 @@ safeTest('EXPERIMENT C: Qwen3.5 multi-turn with recommended thinking sampling pa
   t.ok(true, 'experiment completed (see comments)')
 })
 
-// EXPERIMENT B: same multi-turn flow on Qwen3.5 with compaction-on, but
-// turn 2 is run with `reasoning_budget: 0` so the chat template does NOT
-// force-open a new `<think>` block. If turn 2 still runs away, the
-// failure mode is the post-compaction SSM state itself (not the
-// forced-thinking-open at the turn boundary). If turn 2 generates
-// normally, the failure is specifically the chat-template forcing the
-// model back into "thinking mode" from a "post-answer" SSM state.
+// EXPERIMENT B: Qwen3.5 multi-turn with compaction-on but turn 2 uses
+// `reasoning_budget: 0` so the chat template skips the forced
+// `<think>` re-open. Separates two possible failure modes: the
+// post-compaction SSM state itself vs. the chat template forcing the
+// model back into thinking mode.
 safeTest('EXPERIMENT: Qwen3.5 multi-turn, compaction on, turn 2 with reasoning_budget=0', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_800_000
@@ -911,26 +950,33 @@ safeTest('EXPERIMENT: Qwen3.5 multi-turn, compaction on, turn 2 with reasoning_b
   })
 
   const messages1 = createInitialMessages()
-  const t1 = await runCompletionWithStats(inference, messages1, { cacheKey: session })
-  t.comment(`Turn 1 (default, compaction ON) stats: ${JSON.stringify(t1.stats)}`)
+  const t1 = await runCompletionWithStats(
+    inference,
+    messages1,
+    { cacheKey: session, generationParams: { remove_thinking_from_context: true } }
+  )
+  t.comment(`Turn 1 (compaction ON) stats: ${JSON.stringify(t1.stats)}`)
   t.comment(`Turn 1 closed </think>: ${/<\/think>/.test(t1.response)}`)
 
   // Turn 2: same session, reasoning_budget=0 forces NO thinking re-open.
   const t2 = await runCompletionWithStats(
     inference,
     createFollowUpMessages(messages1, t1.response),
-    { cacheKey: session, generationParams: { reasoning_budget: 0 } }
+    {
+      cacheKey: session,
+      generationParams: {
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
+      }
+    }
   )
   t.comment(`Turn 2 (reasoning_budget=0) stats: ${JSON.stringify(t2.stats)}`)
-  t.comment(`Turn 2 (len=${t2.response.length}) ends: ${t2.response.slice(-300)}`)
   t.comment(`Turn 2 contains <think>: ${/<think>/.test(t2.response)}`)
 
-  // Discriminator: if generatedTokens stays small (≤ 600) and the
-  // response is coherent, the state-self-sufficient story holds — the
-  // turn-2 corruption we saw before was about the forced think-open
-  // colliding with the post-answer SSM state. If we still hit
-  // n_predict cap (3071) or output is degenerate, the post-shift state
-  // itself is bad.
-  t.comment(`EXPERIMENT result: generatedTokens=${toNumber(t2.stats.generatedTokens)}`)
+  // Discriminator: small generatedTokens with coherent output means the
+  // post-compaction SSM state is fine and the previous turn-2 runaway
+  // was caused by the chat template forcing a `<think>` re-open. A
+  // turn-2 that still hits the n_predict cap points at the post-shift
+  // state itself.
   t.ok(true, 'experiment completed (see comments)')
 })
