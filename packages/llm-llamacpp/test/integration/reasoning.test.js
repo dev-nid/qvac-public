@@ -150,21 +150,6 @@ function createFollowUpMessages (initialMessages, previousResponse) {
   ]
 }
 
-// Turn 3 helper: appends an assistant turn (turn 2's response) and a new
-// user message that tests conversational context recall.
-function createTurn3Messages (turn2Messages, turn2Response) {
-  return [
-    ...turn2Messages,
-    {
-      role: 'assistant',
-      content: turn2Response
-    },
-    {
-      role: 'user',
-      content: 'Can you tell me what I asked you in my first message?'
-    }
-  ]
-}
 safeTest('reasoning tag EOS replacement works with tools=false', {
   skip: isDarwinX64 || isWindowsX64, // TODO: unskip isWindowsX64 once we have GPU, takes too long
   timeout: 600_000
@@ -281,14 +266,10 @@ safeTest('Qwen3 reasoning-budget=0 disables thinking', {
     `disabled (${disabled.length}) should be substantially shorter than baseline (${baseline.length})`)
 })
 
-// Compaction-on-by-default: after a Qwen3 turn that emits <think>...</think>,
-// the runtime stats should report at least one thinking block discarded.
-// We do not assert on `CacheTokens` here because the addon resets the
-// context after every non-session-cached inference (see
-// `LlamaModel::processPromptImpl::shouldResetAfterInference`), so post-run
-// `nPast_` is 0 regardless of whether compaction happened. The cross-turn
-// effect of compaction is covered by the multi-turn test below, which uses
-// a `cacheKey` to keep the cache live between calls.
+// Default behaviour: without opting in, a Qwen3 turn that emits
+// <think>...</think> should leave the thinking block in the cache and
+// report 0 thinking-block discards. The opt-in path is covered by the
+// next test, and the cross-turn effect by the multi-turn test below.
 safeTest('remove_thinking_from_context defaults off for Qwen3', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
@@ -604,160 +585,42 @@ safeTest('Qwen3.5 rejects remove_thinking_from_context opt-in', {
     'Qwen3.5 default-off should report 0 discards')
 })
 
-// Qwen3-1.7B for a fairer same-class comparison against Qwen3.5-0.8B
-// (instead of the tiny Qwen3-0.6B which is too lazy to show
-// interesting multi-turn behaviour).
-const QWEN3_LARGE_MODEL = {
-  name: 'Qwen3-1.7B-Q8_0.gguf',
-  url: 'https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf'
-}
-
-// Qwen3.5-2B for testing whether the rambling we saw on Qwen3.5-0.8B
-// is size-sensitive or genuinely hybrid-architecture-specific.
-const QWEN35_LARGE_MODEL = {
-  name: 'Qwen3.5-2B-Q8_0.gguf',
-  url: 'https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf'
-}
-
-// EXPERIMENT E: 3-turn run on a pure-attention Qwen3 of comparable
-// scale to Qwen3.5-0.8B. Control for EXPERIMENT C — isolates whether
-// the multi-turn degradation observed there is hybrid-SSM-specific or
-// a general effect of running with compacted history.
-safeTest('EXPERIMENT E: Qwen3-1.7B (pure attention) 3-turn with recommended params + compaction', {
+// Regression guard for the partial-mutation leak: when the rejection
+// throws *after* `applyGenerationParamsToContext` has committed
+// sampler / common-params overrides, the restore lambda is never
+// returned and those mutations would leak into the next request. We
+// pair `remove_thinking_from_context: true` with a distinctive
+// `n_predict: 1` override; if the leak existed the follow-up
+// (no overrides) would inherit the n_predict=1 cap.
+safeTest('Qwen3.5 reject does not leak other generation overrides', {
   skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
+  timeout: 900_000
 }, async t => {
-  const sessionE = path.join(os.tmpdir(), `qvac-qwen3-large-recparams-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionE) } catch {}
-  })
-
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN3_LARGE_MODEL,
-    configOverrides: {
-      ctx_size: '8192',
-      n_predict: '3072',
-      temp: '1.0',
-      top_p: '0.95'
-    }
-  })
-
-  const messages1 = createInitialMessages()
-  const thinkingParams = { top_k: 20, presence_penalty: 1.5, remove_thinking_from_context: true }
-  const t1 = await runCompletionWithStats(
-    inference, messages1, { cacheKey: sessionE, generationParams: thinkingParams })
-  t.comment(`Qwen3Large.turn1 stats: ${JSON.stringify(t1.stats)}`)
-
-  const turn2Messages = createFollowUpMessages(messages1, t1.response)
-  const t2 = await runCompletionWithStats(
-    inference, turn2Messages,
-    { cacheKey: sessionE, generationParams: thinkingParams })
-  t.comment(`Qwen3Large.turn2 stats: ${JSON.stringify(t2.stats)}`)
-
-  const turn3Messages = createTurn3Messages(turn2Messages, t2.response)
-  const t3 = await runCompletionWithStats(
-    inference, turn3Messages,
-    { cacheKey: sessionE, generationParams: thinkingParams })
-  t.comment(`Qwen3Large.turn3 stats: ${JSON.stringify(t3.stats)}`)
-  t.comment(`Qwen3Large.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
-
-  t.ok(true, 'experiment completed (see comments)')
-})
-
-// EXPERIMENT G: Qwen3.5-2B 3-turn baseline with compaction OFF.
-// Control for EXPERIMENT F — isolates whether the verbose
-// self-verification thinking pattern in F is caused by compaction or
-// is just how this model reasons.
-safeTest('EXPERIMENT G: Qwen3.5-2B 3-turn recommended params, compaction OFF', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const sessionG = path.join(os.tmpdir(), `qvac-qwen35-large-off-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionG) } catch {}
-  })
-
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_LARGE_MODEL,
-    configOverrides: {
-      ctx_size: '8192',
-      n_predict: '3072',
-      temp: '1.0',
-      top_p: '0.95'
-    }
-  })
-
-  const messages1 = createInitialMessages()
-  const thinkingParams = {
-    top_k: 20,
-    presence_penalty: 1.5,
-    // compaction OFF
-    remove_thinking_from_context: false
-  }
-  const t1 = await runCompletionWithStats(
-    inference, messages1, { cacheKey: sessionG, generationParams: thinkingParams })
-  t.comment(`Qwen35LargeOff.turn1 stats: ${JSON.stringify(t1.stats)}`)
-
-  const turn2Messages = createFollowUpMessages(messages1, t1.response)
-  const t2 = await runCompletionWithStats(
-    inference, turn2Messages,
-    { cacheKey: sessionG, generationParams: thinkingParams })
-  t.comment(`Qwen35LargeOff.turn2 stats: ${JSON.stringify(t2.stats)}`)
-
-  const turn3Messages = createTurn3Messages(turn2Messages, t2.response)
-  const t3 = await runCompletionWithStats(
-    inference, turn3Messages,
-    { cacheKey: sessionG, generationParams: thinkingParams })
-  t.comment(`Qwen35LargeOff.turn3 stats: ${JSON.stringify(t3.stats)}`)
-  t.comment(`Qwen35LargeOff.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
-
-  t.ok(true, 'experiment completed (see comments)')
-})
-
-// EXPERIMENT D: recommended sampling params, compaction OFF. Control
-// for EXPERIMENT C — isolates whether any turn-1 context loss in C is
-// caused by compaction or is intrinsic to the model.
-safeTest('EXPERIMENT D: Qwen3.5 multi-turn recommended params, compaction OFF', {
-  skip: isDarwinX64 || isWindowsX64,
-  timeout: 1_800_000
-}, async t => {
-  const sessionD = path.join(os.tmpdir(), `qvac-qwen35-recparams-off-${Date.now()}.bin`)
-  t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionD) } catch {}
-  })
-
   const { inference } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
-    configOverrides: {
-      ...QWEN35_REASONING_CONFIG,
-      temp: '1.0',
-      top_p: '0.95'
-    }
+    configOverrides: QWEN35_REASONING_CONFIG
   })
 
-  const messages1 = createInitialMessages()
-  const thinkingParams = {
-    top_k: 20,
-    presence_penalty: 1.5,
-    // compaction OFF
-    remove_thinking_from_context: false
+  const messages = createInitialMessages()
+
+  let caught = null
+  try {
+    await runCompletionWithStats(
+      inference,
+      messages,
+      { generationParams: { remove_thinking_from_context: true, n_predict: 1 } }
+    )
+  } catch (err) {
+    caught = err
   }
-  const t1 = await runCompletionWithStats(
-    inference, messages1, { cacheKey: sessionD, generationParams: thinkingParams })
-  t.comment(`RecParamsOff.turn1 stats: ${JSON.stringify(t1.stats)}`)
+  t.ok(caught, 'paired override should throw')
 
-  const turn2Messages = createFollowUpMessages(messages1, t1.response)
-  const t2 = await runCompletionWithStats(
-    inference, turn2Messages,
-    { cacheKey: sessionD, generationParams: thinkingParams })
-  t.comment(`RecParamsOff.turn2 stats: ${JSON.stringify(t2.stats)}`)
-
-  const turn3Messages = createTurn3Messages(turn2Messages, t2.response)
-  const t3 = await runCompletionWithStats(
-    inference, turn3Messages,
-    { cacheKey: sessionD, generationParams: thinkingParams })
-  t.comment(`RecParamsOff.turn3 stats: ${JSON.stringify(t3.stats)}`)
-  t.comment(`RecParamsOff.turn3 closed </think>: ${/<\/think>/.test(t3.response)}`)
-
-  t.ok(true, 'experiment completed (see comments)')
+  // Follow-up request with no overrides — must generate beyond 1 token.
+  // If the n_predict=1 from the throwing request leaked, this would be
+  // capped at 1.
+  const { stats } = await runCompletionWithStats(inference, messages)
+  const generated = toNumber(stats.generatedTokens)
+  t.comment(`follow-up generatedTokens=${generated}`)
+  t.ok(generated > 1,
+    `follow-up should not inherit n_predict=1 from the throwing request (got ${generated})`)
 })

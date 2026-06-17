@@ -40,9 +40,11 @@ struct GenerationParams {
   // request and restored on completion.
   std::optional<int> reasoning_budget;
   // Per-request override for the post-generation thinking-block KV
-  // cache compaction. Defaults to true at the context level; passing
-  // false here leaves the reasoning block in the cache for this
-  // request. Restored at end-of-request.
+  // cache compaction. Default-off at the context level; passing `true`
+  // here opts in for this request, `false` leaves the reasoning block
+  // in the cache. Throws `StatusError(InvalidArgument)` when set to
+  // `true` on a model with recurrent memory (SSM / hybrid SSM such as
+  // Qwen3.5). Restored at end-of-request.
   std::optional<bool> remove_thinking_from_context;
 
   // Reports overrides that need `applyGenerationParamsToContext` (sampler /
