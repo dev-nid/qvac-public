@@ -129,4 +129,3 @@ CompactRangeOutcome compactKvRange(
     llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
     llama_pos endPos, llama_pos nPast,
     const IContextSliderOps& ops = defaultContextSliderOps());
-
