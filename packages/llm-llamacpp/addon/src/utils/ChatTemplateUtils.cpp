@@ -25,7 +25,7 @@ namespace {
 inline constexpr std::string_view MEDPSY_BASENAME_LOWER{"medpsy"};
 
 // Basename substrings used to identify Gemma 4 GGUFs by `general.basename`.
-inline constexpr std::array<std::string_view, 3> kGemma4BasenameMarkers{
+inline constexpr std::array<std::string_view, 3> GEMMA4_BASENAME_MARKERS{
     "gemma-4", "gemma 4", "gemma4"};
 
 std::string toLower(std::string_view value) {
@@ -57,13 +57,13 @@ bool isGemma4Architecture(std::string_view architecture) {
 // the tools_compact path) but deliberately narrower than the full
 // `qwen3*` HuggingFace lineage — explicit list keeps unrelated
 // `qwen3*`-named archs from silently inheriting the wrong tags.
-inline constexpr std::array<std::string_view, 4> kQwen3ReasoningFamilyArches{
+inline constexpr std::array<std::string_view, 4> QWEN3_REASONING_FAMILY_ARCHES{
     "qwen3", "qwen3moe", "qwen35", "qwen35moe"};
 
 bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
   const std::string normalised = normalizeArchitecture(architecture);
-  return std::ranges::find(kQwen3ReasoningFamilyArches, normalised) !=
-         kQwen3ReasoningFamilyArches.end();
+  return std::ranges::find(QWEN3_REASONING_FAMILY_ARCHES, normalised) !=
+         QWEN3_REASONING_FAMILY_ARCHES.end();
 }
 
 std::optional<std::string>
@@ -129,7 +129,7 @@ bool isGemma4Basename(std::string_view basename) {
     return false;
   }
   const std::string lowered = toLower(basename);
-  for (std::string_view marker : kGemma4BasenameMarkers) {
+  for (std::string_view marker : GEMMA4_BASENAME_MARKERS) {
     if (lowered.find(marker) != std::string::npos) {
       return true;
     }
