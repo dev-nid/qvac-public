@@ -671,6 +671,40 @@ bool MtmdLlmContext::generateResponse(
       break;
     }
 
+    // EOS sampled while still inside the reasoning channel: substitute
+    // the cached close marker, decode it so the span end position gets
+    // recorded, then exit. Mirrors TextLlmContext single-prompt EOS
+    // handling. Without this, `compactThinkSpan()` would skip removal
+    // because `thinkSpan_->second` stays unset.
+    if (isEos && reasoningEnabled_ && reasoningState_.inside_reasoning &&
+        reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
+      tokenId = reasoningState_.cached_close_tag_token;
+      tokenStr =
+          common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
+      reasoningState_.inside_reasoning = false;
+      pendingThinkCloseCapture_ = true;
+
+      if (outputCallback) {
+        std::string completeChars = utf8Buffer_.addToken(tokenStr);
+        if (!completeChars.empty()) {
+          outputCallback(completeChars);
+        }
+      }
+
+      common_batch_clear(*batch);
+      common_batch_add(*batch, tokenId, current_.pos++, {seqId_}, true);
+      if (llama_decode(modelCtx_.lctx, *batch) != 0) {
+        const char* errorMsg =
+            "[MtmdLlm] failed to decode substituted reasoning close tag\n";
+        throw qvac_errors::StatusError(
+            ADDON_ID, toString(FailedToDecode), errorMsg);
+      }
+      ++current_.cacheTokens;
+      capturePendingThinkClose();
+      flushPendingUtf8ToCallback(outputCallback);
+      break;
+    }
+
     if (isEos || checkAntiprompt()) {
       flushPendingUtf8ToCallback(outputCallback);
       break;
