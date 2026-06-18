@@ -92,8 +92,7 @@ TEST_F(ReasoningUtilsTest, UpdateBufferRespectsSizeLimit) {
   std::string longToken(60, 'a');
   updateReasoningBuffer(longToken, state);
 
-  EXPECT_EQ(
-      state.recent_output_buffer.length(), ReasoningState::BUFFER_SIZE);
+  EXPECT_EQ(state.recent_output_buffer.length(), ReasoningState::BUFFER_SIZE);
   EXPECT_EQ(state.recent_output_buffer, std::string(60, 'a').substr(10));
 }
 
