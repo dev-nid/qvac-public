@@ -574,14 +574,9 @@ safeTest('Qwen3.5 rejects remove_thinking_from_context opt-in', {
   t.ok(caught, 'opt-in on Qwen3.5 should throw')
   t.ok(/recurrent memory|SSM/i.test(caught?.message || ''),
     `error message should mention recurrent / SSM (got: ${caught?.message})`)
-
-  // Default (no opt-in) must still work and just leave the thinking
-  // block in the cache.
-  const { response, stats } = await runCompletionWithStats(inference, messages)
-  t.comment(`default-off stats: ${JSON.stringify(stats)}`)
-  verifyReasoningTags(t, response, 'Qwen3.5 default-off')
-  t.is(toNumber(stats.thinkingBlockDiscards), 0,
-    'Qwen3.5 default-off should report 0 discards')
+  // The default-off "still works" assertion lives in the leak-guard
+  // test below, which also covers a Qwen3.5 follow-up after a throwing
+  // request and asserts generatedTokens > 1.
 })
 
 // Regression guard for the partial-mutation leak: when the rejection
