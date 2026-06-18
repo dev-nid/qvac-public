@@ -170,14 +170,9 @@ export interface GenerationParams {
    * history.
    *
    * Defaults to `false`. Set to `true` to drop reasoning tokens from
-   * the cache at end-of-generation.
-   *
-   * No-op for text models without a recognised reasoning channel.
-   *
-   * Multimodal contexts (e.g. Gemma 4 VL) silently ignore this flag —
-   * the reasoning detection / span-compaction pipeline currently lives
-   * only on the text path. Multimodal support is tracked as a separate
-   * follow-up.
+   * the cache at end-of-generation. Supported on both text and
+   * multimodal contexts. No-op for models without a recognised
+   * reasoning channel.
    *
    * Throws when set to `true` on models with recurrent memory
    * (SSM / hybrid SSM such as Qwen3.5) — `seq_rm + seq_add` leaves the

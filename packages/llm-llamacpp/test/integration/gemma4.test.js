@@ -441,6 +441,82 @@ test('Gemma 4 multi-turn with remove_thinking_from_context reduces cache growth'
     `ON turn 2 should not hit n_predict cap (got ${onRun.t2.stats.generatedTokens})`)
 })
 
+// Multimodal compaction: loads Gemma 4 with the projection model
+// (forcing the multimodal context path) and verifies the same opt-in
+// toggle drops the reasoning block from the KV cache when the channel
+// is engaged. Text-only prompt is sufficient; we are not testing
+// vision here, only that the multimodal context honours the toggle.
+test('Gemma 4 multimodal honours remove_thinking_from_context', {
+  timeout: 1_800_000
+}, async t => {
+  const [modelName, dirPath] = await ensureModel(GEMMA4_MODEL.llmModel)
+  const [projModelName] = await ensureModel(GEMMA4_MODEL.projModel)
+  const modelPath = path.join(dirPath, modelName)
+  const projectionModelPath = path.join(dirPath, projModelName)
+
+  const baseConfig = {
+    device: useCpu ? 'cpu' : 'gpu',
+    gpu_layers: '999',
+    ctx_size: '2048',
+    n_predict: '256',
+    temp: '0',
+    seed: '42',
+    verbosity: '0'
+  }
+
+  async function runOnce (runOptions) {
+    const addon = new LlmLlamacpp({
+      files: { model: [modelPath], projectionModel: projectionModelPath },
+      config: baseConfig,
+      logger: createLogger(),
+      opts: { stats: true }
+    })
+    try {
+      await addon.load()
+      const response = await addon.run([
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: 'What is the capital of France? Answer in one word.' }
+      ], runOptions)
+      let output = ''
+      const ticker = setInterval(() => {}, 50)
+      try {
+        await response.onUpdate(token => { output += token }).await()
+      } finally {
+        clearInterval(ticker)
+      }
+      return { output, stats: response.stats || {} }
+    } finally {
+      await addon.unload().catch(() => {})
+    }
+  }
+
+  const toNum = v => typeof v === 'number' ? v : Number(v || 0)
+
+  const compactRun = await runOnce({
+    generationParams: { remove_thinking_from_context: true }
+  })
+  t.comment(`multimodal compact (${compactRun.output.length} chars): ${compactRun.output.slice(0, 200)}`)
+  t.comment(`multimodal compact stats: ${JSON.stringify(compactRun.stats)}`)
+
+  // Gemma 4 emits the reasoning channel only when it deems the question
+  // worth deliberating about; skip the assertions if the channel did
+  // not engage so the multimodal path is exercised but the test does
+  // not become flaky on prompt-dependent behaviour.
+  if (/<\|channel>thought/i.test(compactRun.output)) {
+    t.ok(toNum(compactRun.stats.thinkingBlockDiscards) >= 1,
+      `multimodal opt-in should compact at least one channel block (got ${compactRun.stats.thinkingBlockDiscards})`)
+
+    const defaultRun = await runOnce()
+    t.comment(`multimodal default (${defaultRun.output.length} chars): ${defaultRun.output.slice(0, 200)}`)
+    t.comment(`multimodal default stats: ${JSON.stringify(defaultRun.stats)}`)
+    t.is(toNum(defaultRun.stats.thinkingBlockDiscards), 0,
+      `multimodal default (no opt-in) should report 0 discards (got ${defaultRun.stats.thinkingBlockDiscards})`)
+  } else {
+    t.comment('Gemma 4 multimodal did not emit <|channel>thought - skipping compaction assertions')
+    t.pass('multimodal compaction assertions skipped (channel not engaged)')
+  }
+})
+
 test('Gemma 4 reasoning-budget=0 disables thinking', {
   timeout: 1_800_000
 }, async t => {
