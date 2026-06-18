@@ -1,5 +1,7 @@
 #include "ContextSlider.hpp"
 
+#include <algorithm>
+
 #include "ToolsCompactController.hpp"
 #include "common/common.h"
 #include "inference-addon-cpp/Logger.hpp"
@@ -177,6 +179,113 @@ CompactRangeOutcome compactKvRange(
   // llama_memory_seq_add is void / infallible by API contract.
   ops.seqAdd(mem, seqId, endPos, nPast, -discarded);
   return {CompactRangeOutcome::Kind::Compacted, nPast - discarded, discarded};
+}
+
+namespace {
+class ReplayStateOps final : public IReplayStateOps {
+public:
+  size_t stateSeqGetSize(llama_context* lctx, llama_seq_id seqId)
+      const override {
+    return llama_state_seq_get_size(lctx, seqId);
+  }
+
+  size_t stateSeqGetData(
+      llama_context* lctx, uint8_t* dst, size_t size,
+      llama_seq_id seqId) const override {
+    return llama_state_seq_get_data(lctx, dst, size, seqId);
+  }
+
+  size_t stateSeqSetData(
+      llama_context* lctx, const uint8_t* src, size_t size,
+      llama_seq_id seqId) const override {
+    return llama_state_seq_set_data(lctx, src, size, seqId);
+  }
+
+  bool memorySeqRm(
+      llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
+      llama_pos endPos) const override {
+    auto* mem = llama_get_memory(lctx);
+    if (mem == nullptr) {
+      return false;
+    }
+    return llama_memory_seq_rm(mem, seqId, startPos, endPos);
+  }
+
+  llama_pos batchDecodeTokens(
+      llama_context* lctx, llama_seq_id seqId,
+      const std::vector<llama_token>& tokens, llama_pos startPos,
+      int nBatch) const override {
+    const auto total = static_cast<int>(tokens.size());
+    const int chunkCap = nBatch > 0 ? nBatch : total;
+    if (total == 0 || chunkCap <= 0) {
+      return startPos;
+    }
+    llama_batch batch = llama_batch_init(chunkCap, 0, 1);
+    llama_pos pos = startPos;
+    int offset = 0;
+    while (offset < total) {
+      const int chunk = std::min(chunkCap, total - offset);
+      common_batch_clear(batch);
+      for (int i = 0; i < chunk; ++i) {
+        const bool isLast = (offset + i + 1 == total);
+        common_batch_add(batch, tokens[offset + i], pos + i, {seqId}, isLast);
+      }
+      if (llama_decode(lctx, batch) != 0) {
+        llama_batch_free(batch);
+        return -1;
+      }
+      pos += chunk;
+      offset += chunk;
+    }
+    llama_batch_free(batch);
+    return pos;
+  }
+};
+} // namespace
+
+const IReplayStateOps& defaultReplayStateOps() {
+  static const ReplayStateOps ops;
+  return ops;
+}
+
+ReplayThinkingOutcome replayThinkingSpan(
+    llama_context* lctx, llama_seq_id seqId,
+    const std::vector<uint8_t>& snapshot, llama_pos snapshotNPast,
+    const std::vector<llama_token>& answerTokens, llama_pos preNPast,
+    int nBatch, const IReplayStateOps& ops) {
+  if (snapshot.empty() || snapshotNPast < 0) {
+    return {ReplayThinkingOutcome::Kind::NoOp, preNPast, 0};
+  }
+  const size_t restored =
+      ops.stateSeqSetData(lctx, snapshot.data(), snapshot.size(), seqId);
+  if (restored == 0) {
+    return {ReplayThinkingOutcome::Kind::SnapshotRestoreFailed, preNPast, 0};
+  }
+  // The set_data API restores the saved snapshot positions; explicitly
+  // clear any stale tail beyond `snapshotNPast` so subsequent decode
+  // anchors against a clean cache.
+  ops.memorySeqRm(lctx, seqId, snapshotNPast, -1);
+  if (answerTokens.empty()) {
+    const llama_pos discarded =
+        preNPast > snapshotNPast ? preNPast - snapshotNPast : 0;
+    return {ReplayThinkingOutcome::Kind::Replayed, snapshotNPast, discarded};
+  }
+  const llama_pos finalPos =
+      ops.batchDecodeTokens(lctx, seqId, answerTokens, snapshotNPast, nBatch);
+  if (finalPos < 0) {
+    // Decode failed somewhere inside the answer-token replay. The cache
+    // may now contain a partial post-snapshot tail; clear it so the
+    // caller's `nPast_ = newNPast` (= snapshotNPast) describes a
+    // consistent state. The user-visible answer was already streamed,
+    // and the saved cache (if any) will reflect just the snapshot —
+    // future turns will re-prefill the answer from the chat history.
+    ops.memorySeqRm(lctx, seqId, snapshotNPast, -1);
+    const llama_pos discarded =
+        preNPast > snapshotNPast ? preNPast - snapshotNPast : 0;
+    return {ReplayThinkingOutcome::Kind::DecodeFailed, snapshotNPast, discarded};
+  }
+  const llama_pos discarded = preNPast > finalPos ? preNPast - finalPos : 0;
+  return {ReplayThinkingOutcome::Kind::Replayed, finalPos, discarded};
 }
 
 ContextSlideOutcome trySlideGeneration(

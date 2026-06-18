@@ -569,6 +569,15 @@ void TextLlmContext::onPrefillComplete(
         nPast_ - static_cast<llama_pos>(reasoningState_.forcedOpenTokenCount));
     reasoningState_.inside_reasoning = true;
   }
+
+  // Recurrent-memory checkpoint: snapshot the per-sequence state once
+  // prefill is complete and before any tokens are sampled. The replay
+  // path in `compactThinkSpan` rewinds to this snapshot and decodes the
+  // captured answer tokens on top of it. No-op on pure-attention
+  // models (`seq_rm + seq_add` handles the cache there).
+  if (removeThinkingFromContext_ && hasRecurrentMemory_ && reasoningEnabled_) {
+    captureReplaySnapshot();
+  }
 }
 
 void TextLlmContext::flushPendingUtf8ToCallback(
@@ -608,9 +617,13 @@ llama_pos TextLlmContext::applyContextDiscard() {
     nPast_ = outcome.newNPast;
     ++nSlides_;
     // Recorded span positions are no longer valid after the shift;
-    // drop them rather than try to fix them up.
+    // drop them rather than try to fix them up. The replay snapshot
+    // captures the pre-generation state and is anchored against the
+    // pre-slide `nPast_`, so it must be released too — replaying from
+    // it after a slide would rewind past the surviving prefix.
     thinkSpan_.reset();
     pendingThinkCloseCapture_ = false;
+    clearReplaySnapshot();
     QLOG_IF(
         Priority::DEBUG,
         string_format(
@@ -840,6 +853,15 @@ SequenceStepResult TextLlmContext::onLogitsReady(
     flushPendingUtf8ToCallback(outputCallback);
   }
 
+  // Capture the token for the recurrent-memory replay buffer. Only
+  // tokens that will actually be committed to the cache should be
+  // recorded — `finished` tokens are returned to the caller but never
+  // appended to the outer batch, so they would inflate `answerTokens_`
+  // beyond the live cache positions.
+  if (!finished) {
+    recordAnswerTokenForReplay(tokenId);
+  }
+
   return {.token = tokenId, .finished = finished, .discarded = discarded};
 }
 
@@ -899,6 +921,7 @@ void TextLlmContext::capturePendingThinkClose() {
 void TextLlmContext::compactThinkSpan() {
   if (!removeThinkingFromContext_ || !thinkSpan_.has_value()) {
     thinkSpan_.reset();
+    clearReplaySnapshot();
     return;
   }
   const llama_pos start = thinkSpan_->first;
@@ -909,6 +932,101 @@ void TextLlmContext::compactThinkSpan() {
   // touching the cache. This is the single validation backstop for all
   // close-capture sites — none validate `end > start` themselves.
   if (end < 0 || end <= start) {
+    clearReplaySnapshot();
+    return;
+  }
+
+  // Recurrent / hybrid SSM models: in-place `seq_rm + seq_add` leaves
+  // the SSM hidden state contaminated. Restore the pre-generation
+  // snapshot and batch-decode the answer tokens on top of it instead.
+  if (hasRecurrentMemory_) {
+    if (!replaySnapshotValid_) {
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[TextLlm] thinking-block compaction: recurrent-memory replay "
+              "requested but no snapshot captured (nPast=%d, seqId=%d)\n",
+              nPast_,
+              seqId_));
+      clearReplaySnapshot();
+      return;
+    }
+    const llama_pos preNPast = nPast_;
+    const ReplayThinkingOutcome outcome = replayThinkingSpan(
+        modelCtx_.lctx,
+        seqId_,
+        replaySnapshot_,
+        replaySnapshotNPast_,
+        answerTokens_,
+        preNPast,
+        params_.n_batch);
+    // Anchor for the post-replay bookkeeping. The cache mutations land
+    // at `replaySnapshotNPast_` (the actual restore point); `start` is
+    // only meaningful for the pure-attention path below, which deletes
+    // `[start, end)` in place. For forced-open templates the snapshot
+    // KEEPS the `<think>\n` prefix in the cache, so using `start` here
+    // would lie to `tools_.onSlide` about where the drop happened.
+    const llama_pos anchor = replaySnapshotNPast_;
+    if (outcome.kind == ReplayThinkingOutcome::Kind::Replayed) {
+      nPast_ = outcome.newNPast;
+      if (anchor < firstMsgTokens_) {
+        firstMsgTokens_ = anchor;
+      }
+      if (tools_.enabled()) {
+        tools_.onSlide(outcome.discarded, anchor);
+      }
+      ++thinkingBlockDiscards_;
+      QLOG_IF(
+          Priority::DEBUG,
+          string_format(
+              "[TextLlm] thinking-block replay: restored snapshot at nPast=%d, "
+              "replayed %zu answer tokens, dropped %d tokens (preNPast=%d, "
+              "newNPast=%d, firstMsgTokens=%d)\n",
+              replaySnapshotNPast_,
+              answerTokens_.size(),
+              outcome.discarded,
+              preNPast,
+              nPast_,
+              firstMsgTokens_));
+    } else if (
+        outcome.kind == ReplayThinkingOutcome::Kind::SnapshotRestoreFailed) {
+      // Cache untouched per the helper contract — leave `nPast_` alone
+      // and surface a warning. The thinking block remains in the cache
+      // (worst case: it gets dropped by the slider on the next turn).
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[TextLlm] thinking-block replay: snapshot restore rejected "
+              "(snapshotSize=%zu, snapshotNPast=%d, seqId=%d)\n",
+              replaySnapshot_.size(),
+              replaySnapshotNPast_,
+              seqId_));
+    } else if (outcome.kind == ReplayThinkingOutcome::Kind::DecodeFailed) {
+      // The helper self-recovered by tail-clearing back to the
+      // snapshot, so `outcome.newNPast` is consistent with the cache.
+      // The user-visible answer has already been streamed; the saved
+      // cache (if any) will reflect just the snapshot, and the next
+      // turn will re-prefill the answer from the chat history.
+      nPast_ = outcome.newNPast;
+      if (anchor < firstMsgTokens_) {
+        firstMsgTokens_ = anchor;
+      }
+      if (tools_.enabled()) {
+        tools_.onSlide(outcome.discarded, anchor);
+      }
+      ++thinkingBlockDiscards_;
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[TextLlm] thinking-block replay: answer-token decode failed; "
+              "recovered to snapshot (nAnswerTokens=%zu, snapshotNPast=%d, "
+              "nPast=%d, seqId=%d)\n",
+              answerTokens_.size(),
+              replaySnapshotNPast_,
+              nPast_,
+              seqId_));
+    }
+    clearReplaySnapshot();
     return;
   }
 
@@ -946,6 +1064,103 @@ void TextLlmContext::compactThinkSpan() {
   }
 }
 
+bool TextLlmContext::isReplayActive() const {
+  return removeThinkingFromContext_ && hasRecurrentMemory_ &&
+         replaySnapshotValid_;
+}
+
+void TextLlmContext::captureReplaySnapshot() {
+  clearReplaySnapshot();
+  if (!removeThinkingFromContext_ || !hasRecurrentMemory_ ||
+      !reasoningEnabled_) {
+    return;
+  }
+  const size_t size = llama_state_seq_get_size(modelCtx_.lctx, seqId_);
+  if (size == 0) {
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[TextLlm] replay snapshot: state size is 0 (seqId=%d); "
+            "checkpoint-and-replay disabled for this inference\n",
+            seqId_));
+    return;
+  }
+  try {
+    replaySnapshot_.resize(size);
+  } catch (const std::bad_alloc&) {
+    replaySnapshot_.clear();
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        qvac_errors::general_error::toString(
+            qvac_errors::general_error::InternalError),
+        "TextLlmContext::captureReplaySnapshot: failed to allocate " +
+            std::to_string(size) +
+            " bytes for the recurrent-memory replay snapshot");
+  }
+  const size_t copied = llama_state_seq_get_data(
+      modelCtx_.lctx, replaySnapshot_.data(), size, seqId_);
+  if (copied != size) {
+    replaySnapshot_.clear();
+    replaySnapshot_.shrink_to_fit();
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        qvac_errors::general_error::toString(
+            qvac_errors::general_error::InternalError),
+        "TextLlmContext::captureReplaySnapshot: llama_state_seq_get_data "
+        "copied " +
+            std::to_string(copied) + " bytes (expected " +
+            std::to_string(size) + ")");
+  }
+  replaySnapshotNPast_ = nPast_;
+  replaySnapshotValid_ = true;
+  answerTokens_.clear();
+  QLOG_IF(
+      Priority::DEBUG,
+      string_format(
+          "[TextLlm] replay snapshot captured: nPast=%d, size=%zu, "
+          "seqId=%d\n",
+          replaySnapshotNPast_,
+          replaySnapshot_.size(),
+          seqId_));
+}
+
+void TextLlmContext::clearReplaySnapshot() {
+  if (replaySnapshot_.empty() && answerTokens_.empty() &&
+      !replaySnapshotValid_) {
+    return;
+  }
+  replaySnapshot_.clear();
+  replaySnapshot_.shrink_to_fit();
+  replaySnapshotValid_ = false;
+  replaySnapshotNPast_ = 0;
+  answerTokens_.clear();
+  answerTokens_.shrink_to_fit();
+}
+
+void TextLlmContext::recordAnswerTokenForReplay(llama_token token) {
+  if (!isReplayActive()) {
+    return;
+  }
+  // Skip tokens that fall inside the (still-open) reasoning span:
+  //   - `inside_reasoning` covers the body and the open-marker
+  //     transition (`updateReasoningBuffer` flips this before we record).
+  //   - `pendingThinkCloseCapture_` covers the close-marker iteration
+  //     itself, before `capturePendingThinkClose` has anchored the
+  //     span's end.
+  //   - A captured span with `second < 0` means we are between the open
+  //     marker and the close commit (e.g. during EOS-replacement
+  //     injection on the batch path).
+  // Tokens emitted before the span opens (preamble on non-forced-open
+  // templates) and after it closes are both part of the replay buffer.
+  if (reasoningState_.inside_reasoning || pendingThinkCloseCapture_) {
+    return;
+  }
+  if (thinkSpan_.has_value() && thinkSpan_->second < 0) {
+    return;
+  }
+  answerTokens_.push_back(token);
+}
+
 int32_t TextLlmContext::getThinkingBlockDiscards() const {
   return thinkingBlockDiscards_;
 }
@@ -955,20 +1170,13 @@ void TextLlmContext::resetThinkingBlockDiscards() {
 }
 
 void TextLlmContext::setRemoveThinkingFromContext(bool value) {
-  // Reject opt-in for recurrent-memory models (Mamba / RWKV / hybrid
-  // SSM such as Qwen3.5). `seq_rm + seq_add` succeeds on the attention
-  // KV but the SSM hidden state still carries the dropped tokens, so
-  // subsequent turns read contaminated state. Surface a hard error
-  // here rather than silently dropping the flag so callers know the
-  // feature is unavailable for this model.
-  if (value && hasRecurrentMemory_) {
-    throw qvac_errors::StatusError(
-        ADDON_ID,
-        qvac_errors::general_error::toString(
-            qvac_errors::general_error::InvalidArgument),
-        "remove_thinking_from_context is not supported on models with "
-        "recurrent memory (SSM / hybrid SSM such as Qwen3.5)");
-  }
+  // Recurrent / hybrid SSM models (Mamba, RWKV, Qwen3.5, ...) are
+  // supported via the checkpoint-and-replay path wired up in
+  // `compactThinkSpan`: `seq_rm + seq_add` would only fix the attention
+  // KV and leave the SSM hidden state contaminated, so for those models
+  // we snapshot the per-sequence state after prefill and rebuild the
+  // post-reasoning state by replaying the answer tokens at
+  // end-of-generation. Pure-attention models keep the in-place path.
   removeThinkingFromContext_ = value;
 }
 
@@ -1057,34 +1265,19 @@ void TextLlmContext::saveCache(const std::string& cacheKey) const {
 
 std::function<void()>
 TextLlmContext::applyGenerationParams(const GenerationParams& overrides) {
-  // Validate the recurrent-memory invariant BEFORE mutating any
-  // sampler / common params state. `setRemoveThinkingFromContext`
-  // throws on hybrid SSM models; if we let it throw after
-  // `applyGenerationParamsToContext` has already committed the sampler
-  // overrides, the throw escapes without returning the restore lambda
-  // and those mutations leak into subsequent requests. This duplicates
-  // the check in `setRemoveThinkingFromContext` but keeps that one as
-  // a backstop for direct callers (e.g. the batch path).
-  if (overrides.remove_thinking_from_context &&
-      *overrides.remove_thinking_from_context && hasRecurrentMemory_) {
-    throw qvac_errors::StatusError(
-        ADDON_ID,
-        qvac_errors::general_error::toString(
-            qvac_errors::general_error::InvalidArgument),
-        "remove_thinking_from_context is not supported on models with "
-        "recurrent memory (SSM / hybrid SSM such as Qwen3.5)");
-  }
-
   // Apply the sampler / `params_` overrides first so a malformed
   // `json_schema` throws before we touch our local toggle (otherwise
   // we would need a second try/catch here to roll the toggle back).
+  // Note: `setRemoveThinkingFromContext` no longer throws, so the
+  // previous "validate-first" guard against partial sampler mutations
+  // is no longer required. Keep the ordering as-is to preserve the
+  // restore-lambda contract for any future throws added downstream.
   auto restoreSampler = applyGenerationParamsToContext(
       params_, smpl_, modelCtx_.model, overrides);
 
   // Snapshot + apply the thinking-block compaction toggle. Restored
   // alongside the sampler at end-of-request via the composite lambda
-  // below. The setRemoveThinkingFromContext call cannot throw here
-  // because the recurrent-memory invariant was validated above.
+  // below.
   const bool savedRemoveThinking = removeThinkingFromContext_;
   bool toggled = false;
   if (overrides.remove_thinking_from_context) {
@@ -1131,6 +1324,7 @@ void TextLlmContext::resetState(bool resetStats) {
   generationStarted_ = false;
   thinkSpan_.reset();
   pendingThinkCloseCapture_ = false;
+  clearReplaySnapshot();
 
   clearSequenceMemory(modelCtx_.lctx);
 
@@ -1181,6 +1375,18 @@ llama_pos TextLlmContext::removeLastNTokens(llama_pos count) {
   }
 
   clearSequenceMemory(modelCtx_.lctx, nPast_ - tokensToRemove, -1);
+
+  // Keep the recurrent-memory replay buffer in sync with the cache:
+  // tools-compact tail-trim (via `onGenerationCompletePolicy`) runs
+  // BEFORE `compactThinkSpan`, so if we leave the trimmed tokens in
+  // `answerTokens_` the subsequent replay would decode them again and
+  // re-add the very tail tools-compact wanted dropped. Pop from the
+  // back; cap at the live buffer size for defense in depth.
+  if (isReplayActive() && !answerTokens_.empty()) {
+    const size_t popCount = std::min(
+        answerTokens_.size(), static_cast<size_t>(tokensToRemove));
+    answerTokens_.resize(answerTokens_.size() - popCount);
+  }
 
   // Decrement the token count by the number of tokens removed
   nPast_ -= tokensToRemove;
@@ -1249,6 +1455,13 @@ bool TextLlmContext::handleReasoningEOS(
             "[TextLlm] Failed to decode newline token during forced "
             "injection\n");
       }
+
+      // The synthesized newlines are decoded inline (they never flow
+      // back through `onLogitsReady`), so the recurrent-memory replay
+      // buffer must capture them here directly. They sit at positions
+      // `[thinkSpan_->second, thinkSpan_->second + 2)` — the first
+      // tokens of the answer prefix from the replay's perspective.
+      recordAnswerTokenForReplay(reasoningState_.cached_newline_token);
 
       std::string newlineStr = common_token_to_piece(
           modelCtx_.lctx,

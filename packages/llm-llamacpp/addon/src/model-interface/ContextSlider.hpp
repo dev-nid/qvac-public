@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include <llama.h>
 
 class ToolsCompactController;
@@ -129,3 +132,85 @@ CompactRangeOutcome compactKvRange(
     llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
     llama_pos endPos, llama_pos nPast,
     const IContextSliderOps& ops = defaultContextSliderOps());
+
+/// Indirection layer around the `llama_state_seq_*` snapshot APIs and the
+/// `llama_decode` replay path used by the checkpoint-and-replay flow for
+/// recurrent-memory models (Mamba, RWKV, hybrid SSM such as Qwen3.5).
+///
+/// `seq_rm + seq_add` only fixes the attention KV; the SSM hidden state
+/// still carries contributions from the dropped tokens. Replay re-derives
+/// the post-thinking state by restoring a pre-generation snapshot and
+/// batch-decoding just the answer tokens on top of it.
+struct IReplayStateOps {
+  virtual ~IReplayStateOps() = default;
+
+  /// `llama_state_seq_get_size` - exact bytes needed for the seq snapshot.
+  virtual size_t stateSeqGetSize(
+      llama_context* lctx, llama_seq_id seqId) const = 0;
+
+  /// `llama_state_seq_get_data` - copies state into `dst`.
+  virtual size_t stateSeqGetData(
+      llama_context* lctx, uint8_t* dst, size_t size,
+      llama_seq_id seqId) const = 0;
+
+  /// `llama_state_seq_set_data` - restores state from `src`.
+  virtual size_t stateSeqSetData(
+      llama_context* lctx, const uint8_t* src, size_t size,
+      llama_seq_id seqId) const = 0;
+
+  /// Clear the seq's KV-cache range `[startPos, endPos)` (endPos == -1
+  /// means "to end"). Wraps `llama_memory_seq_rm`.
+  virtual bool memorySeqRm(
+      llama_context* lctx, llama_seq_id seqId, llama_pos startPos,
+      llama_pos endPos) const = 0;
+
+  /// Decode `tokens` sequentially at positions starting from `startPos`
+  /// for `seqId`. Honours `nBatch` for chunking. Returns the position
+  /// after the last decoded token on success, or -1 on decode failure.
+  virtual llama_pos batchDecodeTokens(
+      llama_context* lctx, llama_seq_id seqId,
+      const std::vector<llama_token>& tokens, llama_pos startPos,
+      int nBatch) const = 0;
+};
+
+/// Returns the default llama-backed replay ops implementation.
+const IReplayStateOps& defaultReplayStateOps();
+
+/// Outcome of a checkpoint-and-replay compaction pass.
+struct ReplayThinkingOutcome {
+  enum class Kind {
+    NoOp,     // No snapshot, no span, or empty answer → nothing to do
+    Replayed, // Snapshot restored and answer tokens decoded
+    SnapshotRestoreFailed, // `llama_state_seq_set_data` reported failure;
+                           // cache untouched, `newNPast == preNPast`.
+    DecodeFailed, // `llama_decode` returned non-zero during replay; the
+                  // helper self-recovers by tail-clearing back to the
+                  // snapshot, so `newNPast == snapshotNPast` describes a
+                  // consistent state (just without the answer tokens).
+  };
+
+  Kind kind = Kind::NoOp;
+  llama_pos newNPast = 0;  // Updated nPast after the replay
+  llama_pos discarded = 0; // Tokens dropped relative to pre-compaction nPast
+};
+
+/// Checkpoint-and-replay compaction for recurrent-memory models. Restores
+/// `snapshot` into `seqId`'s state, clears any KV tail beyond
+/// `snapshotNPast`, then batch-decodes `answerTokens` starting at
+/// `snapshotNPast`. The caller owns snapshot lifetime and the answer-token
+/// buffer; this helper only mutates `lctx` via the injected ops.
+///
+/// @param lctx          llama context whose seq state is being replayed
+/// @param seqId         sequence to restore + replay against
+/// @param snapshot      bytes previously captured via `stateSeqGetData`
+/// @param snapshotNPast `nPast` value at snapshot capture time
+/// @param answerTokens  tokens to decode after the restore
+/// @param preNPast      `nPast` immediately before the replay starts; used
+///                      to compute the `discarded` token count.
+/// @param nBatch        per-`llama_decode` batch cap (caller's `params.n_batch`)
+/// @param ops           indirection over llama state / decode operations
+ReplayThinkingOutcome replayThinkingSpan(
+    llama_context* lctx, llama_seq_id seqId,
+    const std::vector<uint8_t>& snapshot, llama_pos snapshotNPast,
+    const std::vector<llama_token>& answerTokens, llama_pos preNPast,
+    int nBatch, const IReplayStateOps& ops = defaultReplayStateOps());

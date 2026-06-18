@@ -254,6 +254,21 @@ private:
   void capturePendingThinkClose();
   void compactThinkSpan();
 
+  // Recurrent-memory checkpoint-and-replay helpers. `seq_rm + seq_add`
+  // only fixes the attention KV; the SSM hidden state still carries the
+  // dropped tokens, so for recurrent / hybrid SSM models we instead
+  // checkpoint the per-sequence state immediately after prefill and, at
+  // end-of-generation, restore the snapshot + batch-decode just the
+  // answer tokens that followed the reasoning span. The buffer is owned
+  // by this instance and released after replay, on cancel, on context
+  // discard, or in `resetState`.
+  void captureReplaySnapshot();
+  void clearReplaySnapshot();
+  [[nodiscard]] bool isReplayActive() const;
+  /// Append `token` to `answerTokens_` when the replay buffer is live
+  /// and we are past the close marker. No-op otherwise.
+  void recordAnswerTokenForReplay(llama_token token);
+
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
   LlmModelContext modelCtx_;
@@ -301,12 +316,35 @@ private:
   // True when the model uses recurrent memory (Mamba-style SSM layers
   // or hybrid SSM + attention like Qwen3.5). Detected at construction
   // via `llama_model_is_recurrent` plus an `<arch>.ssm.*` metadata
-  // probe. `setRemoveThinkingFromContext(true)` throws when this is
-  // true — `seq_rm + seq_add` succeeds on the attention KV but the SSM
-  // hidden state still carries the dropped tokens, so subsequent turns
-  // read contaminated state. Pure-attention models (Qwen3, Qwen3-MoE,
-  // Gemma 4, ...) are unaffected.
+  // probe. On these models the `compactThinkSpan` end-of-generation path
+  // switches from in-place `seq_rm + seq_add` (which only fixes the
+  // attention KV) to the checkpoint-and-replay path: snapshot the
+  // per-sequence state immediately after prefill, then at
+  // end-of-generation restore the snapshot and batch-decode just the
+  // answer tokens emitted after `</think>`. Pure-attention models
+  // (Qwen3, Qwen3-MoE, Gemma 4, ...) keep the in-place path.
   bool hasRecurrentMemory_ = false;
+
+  // Snapshot of the per-sequence state captured immediately after
+  // prefill, used by the recurrent-memory replay path. Allocated lazily
+  // in `captureReplaySnapshot` and released either after replay,
+  // on cancel, on a sliding-window discard during generation, or in
+  // `resetState`. `replaySnapshotNPast_` records the `nPast_` value at
+  // capture time and is also the anchor reported to
+  // `tools_.onSlide` / used to widen `firstMsgTokens_` after a replay,
+  // since that's the actual position from which cache mutations were
+  // re-derived (forced-open templates leave the `<think>\n` prefix in
+  // the cache; the in-place pure-attention path uses `thinkSpan_->first`
+  // instead because it physically deletes that prefix). `answerTokens_`
+  // accumulates every token committed AFTER `thinkSpan_->second` so the
+  // replay reproduces the post-reasoning state without re-emitting the
+  // reasoning span; it's kept in sync with `removeLastNTokens` so a
+  // tools-compact tail trim during `onGenerationCompletePolicy` does
+  // not leak previously-trimmed tokens back into the cache.
+  std::vector<uint8_t> replaySnapshot_;
+  llama_pos replaySnapshotNPast_ = 0;
+  bool replaySnapshotValid_ = false;
+  std::vector<llama_token> answerTokens_;
 
   // [start, end) KV positions of the reasoning block emitted in this
   // inference, if any. `end == -1` marks an open (still-being-emitted)

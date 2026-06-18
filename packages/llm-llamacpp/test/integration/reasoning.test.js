@@ -540,18 +540,22 @@ safeTest('remove_thinking_from_context reduces multi-turn cache growth', {
 })
 
 // Qwen3.5 coverage — exercises the reasoning detection on a hybrid SSM
-// checkpoint and verifies the recurrent-memory gate keeps the cache
-// untouched. Qwen3.5 thinking traces can exceed 1k tokens before
-// `</think>` closes, so we give a larger n_predict / ctx_size.
+// checkpoint and the checkpoint-and-replay path used in place of the
+// in-place `seq_rm + seq_add` compaction. Qwen3.5 thinking traces can
+// exceed 1k tokens before `</think>` closes, so we give a larger
+// n_predict / ctx_size.
 const QWEN35_REASONING_CONFIG = {
   ctx_size: '8192',
   n_predict: '3072'
 }
 
-// Qwen3.5 is a hybrid SSM family. `setRemoveThinkingFromContext(true)`
-// rejects on this model because `seq_rm + seq_add` leaves the SSM
-// hidden state contaminated. The leaving-it-off path still works.
-safeTest('Qwen3.5 rejects remove_thinking_from_context opt-in', {
+// Qwen3.5 is a hybrid SSM family. The checkpoint-and-replay path
+// snapshots the per-sequence state immediately after prefill, then at
+// end-of-generation restores the snapshot and batch-decodes just the
+// answer tokens — `seq_rm + seq_add` would leave the SSM hidden state
+// contaminated, so the in-place compaction used by pure-attention
+// models cannot be applied here.
+safeTest('Qwen3.5 opt-in compacts thinking via checkpoint-and-replay', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 900_000
 }, async t => {
@@ -561,66 +565,149 @@ safeTest('Qwen3.5 rejects remove_thinking_from_context opt-in', {
   })
 
   const messages = createInitialMessages()
+  const t0 = Date.now()
+  const { response, stats } = await runCompletionWithStats(
+    inference,
+    messages,
+    { generationParams: { remove_thinking_from_context: true } }
+  )
+  const elapsedMs = Date.now() - t0
+  t.comment(`Qwen3.5 opt-in elapsed=${elapsedMs}ms (includes generation + replay)`)
+  t.comment(`Qwen3.5 opt-in response (len=${response.length}): ${response.slice(0, 200)}...`)
+  t.comment(`Qwen3.5 opt-in stats: ${JSON.stringify(stats)}`)
 
-  let caught = null
-  try {
-    await runCompletionWithStats(
-      inference,
-      messages,
-      { generationParams: { remove_thinking_from_context: true } }
-    )
-  } catch (err) {
-    caught = err
-  }
-  t.ok(caught, 'opt-in on Qwen3.5 should throw')
-  t.ok(/recurrent memory|SSM/i.test(caught?.message || ''),
-    `error message should mention recurrent / SSM (got: ${caught?.message})`)
+  // Single-turn assertions: the visible stream must still contain a
+  // well-formed `<think>...</think>` pair plus a coherent answer, and
+  // the runtime stats must record at least one compaction.
+  verifyReasoningTags(t, response, 'Qwen3.5 opt-in')
+  verifyContinuedAfterReasoning(t, response, 'Qwen3.5 opt-in')
 
-  // Default (no opt-in) must still work and just leave the thinking
-  // block in the cache.
-  const { response, stats } = await runCompletionWithStats(inference, messages)
-  t.comment(`default-off stats: ${JSON.stringify(stats)}`)
-  verifyReasoningTags(t, response, 'Qwen3.5 default-off')
-  t.is(toNumber(stats.thinkingBlockDiscards), 0,
-    'Qwen3.5 default-off should report 0 discards')
+  const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
+  t.ok(thinkingDiscards >= 1,
+    `Qwen3.5 opt-in run should report at least one compaction (got ${thinkingDiscards})`)
 })
 
-// Regression guard for the partial-mutation leak: when the rejection
-// throws *after* `applyGenerationParamsToContext` has committed
-// sampler / common-params overrides, the restore lambda is never
-// returned and those mutations would leak into the next request. We
-// pair `remove_thinking_from_context: true` with a distinctive
-// `n_predict: 1` override; if the leak existed the follow-up
-// (no overrides) would inherit the n_predict=1 cap.
-safeTest('Qwen3.5 reject does not leak other generation overrides', {
+// Determinism guard: with temp=0 and a fixed seed the turn-1 generated
+// tokens are identical between ON and OFF — the only difference is the
+// post-generation cache state. If the snapshot-capture path mutates
+// per-sequence state during prefill, or if `answerTokens_` accidentally
+// includes tokens that were never committed, the streamed output
+// diverges. This catches such regressions before they desync the cache.
+safeTest('Qwen3.5 opt-in produces identical turn-1 stream as opt-out', {
   skip: isDarwinX64 || isWindowsX64,
-  timeout: 900_000
+  timeout: 1_200_000
 }, async t => {
-  const { inference } = await setupReasoningModel(t, false, {
+  const messages = createInitialMessages()
+
+  const { inference: infOn } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
   })
+  const on = await runCompletionWithStats(
+    infOn,
+    messages,
+    { generationParams: { remove_thinking_from_context: true } }
+  )
 
-  const messages = createInitialMessages()
+  const { inference: infOff } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+  const off = await runCompletionWithStats(
+    infOff,
+    messages,
+    { generationParams: { remove_thinking_from_context: false } }
+  )
 
-  let caught = null
-  try {
-    await runCompletionWithStats(
-      inference,
-      messages,
-      { generationParams: { remove_thinking_from_context: true, n_predict: 1 } }
-    )
-  } catch (err) {
-    caught = err
-  }
-  t.ok(caught, 'paired override should throw')
+  t.comment(`Qwen3.5 ON  turn-1 (len=${on.response.length}): ${on.response.slice(0, 160)}...`)
+  t.comment(`Qwen3.5 OFF turn-1 (len=${off.response.length}): ${off.response.slice(0, 160)}...`)
+  t.is(on.response, off.response,
+    'Qwen3.5 turn-1 stream must match between compaction ON and OFF — ' +
+    'snapshot capture must not mutate the per-sequence state mid-prefill')
+  t.is(toNumber(off.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 OFF turn-1 should report 0 discards')
+  t.ok(toNumber(on.stats.thinkingBlockDiscards) >= 1,
+    'Qwen3.5 ON turn-1 should report at least one compaction')
+})
 
-  // Follow-up request with no overrides — must generate beyond 1 token.
-  // If the n_predict=1 from the throwing request leaked, this would be
-  // capped at 1.
-  const { stats } = await runCompletionWithStats(inference, messages)
-  const generated = toNumber(stats.generatedTokens)
-  t.comment(`follow-up generatedTokens=${generated}`)
-  t.ok(generated > 1,
-    `follow-up should not inherit n_predict=1 from the throwing request (got ${generated})`)
+// Multi-turn cache growth comparison for the recurrent-memory replay
+// path. Mirrors the pure-attention multi-turn test: same two-turn
+// flow with `cacheKey` enabled, once with compaction ON and once OFF.
+// The ON cache should be smaller than the OFF cache on turn 2 — proves
+// turn 1's reasoning span was dropped from the cache before turn 2 was
+// admitted.
+safeTest('Qwen3.5 opt-in reduces multi-turn cache growth', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 1_800_000
+}, async t => {
+  const sessionA = path.join(os.tmpdir(), `qvac-think-ssm-on-${Date.now()}.bin`)
+  const sessionB = path.join(os.tmpdir(), `qvac-think-ssm-off-${Date.now() + 1}.bin`)
+
+  t.teardown(() => {
+    for (const p of [sessionA, sessionB]) {
+      try { require('bare-fs').unlinkSync(p) } catch {}
+    }
+  })
+
+  const messages1 = createInitialMessages()
+  const overridesOn = { generationParams: { remove_thinking_from_context: true } }
+  const overridesOff = { generationParams: { remove_thinking_from_context: false } }
+
+  const { inference: infA } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+  const tA1 = Date.now()
+  const a1 = await runCompletionWithStats(infA, messages1, { cacheKey: sessionA, ...overridesOn })
+  t.comment(`Qwen3.5 A turn 1 elapsed=${Date.now() - tA1}ms (compaction ON)`)
+  verifyReasoningTags(t, a1.response, 'Qwen3.5 A turn 1')
+  t.ok(toNumber(a1.stats.thinkingBlockDiscards) >= 1,
+    'Qwen3.5 A turn 1 should compact at least one thinking block')
+
+  const tA2 = Date.now()
+  const a2 = await runCompletionWithStats(
+    infA,
+    createFollowUpMessages(messages1, a1.response),
+    { cacheKey: sessionA, ...overridesOn }
+  )
+  t.comment(`Qwen3.5 A turn 2 elapsed=${Date.now() - tA2}ms (compaction ON)`)
+  verifyReasoningTags(t, a2.response, 'Qwen3.5 A turn 2')
+
+  const { inference: infB } = await setupReasoningModel(t, false, {
+    modelDef: QWEN35_MODEL,
+    configOverrides: QWEN35_REASONING_CONFIG
+  })
+  const b1 = await runCompletionWithStats(
+    infB,
+    messages1,
+    { cacheKey: sessionB, ...overridesOff }
+  )
+  verifyReasoningTags(t, b1.response, 'Qwen3.5 B turn 1')
+  t.is(toNumber(b1.stats.thinkingBlockDiscards), 0,
+    'Qwen3.5 B turn 1 with compaction off should report 0 discards')
+
+  const b2 = await runCompletionWithStats(
+    infB,
+    createFollowUpMessages(messages1, b1.response),
+    { cacheKey: sessionB, ...overridesOff }
+  )
+  verifyReasoningTags(t, b2.response, 'Qwen3.5 B turn 2')
+
+  const cacheA2 = toNumber(a2.stats.CacheTokens)
+  const cacheB2 = toNumber(b2.stats.CacheTokens)
+  t.comment(`Qwen3.5 compaction ON  turn 2 cache=${cacheA2} stats=${JSON.stringify(a2.stats)}`)
+  t.comment(`Qwen3.5 compaction OFF turn 2 cache=${cacheB2} stats=${JSON.stringify(b2.stats)}`)
+
+  t.ok(cacheA2 > 0, `Qwen3.5 compaction-on turn 2 should have non-zero cache (got ${cacheA2})`)
+  t.ok(cacheB2 > 0, `Qwen3.5 compaction-off turn 2 should have non-zero cache (got ${cacheB2})`)
+  t.ok(cacheA2 < cacheB2,
+    `Qwen3.5 turn 2 cache ON (${cacheA2}) should be < OFF (${cacheB2}) — proves turn 1 thinking was dropped from the cache`)
+
+  // Correctness guard: after the replay the post-restore cache state
+  // must still produce a coherent turn-2 answer (not garbage). On the
+  // recurrent path this catches snapshot/replay bugs that desync the
+  // SSM hidden state from the cached attention KV.
+  verifyContinuedAfterReasoning(t, a2.response, 'Qwen3.5 A turn 2 (replay correctness)')
+  t.ok(a2.response.length > 100,
+    `Qwen3.5 A turn 2 response should be substantial (got ${a2.response.length})`)
 })

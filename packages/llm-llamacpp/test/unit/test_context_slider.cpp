@@ -647,3 +647,273 @@ TEST_F(ContextSliderTest, CompactKvRange_TailExactlyAtEnd_NoShiftNeeded) {
   EXPECT_EQ(ops.seqAddCalls()[0].endPos, 180);
   EXPECT_EQ(ops.seqAddCalls()[0].delta, -80);
 }
+
+// ---------------------------------------------------------------------------
+// replayThinkingSpan — checkpoint-and-replay path used on recurrent /
+// hybrid SSM models. `seq_rm + seq_add` only fixes the attention KV;
+// the SSM hidden state still carries the dropped tokens, so the addon
+// snapshots the per-sequence state after prefill and rebuilds the
+// post-reasoning state by replaying just the answer tokens on top of
+// the snapshot. The tests below mock the underlying llama state APIs
+// and assert the call sequence + `nPast` bookkeeping.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct StateSetDataCall {
+  std::vector<uint8_t> data;
+  llama_seq_id seqId = 0;
+};
+
+struct StateGetDataCall {
+  size_t size = 0;
+  llama_seq_id seqId = 0;
+};
+
+struct MemSeqRmCall {
+  llama_seq_id seqId = 0;
+  llama_pos startPos = 0;
+  llama_pos endPos = 0;
+};
+
+struct BatchDecodeCall {
+  llama_seq_id seqId = 0;
+  std::vector<llama_token> tokens;
+  llama_pos startPos = 0;
+  int nBatch = 0;
+};
+
+class FakeReplayStateOps final : public IReplayStateOps {
+public:
+  size_t stateSeqGetSize(llama_context*, llama_seq_id) const override {
+    return snapshotSize_;
+  }
+
+  size_t
+  stateSeqGetData(llama_context*, uint8_t* dst, size_t size, llama_seq_id seqId)
+      const override {
+    stateGetDataCalls_.push_back({size, seqId});
+    if (dst != nullptr && !snapshotPayload_.empty()) {
+      const size_t copy = std::min(size, snapshotPayload_.size());
+      std::copy_n(snapshotPayload_.begin(), copy, dst);
+      return copy;
+    }
+    return size;
+  }
+
+  size_t
+  stateSeqSetData(llama_context*, const uint8_t* src, size_t size,
+                  llama_seq_id seqId) const override {
+    StateSetDataCall call;
+    call.seqId = seqId;
+    if (src != nullptr) {
+      call.data.assign(src, src + size);
+    }
+    stateSetDataCalls_.push_back(std::move(call));
+    if (setDataFails_) {
+      return 0;
+    }
+    return size;
+  }
+
+  bool memorySeqRm(
+      llama_context*, llama_seq_id seqId, llama_pos startPos,
+      llama_pos endPos) const override {
+    memSeqRmCalls_.push_back({seqId, startPos, endPos});
+    return true;
+  }
+
+  llama_pos batchDecodeTokens(
+      llama_context*, llama_seq_id seqId,
+      const std::vector<llama_token>& tokens, llama_pos startPos,
+      int nBatch) const override {
+    batchDecodeCalls_.push_back({seqId, tokens, startPos, nBatch});
+    if (decodeFails_) {
+      return -1;
+    }
+    return startPos + static_cast<llama_pos>(tokens.size());
+  }
+
+  void setSnapshotSize(size_t size) { snapshotSize_ = size; }
+  void setSnapshotPayload(std::vector<uint8_t> payload) {
+    snapshotPayload_ = std::move(payload);
+  }
+  void failSetData() { setDataFails_ = true; }
+  void failDecode() { decodeFails_ = true; }
+
+  const std::vector<StateSetDataCall>& stateSetDataCalls() const {
+    return stateSetDataCalls_;
+  }
+  const std::vector<MemSeqRmCall>& memSeqRmCalls() const {
+    return memSeqRmCalls_;
+  }
+  const std::vector<BatchDecodeCall>& batchDecodeCalls() const {
+    return batchDecodeCalls_;
+  }
+
+private:
+  size_t snapshotSize_ = 0;
+  std::vector<uint8_t> snapshotPayload_;
+  bool setDataFails_ = false;
+  bool decodeFails_ = false;
+  mutable std::vector<StateGetDataCall> stateGetDataCalls_;
+  mutable std::vector<StateSetDataCall> stateSetDataCalls_;
+  mutable std::vector<MemSeqRmCall> memSeqRmCalls_;
+  mutable std::vector<BatchDecodeCall> batchDecodeCalls_;
+};
+} // namespace
+
+TEST(ReplayThinkingSpanTest, RestoresAndDecodesAnswerTokens) {
+  FakeReplayStateOps ops;
+  std::vector<uint8_t> snapshot(64, 0xAB);
+  std::vector<llama_token> answerTokens = {11, 22, 33, 44, 55};
+
+  const auto outcome = replayThinkingSpan(
+      /*lctx=*/nullptr,
+      kSeqId,
+      snapshot,
+      /*snapshotNPast=*/100,
+      answerTokens,
+      /*preNPast=*/180,
+      /*nBatch=*/128,
+      ops);
+
+  EXPECT_EQ(outcome.kind, ReplayThinkingOutcome::Kind::Replayed);
+  // Replay rewinds to the snapshot (100), then decodes 5 answer tokens.
+  EXPECT_EQ(outcome.newNPast, 105);
+  // Discarded tokens = preNPast - postReplay nPast.
+  EXPECT_EQ(outcome.discarded, 75);
+
+  // Snapshot restore must precede the tail-clear and decode.
+  ASSERT_EQ(ops.stateSetDataCalls().size(), 1u);
+  EXPECT_EQ(ops.stateSetDataCalls()[0].seqId, kSeqId);
+  EXPECT_EQ(ops.stateSetDataCalls()[0].data, snapshot);
+
+  // Explicit tail clear at `snapshotNPast` so stale tokens beyond the
+  // snapshot do not leak into the decode anchor.
+  ASSERT_EQ(ops.memSeqRmCalls().size(), 1u);
+  EXPECT_EQ(ops.memSeqRmCalls()[0].seqId, kSeqId);
+  EXPECT_EQ(ops.memSeqRmCalls()[0].startPos, 100);
+  EXPECT_EQ(ops.memSeqRmCalls()[0].endPos, -1);
+
+  // Answer tokens are decoded starting from the snapshot position.
+  ASSERT_EQ(ops.batchDecodeCalls().size(), 1u);
+  EXPECT_EQ(ops.batchDecodeCalls()[0].seqId, kSeqId);
+  EXPECT_EQ(ops.batchDecodeCalls()[0].tokens, answerTokens);
+  EXPECT_EQ(ops.batchDecodeCalls()[0].startPos, 100);
+  EXPECT_EQ(ops.batchDecodeCalls()[0].nBatch, 128);
+}
+
+TEST(ReplayThinkingSpanTest, EmptyAnswerSkipsDecodeAndReportsDiscard) {
+  // When the model finished right at `</think>` without emitting an
+  // answer, the replay must still rewind the cache to the snapshot but
+  // there are no tokens to re-feed. `batchDecodeTokens` must not run.
+  FakeReplayStateOps ops;
+  std::vector<uint8_t> snapshot(32, 0x10);
+
+  const auto outcome = replayThinkingSpan(
+      /*lctx=*/nullptr,
+      kSeqId,
+      snapshot,
+      /*snapshotNPast=*/50,
+      /*answerTokens=*/{},
+      /*preNPast=*/72,
+      /*nBatch=*/64,
+      ops);
+
+  EXPECT_EQ(outcome.kind, ReplayThinkingOutcome::Kind::Replayed);
+  EXPECT_EQ(outcome.newNPast, 50);
+  EXPECT_EQ(outcome.discarded, 22);
+
+  ASSERT_EQ(ops.stateSetDataCalls().size(), 1u);
+  ASSERT_EQ(ops.memSeqRmCalls().size(), 1u);
+  EXPECT_TRUE(ops.batchDecodeCalls().empty());
+}
+
+TEST(ReplayThinkingSpanTest, EmptySnapshotIsNoOp) {
+  // Caller must own snapshot lifetime; an empty buffer means "no
+  // checkpoint captured" and the helper must not mutate any state.
+  FakeReplayStateOps ops;
+  std::vector<uint8_t> snapshot;
+  std::vector<llama_token> answerTokens = {1, 2, 3};
+
+  const auto outcome = replayThinkingSpan(
+      /*lctx=*/nullptr,
+      kSeqId,
+      snapshot,
+      /*snapshotNPast=*/100,
+      answerTokens,
+      /*preNPast=*/180,
+      /*nBatch=*/128,
+      ops);
+
+  EXPECT_EQ(outcome.kind, ReplayThinkingOutcome::Kind::NoOp);
+  // newNPast falls through to preNPast so the caller's bookkeeping
+  // (firstMsgTokens / tools anchor) is left untouched.
+  EXPECT_EQ(outcome.newNPast, 180);
+  EXPECT_EQ(outcome.discarded, 0);
+  EXPECT_TRUE(ops.stateSetDataCalls().empty());
+  EXPECT_TRUE(ops.memSeqRmCalls().empty());
+  EXPECT_TRUE(ops.batchDecodeCalls().empty());
+}
+
+TEST(ReplayThinkingSpanTest, SnapshotRestoreFailureSurfacesAndSkipsDecode) {
+  FakeReplayStateOps ops;
+  ops.failSetData();
+  std::vector<uint8_t> snapshot(16, 0x55);
+  std::vector<llama_token> answerTokens = {1, 2, 3};
+
+  const auto outcome = replayThinkingSpan(
+      /*lctx=*/nullptr,
+      kSeqId,
+      snapshot,
+      /*snapshotNPast=*/40,
+      answerTokens,
+      /*preNPast=*/90,
+      /*nBatch=*/32,
+      ops);
+
+  EXPECT_EQ(outcome.kind, ReplayThinkingOutcome::Kind::SnapshotRestoreFailed);
+  // Caller must NOT advance bookkeeping on a failed restore.
+  EXPECT_EQ(outcome.newNPast, 90);
+  EXPECT_EQ(outcome.discarded, 0);
+  ASSERT_EQ(ops.stateSetDataCalls().size(), 1u);
+  EXPECT_TRUE(ops.memSeqRmCalls().empty());
+  EXPECT_TRUE(ops.batchDecodeCalls().empty());
+}
+
+TEST(ReplayThinkingSpanTest, DecodeFailureSurfacesAfterRestore) {
+  FakeReplayStateOps ops;
+  ops.failDecode();
+  std::vector<uint8_t> snapshot(16, 0x77);
+  std::vector<llama_token> answerTokens = {7, 8};
+
+  const auto outcome = replayThinkingSpan(
+      /*lctx=*/nullptr,
+      kSeqId,
+      snapshot,
+      /*snapshotNPast=*/30,
+      answerTokens,
+      /*preNPast=*/55,
+      /*nBatch=*/32,
+      ops);
+
+  // The helper self-recovers from a decode failure: it tail-clears the
+  // partial decode and reports `newNPast == snapshotNPast` so the
+  // caller can keep `nPast_` consistent with the live cache instead of
+  // leaving it pointing past tokens that may or may not be present.
+  EXPECT_EQ(outcome.kind, ReplayThinkingOutcome::Kind::DecodeFailed);
+  EXPECT_EQ(outcome.newNPast, 30);
+  // Caller still treats the answer as "discarded" because the cache no
+  // longer contains it after the recovery tail-clear.
+  EXPECT_EQ(outcome.discarded, 25);
+  ASSERT_EQ(ops.stateSetDataCalls().size(), 1u);
+  ASSERT_EQ(ops.batchDecodeCalls().size(), 1u);
+  // Two tail-clears: the pre-decode anchor and the post-failure
+  // recovery clear. Both target the same range so `nPast_ == newNPast`
+  // describes a clean cache.
+  ASSERT_EQ(ops.memSeqRmCalls().size(), 2u);
+  EXPECT_EQ(ops.memSeqRmCalls()[0].startPos, 30);
+  EXPECT_EQ(ops.memSeqRmCalls()[0].endPos, -1);
+  EXPECT_EQ(ops.memSeqRmCalls()[1].startPos, 30);
+  EXPECT_EQ(ops.memSeqRmCalls()[1].endPos, -1);
+}

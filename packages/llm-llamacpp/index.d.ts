@@ -173,9 +173,16 @@ export interface GenerationParams {
    * the cache at end-of-generation. No-op for text models without a
    * recognised reasoning channel and for multimodal contexts.
    *
-   * Throws when set to `true` on models with recurrent memory
-   * (SSM / hybrid SSM such as Qwen3.5) — `seq_rm + seq_add` leaves the
-   * SSM hidden state contaminated, so the feature is unsupported there.
+   * On pure-attention models (Qwen3, Qwen3-MoE, Gemma 4, ...) the
+   * reasoning span is removed in place via `seq_rm + seq_add`. On
+   * recurrent / hybrid SSM models (Mamba, RWKV, Qwen3.5, ...) the
+   * addon snapshots the per-sequence state immediately after prefill
+   * and, at end-of-generation, restores the snapshot and batch-decodes
+   * just the answer tokens that followed `</think>` — `seq_rm + seq_add`
+   * would only fix the attention KV and leave the SSM hidden state
+   * contaminated. The replay adds one extra prompt-processing pass over
+   * the answer length (typically sub-second on desktop GPU; ~2 s for a
+   * 1000-token answer on mobile).
    */
   remove_thinking_from_context?: boolean
 }
