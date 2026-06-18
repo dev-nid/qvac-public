@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 
 #include <llama.h>
 #include <llama/mtmd/mtmd.h>
 
+#include "../utils/ReasoningUtils.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
 #include "ContextSlider.hpp"
 #include "LlmContext.hpp"
@@ -139,6 +141,9 @@ public:
   [[nodiscard]] int32_t getNSlides() const override;
   void resetNSlides() override;
 
+  [[nodiscard]] int32_t getThinkingBlockDiscards() const override;
+  void resetThinkingBlockDiscards() override;
+
   /**
    * The load media method. It loads the media from memory buffer.
    *
@@ -207,6 +212,13 @@ private:
   void applyContextDiscard();
   void handleStopRequestAndAddEot(LlamaBatch& batchPtr);
 
+  // Reasoning-block KV-cache compaction helpers. Single-block policy:
+  // at most one `<think>...</think>` block is tracked per inference.
+  // `setOpenThinkSpan` is a no-op once a span has been captured.
+  void setOpenThinkSpan(llama_pos start);
+  void capturePendingThinkClose();
+  void compactThinkSpan();
+
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
   mtmd::context_ptr ctxVision_;
@@ -235,6 +247,29 @@ private:
   // tags.
   bool thinkingForcedOpen_ = false;
   std::string thinkingForcedOpenText_;
+
+  // Reasoning channel detection state (Qwen3 / Gemma 4 / ...). Empty
+  // tags when the active model has no recognised channel.
+  qvac_lib_inference_addon_llama::utils::ReasoningState reasoningState_;
+  bool reasoningEnabled_ = false;
+
+  // True when the model uses recurrent memory (Mamba-style SSM layers
+  // or hybrid SSM + attention). Detected at construction. Opting in to
+  // `remove_thinking_from_context` on such models throws from
+  // `applyGenerationParams` to avoid SSM hidden-state contamination.
+  bool hasRecurrentMemory_ = false;
+
+  // Per-request toggle for the post-generation thinking-block KV
+  // cache compaction. Default-off (opt-in via `generationParams`); set
+  // by `applyGenerationParams`.
+  bool removeThinkingFromContext_ = false;
+
+  // [start, end) KV positions of the reasoning block emitted in this
+  // inference. `end == -1` marks an open (still-being-emitted) span.
+  std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
+  bool pendingThinkCloseCapture_ = false;
+
+  int32_t thinkingBlockDiscards_ = 0;
 
   std::atomic<bool> stopGeneration_ = false;
 };
