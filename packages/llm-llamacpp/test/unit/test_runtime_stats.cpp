@@ -102,9 +102,12 @@ TEST(RuntimeStatsAccumulate, AccumulateSlotSumsThinkingDiscards) {
   Request reqC = makeStubRequest();
 
   // (nPast, nSlides, thinkingDiscards, req)
-  stats.accumulateSlot(/*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/1, reqA);
-  stats.accumulateSlot(/*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0, reqB);
-  stats.accumulateSlot(/*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/2, reqC);
+  stats.accumulateSlot(
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/1, reqA);
+  stats.accumulateSlot(
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0, reqB);
+  stats.accumulateSlot(
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/2, reqC);
 
   EXPECT_EQ(stats.thinkingBlockDiscards, 3);
 }
