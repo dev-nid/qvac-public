@@ -661,8 +661,7 @@ bool MtmdLlmContext::generateResponse(
     // recorded, then exit. Mirrors TextLlmContext single-prompt EOS
     // handling. Without this, `compactThinkSpan()` would skip removal
     // because `thinkSpan_->second` stays unset.
-    if (isEos && isQwen3ReasoningFamily_ &&
-        reasoningState_.inside_reasoning &&
+    if (isEos && isQwen3ReasoningFamily_ && reasoningState_.inside_reasoning &&
         reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
       tokenId = reasoningState_.cached_close_tag_token;
       tokenStr =
