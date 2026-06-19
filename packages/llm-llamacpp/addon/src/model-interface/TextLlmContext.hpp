@@ -284,6 +284,13 @@ private:
   qvac_lib_inference_addon_llama::utils::ReasoningState reasoningState_;
   bool reasoningEnabled_ = false;
 
+  // True only for architectures in the Qwen3 reasoning family (qwen3,
+  // qwen3moe, qwen35, qwen35moe). Gates the EOS-inside-reasoning
+  // recovery (close-marker substitution + newline injection), which is
+  // a Qwen3-specific workaround. Detection / span tracking / KV
+  // compaction stay family-agnostic via `reasoningEnabled_`.
+  bool isQwen3ReasoningFamily_ = false;
+
   // GPT-OSS Harmony: <|call|> is a frame delimiter, not a stop signal
   bool isHarmonyModel_ = false;
   llama_token harmonyCallToken_ = LLAMA_TOKEN_NULL;

@@ -37,6 +37,17 @@ std::optional<ReasoningTags> selectReasoningTagsForArchitecture(
     const std::optional<std::string>& architecture);
 
 /**
+ * @brief Returns true when `architecture` is in the Qwen3 reasoning
+ * family (`qwen3`, `qwen3moe`, `qwen35`, `qwen35moe`).
+ *
+ * Used to scope Qwen3-specific runtime behaviors (e.g. EOS-inside-
+ * reasoning close-marker substitution) so they do not silently apply
+ * to other families that also have a recognised reasoning channel
+ * (e.g. Gemma 4). Empty / unknown architectures return false.
+ */
+bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture);
+
+/**
  * @brief Returns true when the GGUF metadata basename identifies a MedPsy
  * model. Exposed for unit testing without requiring a real ::llama_model.
  *

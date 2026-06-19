@@ -140,6 +140,19 @@ MtmdLlmContext::MtmdLlmContext(
     }
   }
 
+  // EOS-inside-reasoning recovery is a Qwen3-specific workaround;
+  // gate it on the explicit Qwen3-family predicate so non-Qwen
+  // reasoning families (e.g. Gemma 4) don't inherit it. See
+  // TextLlmContext for the same gate.
+  {
+    const std::optional<std::string> arch =
+        qvac_lib_inference_addon_llama::utils::getModelArchitecture(
+            modelCtx_.model);
+    isQwen3ReasoningFamily_ =
+        arch.has_value() &&
+        qvac_lib_inference_addon_llama::utils::
+            isQwen3ReasoningFamilyArchitecture(arch.value());
+  }
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
       reasoningTags =
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
@@ -676,7 +689,8 @@ bool MtmdLlmContext::generateResponse(
     // recorded, then exit. Mirrors TextLlmContext single-prompt EOS
     // handling. Without this, `compactThinkSpan()` would skip removal
     // because `thinkSpan_->second` stays unset.
-    if (isEos && reasoningEnabled_ && reasoningState_.inside_reasoning &&
+    if (isEos && isQwen3ReasoningFamily_ &&
+        reasoningState_.inside_reasoning &&
         reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
       tokenId = reasoningState_.cached_close_tag_token;
       tokenStr =
