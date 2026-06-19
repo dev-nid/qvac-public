@@ -59,12 +59,6 @@ bool isGemma4Architecture(std::string_view architecture) {
 inline constexpr std::array<std::string_view, 4> QWEN3_REASONING_FAMILY_ARCHES{
     "qwen3", "qwen3moe", "qwen35", "qwen35moe"};
 
-bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
-  const std::string normalised = normalizeArchitecture(architecture);
-  return std::ranges::find(QWEN3_REASONING_FAMILY_ARCHES, normalised) !=
-         QWEN3_REASONING_FAMILY_ARCHES.end();
-}
-
 std::optional<std::string>
 readMetadataString(const ::llama_model* model, const char* key) {
   if (model == nullptr || key == nullptr) {
@@ -175,6 +169,12 @@ std::optional<std::string> selectToolsCompactMarkerForModelMetadata(
     return std::nullopt;
   }
   return std::string("<tool_call>");
+}
+
+bool isQwen3ReasoningFamilyArchitecture(std::string_view architecture) {
+  const std::string normalised = normalizeArchitecture(architecture);
+  return std::ranges::find(QWEN3_REASONING_FAMILY_ARCHES, normalised) !=
+         QWEN3_REASONING_FAMILY_ARCHES.end();
 }
 
 std::optional<ReasoningTags> selectReasoningTagsForArchitecture(

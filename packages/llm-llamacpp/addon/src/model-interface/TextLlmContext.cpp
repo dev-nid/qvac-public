@@ -99,6 +99,23 @@ void TextLlmContext::initializeCommonState() {
       }
     }
   }
+  // EOS-inside-reasoning recovery (close-marker substitution +
+  // trailing newlines) is a Qwen3-specific workaround. Gate it on the
+  // explicit Qwen3-family predicate so the policy is documented at the
+  // call site and cannot drift if `selectReasoningTagsForArchitecture`
+  // is later extended to cover non-Qwen families. Other families with
+  // a recognised channel (e.g. Gemma 4) still get detection / span
+  // tracking / compaction via `reasoningEnabled_`, just not this
+  // recovery.
+  {
+    const std::optional<std::string> arch =
+        qvac_lib_inference_addon_llama::utils::getModelArchitecture(
+            modelCtx_.model);
+    isQwen3ReasoningFamily_ =
+        arch.has_value() &&
+        qvac_lib_inference_addon_llama::utils::
+            isQwen3ReasoningFamilyArchitecture(arch.value());
+  }
   const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
       reasoningTags =
           qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
@@ -789,7 +806,7 @@ SequenceStepResult TextLlmContext::onLogitsReady(
   }
 
   const bool isEos = llama_vocab_is_eog(modelCtx_.vocab, tokenId);
-  if (sampledToken && isEos && reasoningEnabled_) {
+  if (sampledToken && isEos && isQwen3ReasoningFamily_) {
     if (inlineDecodeBatch != nullptr) {
       if (handleReasoningEOS(
               tokenId, tokenStr, **inlineDecodeBatch, nPast_, outputCallback)) {

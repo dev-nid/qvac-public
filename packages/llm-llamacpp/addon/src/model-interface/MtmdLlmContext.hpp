@@ -252,6 +252,15 @@ private:
   qvac_lib_inference_addon_llama::utils::ReasoningState reasoningState_;
   bool reasoningEnabled_ = false;
 
+  // True only for architectures in the Qwen3 reasoning family. Gates
+  // the EOS-inside-reasoning recovery (close-marker substitution),
+  // which is the historical Qwen3-specific workaround. Detection /
+  // span tracking / KV compaction stay family-agnostic via
+  // `reasoningEnabled_`. In practice no multimodal model is in the
+  // Qwen3 family today, so this gate keeps the recovery dormant on
+  // the multimodal path until a Qwen3-family vision model ships.
+  bool isQwen3ReasoningFamily_ = false;
+
   // True when the model uses recurrent memory (Mamba-style SSM layers
   // or hybrid SSM + attention). Detected at construction. Opting in to
   // `remove_thinking_from_context` on such models throws from
