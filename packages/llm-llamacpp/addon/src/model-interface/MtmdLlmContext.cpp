@@ -829,8 +829,8 @@ void MtmdLlmContext::configureReasoningTags(
   const std::optional<ReasoningTags> fallbackTags =
       selectReasoningTagsForModel(modelCtx_.model);
 
-  const std::optional<ReasoningTags> reasoningTags = selectReasoningTagSource(
-      thinkingStartTag, thinkingEndTag, fallbackTags);
+  const std::optional<ReasoningTags> reasoningTags =
+      selectReasoningTagSource(thinkingStartTag, thinkingEndTag, fallbackTags);
 
   reasoningState_ = ReasoningState{};
   reasoningEnabled_ = false;

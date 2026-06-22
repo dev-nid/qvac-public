@@ -195,8 +195,8 @@ std::optional<ReasoningTags> selectReasoningTagSource(
   // other is ambiguous (we cannot detect a channel with only an open
   // or only a close marker) and falls back to the model-family table.
   if (!templateThinkingStartTag.empty() && !templateThinkingEndTag.empty()) {
-    return ReasoningTags{.open = templateThinkingStartTag,
-                         .close = templateThinkingEndTag};
+    return ReasoningTags{
+        .open = templateThinkingStartTag, .close = templateThinkingEndTag};
   }
   return fallbackTags;
 }

@@ -176,8 +176,7 @@ TEST_F(ChatTemplateUtilsTest, SelectReasoningTagSourceNoTemplateNoFallback) {
 // returned ReasoningTags should still come from the template branch
 // (semantically: "the template wins"), not the fallback. This is a
 // behavioural assertion only, since the values are identical here.
-TEST_F(
-    ChatTemplateUtilsTest, SelectReasoningTagSourceTemplateMatchesFallback) {
+TEST_F(ChatTemplateUtilsTest, SelectReasoningTagSourceTemplateMatchesFallback) {
   const ReasoningTags fallback{.open = "<think>", .close = "</think>"};
   const std::optional<ReasoningTags> result =
       selectReasoningTagSource("<think>", "</think>", fallback);
