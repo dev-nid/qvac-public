@@ -1,4 +1,15 @@
 # Changelog
+## [0.27.1] - 2026-06-22
+
+### Added
+
+- Added opt-in `generationParams.remove_thinking_from_context` support to compact completed reasoning blocks out of the live KV cache after generation for recognised reasoning-channel models, including text and multimodal contexts.
+- Added `thinkingBlockDiscards` runtime stats so callers can observe when reasoning blocks were removed from the cache.
+
+### Changed
+
+- Thinking-block KV-cache compaction defaults to off, is a no-op for models without recognised reasoning tags, and rejects recurrent-memory models (SSM / hybrid SSM) with `InvalidArgument` when callers opt in.
+
 ## [0.27.0] - 2026-06-18
 
 ### Changed
