@@ -1,4 +1,17 @@
 # Changelog
+
+## [Unreleased]
+
+### Added
+
+- Recurrent / hybrid-SSM models (Qwen3.5, Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear, ...) now honour `generationParams.remove_thinking_from_context`. The recurrent half of the memory module is snapshotted at the open marker (`llama_state_seq_get_data_ext` with `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`), restored at end-of-generation, and the post-reasoning tail is replayed through `llama_decode` so both KV halves stay consistent.
+- Added `RuntimeStats.thinkingCompactionFailed` so callers can observe turns where the recurrent-state restore or replay step failed and the SSM may carry the dropped reasoning span into the next turn.
+
+### Changed
+
+- Architecture detection for recurrent memory now uses `llama_model_is_recurrent || llama_model_is_hybrid` instead of a metadata `<arch>.ssm.*` heuristic. This stays in sync with fabric's named contracts (`llm_arch_is_recurrent`, `llm_arch_is_hybrid`) and covers every hybrid family fabric ships today.
+- Removed the hard `InvalidArgument` rejection on `remove_thinking_from_context` for recurrent / hybrid-SSM models. Snapshot or replay failure logs a warning and increments `thinkingCompactionFailed` rather than throwing, so the answer for the current turn is still delivered.
+
 ## [0.27.1] - 2026-06-22
 
 ### Added

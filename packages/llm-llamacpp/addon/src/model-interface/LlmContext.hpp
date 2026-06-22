@@ -304,6 +304,19 @@ public:
   virtual void resetThinkingBlockDiscards() {}
 
   /**
+   * Number of times recurrent-state restore or replay failed during
+   * thinking-block compaction in the most recent generation. Non-zero
+   * indicates the SSM hidden state was left contaminated for those
+   * turns; the answer was still delivered, but next-turn output may
+   * still reflect the dropped reasoning span. Always 0 for pure-
+   * attention models (where the restore + replay step never runs).
+   */
+  [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
+    return 0;
+  }
+  virtual void resetThinkingCompactionFailed() {}
+
+  /**
    * The load media method. It loads the media from memory buffer.
    * Default implementation does nothing (for text-only contexts).
    * Override in multimodal contexts to provide media loading functionality.

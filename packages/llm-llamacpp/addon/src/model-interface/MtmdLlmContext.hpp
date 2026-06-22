@@ -2,11 +2,13 @@
 
 #include <atomic>
 #include <optional>
+#include <vector>
 
 #include <llama.h>
 #include <llama/mtmd/mtmd.h>
 
 #include "../utils/ReasoningUtils.hpp"
+#include "../utils/RecurrentStateSnapshot.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
 #include "ContextSlider.hpp"
 #include "LlmContext.hpp"
@@ -144,6 +146,9 @@ public:
   [[nodiscard]] int32_t getThinkingBlockDiscards() const override;
   void resetThinkingBlockDiscards() override;
 
+  [[nodiscard]] int32_t getThinkingCompactionFailed() const override;
+  void resetThinkingCompactionFailed() override;
+
   /**
    * The load media method. It loads the media from memory buffer.
    *
@@ -219,6 +224,11 @@ private:
   void capturePendingThinkClose();
   void compactThinkSpan();
 
+  // Append `tokenId` to `postReasoningTokens_` while the post-reasoning
+  // capture phase is active (close marker committed AND a recurrent
+  // snapshot was taken at open). No-op for pure-attention models.
+  void recordPostReasoningTokenIfActive(llama_token tokenId);
+
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
   mtmd::context_ptr ctxVision_;
@@ -261,10 +271,11 @@ private:
   // the multimodal path until a Qwen3-family vision model ships.
   bool isQwen3ReasoningFamily_ = false;
 
-  // True when the model uses recurrent memory (Mamba-style SSM layers
-  // or hybrid SSM + attention). Detected at construction. Opting in to
-  // `remove_thinking_from_context` on such models throws from
-  // `applyGenerationParams` to avoid SSM hidden-state contamination.
+  // True when the model carries recurrent SSM hidden state — fully-
+  // recurrent (Mamba / RWKV) or hybrid SSM + attention (Qwen3.5,
+  // Qwen3-Next, Jamba, Granite-Hybrid, ...). Detected at construction
+  // via `llama_model_is_recurrent || llama_model_is_hybrid`. Drives
+  // the snapshot + replay path in `compactThinkSpan`.
   bool hasRecurrentMemory_ = false;
 
   // Per-request toggle for the post-generation thinking-block KV
@@ -277,7 +288,18 @@ private:
   std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
   bool pendingThinkCloseCapture_ = false;
 
+  // Partial-only snapshot of the recurrent (SSM) hidden state taken at
+  // the open marker on hybrid / recurrent models. Restored at end-of-
+  // generation, then `postReasoningTokens_` are replayed through
+  // `llama_decode` so the SSM advances over the post-reasoning tail
+  // without re-absorbing the dropped span.
+  qvac_lib_inference_addon_llama::utils::RecurrentStateSnapshot
+      reasoningRecurrentSnapshot_;
+  std::vector<llama_token> postReasoningTokens_;
+  bool capturingPostReasoning_ = false;
+
   int32_t thinkingBlockDiscards_ = 0;
+  int32_t thinkingCompactionFailed_ = 0;
 
   std::atomic<bool> stopGeneration_ = false;
 };

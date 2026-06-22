@@ -632,10 +632,11 @@ void RuntimeStatsSnapshot::recordDecodeStep(
 
 void RuntimeStatsSnapshot::accumulateSlot(
     int64_t nPast, int64_t nSlides, int64_t thinkingDiscards,
-    const Request& req) {
+    int64_t compactionFailed, const Request& req) {
   cacheTokens += nPast;
   contextSlides += nSlides;
   thinkingBlockDiscards += thinkingDiscards;
+  thinkingCompactionFailed += compactionFailed;
   generatedTokens += static_cast<int64_t>(req.generatedTokens.size());
   promptTokens += static_cast<int64_t>(req.prefillTokenCount);
 }
@@ -848,13 +849,17 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t nPast = 0;
   int64_t nSlides = 0;
   int64_t thinkingDiscards = 0;
+  int64_t compactionFailed = 0;
   if (slot.driver) {
     nPast = static_cast<int64_t>(slot.driver->getNPast());
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =
         static_cast<int64_t>(slot.driver->getThinkingBlockDiscards());
+    compactionFailed =
+        static_cast<int64_t>(slot.driver->getThinkingCompactionFailed());
   }
-  stats_.accumulateSlot(nPast, nSlides, thinkingDiscards, req);
+  stats_.accumulateSlot(
+      nPast, nSlides, thinkingDiscards, compactionFailed, req);
 }
 
 } // namespace qvac_lib_inference_addon_llama::batching

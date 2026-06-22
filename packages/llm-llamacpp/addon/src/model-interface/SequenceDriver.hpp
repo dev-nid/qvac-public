@@ -55,6 +55,15 @@ public:
 
   [[nodiscard]] virtual int32_t getThinkingBlockDiscards() const { return 0; }
 
+  // Number of times the recurrent-state restore or replay step failed
+  // during thinking-block compaction in the most recent generation.
+  // Surfaces SSM contamination on hybrid / recurrent models. Always 0
+  // for pure-attention models. Default 0 for drivers that don't
+  // implement compaction.
+  [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
+    return 0;
+  }
+
   // Apply the per-request `remove_thinking_from_context` toggle to the
   // driver. The single-prompt path goes through `applyGenerationParams`
   // (which restores on scope exit); the batch path uses this setter

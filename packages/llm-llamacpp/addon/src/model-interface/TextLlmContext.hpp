@@ -9,6 +9,7 @@
 
 #include "../utils/ChatTemplateUtils.hpp"
 #include "../utils/ReasoningUtils.hpp"
+#include "../utils/RecurrentStateSnapshot.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
 #include "LlmContext.hpp"
 #include "SequenceDriver.hpp"
@@ -149,6 +150,9 @@ public:
   [[nodiscard]] int32_t getThinkingBlockDiscards() const override;
   void resetThinkingBlockDiscards() override;
 
+  [[nodiscard]] int32_t getThinkingCompactionFailed() const override;
+  void resetThinkingCompactionFailed() override;
+
   void setRemoveThinkingFromContext(bool value) override;
 
   /**
@@ -254,6 +258,12 @@ private:
   void capturePendingThinkClose();
   void compactThinkSpan();
 
+  // Append `tokenId` to `postReasoningTokens_` when the post-reasoning
+  // capture phase is active (close marker committed AND a recurrent
+  // snapshot was taken at open). No-op for pure-attention models where
+  // capture never starts.
+  void recordPostReasoningTokenIfActive(llama_token tokenId);
+
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
   LlmModelContext modelCtx_;
@@ -270,6 +280,7 @@ private:
   llama_pos perSeqCtxCeiling_ = -1;
   int32_t nSlides_ = 0;
   int32_t thinkingBlockDiscards_ = 0;
+  int32_t thinkingCompactionFailed_ = 0;
   bool pendingBatchFirstMsg_ = false;
   bool generationStarted_ = false;
   std::string assistantOutput_;
@@ -305,14 +316,15 @@ private:
   // by `applyGenerationParams`.
   bool removeThinkingFromContext_ = false;
 
-  // True when the model uses recurrent memory (Mamba-style SSM layers
-  // or hybrid SSM + attention like Qwen3.5). Detected at construction
-  // via `llama_model_is_recurrent` plus an `<arch>.ssm.*` metadata
-  // probe. `setRemoveThinkingFromContext(true)` throws when this is
-  // true — `seq_rm + seq_add` succeeds on the attention KV but the SSM
-  // hidden state still carries the dropped tokens, so subsequent turns
-  // read contaminated state. Pure-attention models (Qwen3, Qwen3-MoE,
-  // Gemma 4, ...) are unaffected.
+  // True when the model carries recurrent SSM hidden state — fully-
+  // recurrent (Mamba / RWKV, `llama_model_is_recurrent`) or hybrid
+  // SSM + attention (Qwen3.5 / Qwen3-Next / Jamba / Granite-Hybrid,
+  // `llama_model_is_hybrid`). Pure-attention models (Qwen3, Qwen3-MoE,
+  // Gemma 4, ...) are unaffected. Compaction on these families uses
+  // a partial-state snapshot taken at the open marker, restored at
+  // end-of-generation, then a batched replay of the post-reasoning
+  // tokens to advance the SSM through them without absorbing the
+  // dropped reasoning span.
   bool hasRecurrentMemory_ = false;
 
   // [start, end) KV positions of the reasoning block emitted in this
@@ -325,6 +337,24 @@ private:
   // been committed to the KV cache; the next `onLogitsReady` records
   // the end position once the commit has happened.
   bool pendingThinkCloseCapture_ = false;
+
+  // Partial-only snapshot of the recurrent (SSM) hidden state taken
+  // when the open marker is detected on a hybrid / recurrent model.
+  // Restored at end-of-generation, then `postReasoningTokens_` are
+  // replayed through `llama_decode` so the SSM advances over the
+  // post-reasoning tail without re-absorbing the dropped span. Empty
+  // for pure-attention models (where compaction is just `seq_rm +
+  // seq_add` on the attention KV).
+  qvac_lib_inference_addon_llama::utils::RecurrentStateSnapshot
+      reasoningRecurrentSnapshot_;
+  // Tokens emitted AFTER the reasoning close marker, captured during
+  // generation. Replayed at compaction time on hybrid / recurrent
+  // models. Always empty for pure-attention models.
+  std::vector<llama_token> postReasoningTokens_;
+  // True after the close marker is committed AND a recurrent snapshot
+  // was captured at open. Gates `postReasoningTokens_` capture in
+  // `onLogitsReady` and `handleReasoningEOS`.
+  bool capturingPostReasoning_ = false;
 
   std::atomic<bool> stopGeneration_ = false;
 };
