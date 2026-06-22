@@ -8,6 +8,7 @@ const LlmLlamacpp = require('../../index.js')
 
 const isDarwinX64 = os.platform() === 'darwin' && os.arch() === 'x64'
 const isLinuxArm64 = os.platform() === 'linux' && os.arch() === 'arm64'
+const isWindowsX64 = os.platform() === 'win32' && os.arch() === 'x64'
 const useCpu = isLinuxArm64
 
 const MODEL = {
