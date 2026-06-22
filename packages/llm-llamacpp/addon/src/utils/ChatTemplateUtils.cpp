@@ -187,6 +187,20 @@ std::optional<ReasoningTags> selectReasoningTagsForArchitecture(
   return std::nullopt;
 }
 
+std::optional<ReasoningTags> selectReasoningTagSource(
+    const std::string& templateThinkingStartTag,
+    const std::string& templateThinkingEndTag,
+    const std::optional<ReasoningTags>& fallbackTags) {
+  // Both template tags must be present to take effect; one without the
+  // other is ambiguous (we cannot detect a channel with only an open
+  // or only a close marker) and falls back to the model-family table.
+  if (!templateThinkingStartTag.empty() && !templateThinkingEndTag.empty()) {
+    return ReasoningTags{.open = templateThinkingStartTag,
+                         .close = templateThinkingEndTag};
+  }
+  return fallbackTags;
+}
+
 std::optional<ReasoningTags>
 selectReasoningTagsForModel(const ::llama_model* model) {
   if (model == nullptr) {

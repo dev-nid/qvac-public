@@ -37,6 +37,25 @@ std::optional<ReasoningTags> selectReasoningTagsForArchitecture(
     const std::optional<std::string>& architecture);
 
 /**
+ * @brief Selects reasoning detection tags by preferring chat-template-derived
+ * values over the model-family fallback.
+ *
+ * Returns `{templateThinkingStartTag, templateThinkingEndTag}` when both
+ * template tags are non-empty. Otherwise returns `fallbackTags`, which may
+ * itself be `std::nullopt` when the model family has no recognised
+ * reasoning channel.
+ *
+ * Single source of truth for the "template-first, family-fallback" policy
+ * used by `remove_thinking_from_context` detection / compaction. Pure
+ * function with no runtime dependencies, so it is unit-testable in
+ * isolation.
+ */
+std::optional<ReasoningTags> selectReasoningTagSource(
+    const std::string& templateThinkingStartTag,
+    const std::string& templateThinkingEndTag,
+    const std::optional<ReasoningTags>& fallbackTags);
+
+/**
  * @brief Returns true when `architecture` is in the Qwen3 reasoning
  * family (`qwen3`, `qwen3moe`, `qwen35`, `qwen35moe`).
  *
