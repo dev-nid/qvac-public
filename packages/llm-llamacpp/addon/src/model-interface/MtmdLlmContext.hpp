@@ -218,6 +218,9 @@ private:
   void setOpenThinkSpan(llama_pos start);
   void capturePendingThinkClose();
   void compactThinkSpan();
+  void configureReasoningTags(
+      const std::string& thinkingStartTag, const std::string& thinkingEndTag,
+      const std::string& forcedOpenText);
 
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;

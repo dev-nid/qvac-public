@@ -13,9 +13,10 @@ namespace qvac_lib_inference_addon_llama {
 namespace utils {
 
 // Open / close substring markers used to detect a model's reasoning
-// channel in the streamed output (Qwen3 `<think>`/`</think>`,
-// Gemma 4 `<|channel>thought`/`<channel|>`, ...). Owning strings so
-// callers can safely construct from temporaries.
+// channel in the streamed output. Prefer the active chat template's
+// thinking_start_tag / thinking_end_tag when available; model-family
+// defaults are only a fallback. Owning strings so callers can safely
+// construct from temporaries.
 //
 // Two invariants when adding a new family in `selectReasoningTagsForModel`:
 //   - Both markers must fit comfortably within `ReasoningState::BUFFER_SIZE`
@@ -33,9 +34,10 @@ struct ReasoningState {
   // Number of tokens the open marker tokenises to under the active
   // tokenizer. Cached at init for span start-position arithmetic.
   int openTokenCount = 0;
-  // Token count for `tags.open + "\n"`, the template-forced reasoning
-  // prefix some chat templates append to the assistant turn. 0 when
-  // not applicable.
+  // Token count for the template-forced reasoning prefix some chat
+  // templates append to the assistant turn. Defaults to
+  // `tags.open + "\n"` when the caller does not provide the exact
+  // prompt suffix. 0 when not applicable.
   int forcedOpenTokenCount = 0;
   // Cached close-marker id when the marker tokenises to a single
   // token (enables EOS-inside-reasoning replacement).
@@ -52,6 +54,11 @@ struct ReasoningState {
 // Initialise `state` with `tags`. Tokenises both markers under
 // `lctx`'s vocab to populate the cached counts and ids. Empty
 // `tags.open`/`tags.close` leave the state in a disabled mode.
+// `forcedOpenText`, when non-empty, must be the exact template suffix
+// already present in the prompt when `thinking_forced_open` is true.
+// `eosRecoveryCloseTag`, when non-empty, is tokenised separately for
+// the Qwen-family EOS-inside-reasoning recovery path; detection still
+// uses `tags.close`.
 //
 // Returns `true` iff the open marker satisfies the BPE-merge-barrier
 // invariant required by the span-start arithmetic in
@@ -64,7 +71,9 @@ struct ReasoningState {
 // violated — callers should disable reasoning detection in that case to
 // avoid corrupting the KV cache with an off-by-one span start.
 [[nodiscard]] bool initializeReasoningState(
-    ::llama_context* lctx, ReasoningState& state, ReasoningTags tags);
+    ::llama_context* lctx, ReasoningState& state, ReasoningTags tags,
+    const std::string& forcedOpenText = {},
+    const std::string& eosRecoveryCloseTag = {});
 
 // Append `tokenStr` to the rolling buffer and flip
 // `state.inside_reasoning` when the buffer first contains the

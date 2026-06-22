@@ -153,25 +153,6 @@ MtmdLlmContext::MtmdLlmContext(
         qvac_lib_inference_addon_llama::utils::
             isQwen3ReasoningFamilyArchitecture(arch.value());
   }
-  const std::optional<qvac_lib_inference_addon_llama::utils::ReasoningTags>
-      reasoningTags =
-          qvac_lib_inference_addon_llama::utils::selectReasoningTagsForModel(
-              modelCtx_.model);
-  if (reasoningTags.has_value()) {
-    const bool reasoningInitOk =
-        qvac_lib_inference_addon_llama::utils::initializeReasoningState(
-            modelCtx_.lctx, reasoningState_, *reasoningTags);
-    if (reasoningInitOk) {
-      reasoningEnabled_ = true;
-    } else {
-      QLOG_IF(
-          Priority::WARNING,
-          string_format(
-              "[MtmdLlm] reasoning detection disabled: first piece of open "
-              "marker '%s' is not a special token under this vocab\n",
-              reasoningTags->open.c_str()));
-    }
-  }
 }
 
 void MtmdLlmContext::initVisionContext() {
@@ -282,6 +263,8 @@ void MtmdLlmContext::tokenizeChat(
       thinkingForcedOpen_
           ? getThinkingForcedOpenText(generationPrompt, thinkingStartTag)
           : std::string{};
+  configureReasoningTags(
+      thinkingStartTag, thinkingEndTag, thinkingForcedOpenText_);
 
   if (formattedChat.empty()) {
     std::string errorMsg = string_format(
@@ -833,6 +816,55 @@ int32_t MtmdLlmContext::getThinkingBlockDiscards() const {
 }
 void MtmdLlmContext::resetThinkingBlockDiscards() {
   thinkingBlockDiscards_ = 0;
+}
+
+void MtmdLlmContext::configureReasoningTags(
+    const std::string& thinkingStartTag, const std::string& thinkingEndTag,
+    const std::string& forcedOpenText) {
+  // Family-default tags act as both the fallback when the active chat
+  // template does not expose reasoning tags, and as the source for the
+  // Qwen-family single-token close marker used by EOS-inside-reasoning
+  // recovery. Resolved once so the lookup runs at most once per
+  // prompt render.
+  const std::optional<ReasoningTags> fallbackTags =
+      selectReasoningTagsForModel(modelCtx_.model);
+
+  std::optional<ReasoningTags> reasoningTags;
+  if (!thinkingStartTag.empty() && !thinkingEndTag.empty()) {
+    reasoningTags = ReasoningTags{.open = thinkingStartTag,
+                                  .close = thinkingEndTag};
+  } else {
+    reasoningTags = fallbackTags;
+  }
+
+  reasoningState_ = ReasoningState{};
+  reasoningEnabled_ = false;
+  if (!reasoningTags.has_value()) {
+    return;
+  }
+
+  std::string eosRecoveryCloseTag;
+  if (isQwen3ReasoningFamily_ && fallbackTags.has_value()) {
+    eosRecoveryCloseTag = fallbackTags->close;
+  }
+
+  const bool reasoningInitOk = initializeReasoningState(
+      modelCtx_.lctx,
+      reasoningState_,
+      *reasoningTags,
+      forcedOpenText,
+      eosRecoveryCloseTag);
+  if (reasoningInitOk) {
+    reasoningEnabled_ = true;
+    return;
+  }
+
+  QLOG_IF(
+      Priority::WARNING,
+      string_format(
+          "[MtmdLlm] reasoning detection disabled: first piece of open "
+          "marker '%s' is not a special token under this vocab\n",
+          reasoningTags->open.c_str()));
 }
 
 void MtmdLlmContext::setOpenThinkSpan(llama_pos start) {

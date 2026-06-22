@@ -34,7 +34,9 @@ bool firstTokenIsSpecial(
 } // namespace
 
 bool initializeReasoningState(
-    ::llama_context* lctx, ReasoningState& state, ReasoningTags tags) {
+    ::llama_context* lctx, ReasoningState& state, ReasoningTags tags,
+    const std::string& forcedOpenText,
+    const std::string& eosRecoveryCloseTag) {
   state.tags = tags;
   state.openTokenCount = 0;
   state.forcedOpenTokenCount = 0;
@@ -63,12 +65,16 @@ bool initializeReasoningState(
   }
   state.openTokenCount = static_cast<int>(openTokens.size());
 
+  const std::string forcedOpenMarker =
+      forcedOpenText.empty() ? tags.open + "\n" : forcedOpenText;
   std::vector<llama_token> forcedOpenTokens =
-      common_tokenize(lctx, tags.open + "\n", false, true);
+      common_tokenize(lctx, forcedOpenMarker, false, true);
   state.forcedOpenTokenCount = static_cast<int>(forcedOpenTokens.size());
 
+  const std::string closeTagForEosRecovery =
+      eosRecoveryCloseTag.empty() ? tags.close : eosRecoveryCloseTag;
   std::vector<llama_token> closeTokens =
-      common_tokenize(lctx, tags.close, false, true);
+      common_tokenize(lctx, closeTagForEosRecovery, false, true);
   if (closeTokens.size() == 1) {
     state.cached_close_tag_token = closeTokens[0];
   }
