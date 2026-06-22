@@ -831,8 +831,8 @@ void MtmdLlmContext::configureReasoningTags(
 
   std::optional<ReasoningTags> reasoningTags;
   if (!thinkingStartTag.empty() && !thinkingEndTag.empty()) {
-    reasoningTags = ReasoningTags{.open = thinkingStartTag,
-                                  .close = thinkingEndTag};
+    reasoningTags =
+        ReasoningTags{.open = thinkingStartTag, .close = thinkingEndTag};
   } else {
     reasoningTags = fallbackTags;
   }

@@ -35,8 +35,7 @@ bool firstTokenIsSpecial(
 
 bool initializeReasoningState(
     ::llama_context* lctx, ReasoningState& state, ReasoningTags tags,
-    const std::string& forcedOpenText,
-    const std::string& eosRecoveryCloseTag) {
+    const std::string& forcedOpenText, const std::string& eosRecoveryCloseTag) {
   state.tags = tags;
   state.openTokenCount = 0;
   state.forcedOpenTokenCount = 0;
