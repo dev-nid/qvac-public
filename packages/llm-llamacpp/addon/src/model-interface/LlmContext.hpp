@@ -334,6 +334,19 @@ public:
   virtual void resetThinkingBlockDiscards() {}
 
   /**
+   * Number of times recurrent-state restore or replay failed during
+   * thinking-block compaction in the most recent generation. Non-zero
+   * indicates the SSM hidden state was left contaminated for those
+   * turns; the answer was still delivered, but next-turn output may
+   * still reflect the dropped reasoning span. Always 0 for pure-
+   * attention models (where the restore + replay step never runs).
+   */
+  [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
+    return 0;
+  }
+  virtual void resetThinkingCompactionFailed() {}
+
+  /**
    * Wall-clock milliseconds spent in the vision encoder (mtmd/CLIP ViT
    * forward + projection) during the most recent inference. 0 for
    * text-only contexts, which never run a vision encoder.

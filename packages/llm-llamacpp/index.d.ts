@@ -182,9 +182,14 @@ export interface GenerationParams {
    * multimodal contexts. No-op for models without a recognised
    * reasoning channel.
    *
-   * Throws when set to `true` on models with recurrent memory
-   * (SSM / hybrid SSM such as Qwen3.5) — `seq_rm + seq_add` leaves the
-   * SSM hidden state contaminated, so the feature is unsupported there.
+   * Recurrent / hybrid-SSM models (Qwen3.5, Qwen3-Next, Jamba,
+   * Granite-Hybrid, ...) are supported: the recurrent half of the
+   * memory module is snapshotted at the open marker, restored at end-
+   * of-generation, and the post-reasoning tail is replayed through the
+   * decoder so both KV halves stay consistent. If the restore or
+   * replay step fails, the answer is still delivered for the current
+   * turn but the SSM may carry the reasoning influence into the next
+   * turn; this is surfaced via `RuntimeStats.thinkingCompactionFailed`.
    */
   remove_thinking_from_context?: boolean
 }
@@ -238,6 +243,16 @@ export interface RuntimeStats {
    * was disabled per-request, or when no reasoning blocks were emitted.
    */
   thinkingBlockDiscards: number
+  /**
+   * Number of times recurrent-state restore or replay failed during
+   * thinking-block compaction in the most recent generation. Always 0
+   * for pure-attention models (where the snapshot + replay step never
+   * runs). Non-zero indicates one or more turns delivered an answer
+   * but left the SSM hidden state carrying the dropped reasoning span;
+   * subsequent turns may reflect that contamination. Per-inference for
+   * single requests; summed across slots for batch requests.
+   */
+  thinkingCompactionFailed: number
   /**
    * Average active sequences decoded together during the last request,
    * including overlapping requests from other callers.

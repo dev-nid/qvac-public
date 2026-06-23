@@ -103,13 +103,16 @@ TEST(RuntimeStatsAccumulate, AccumulateSlotSumsThinkingDiscards) {
   Request reqB = makeStubRequest();
   Request reqC = makeStubRequest();
 
-  // (nPast, nSlides, thinkingDiscards, req)
+  // (nPast, nSlides, thinkingDiscards, compactionFailed, req)
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/1, reqA);
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/1,
+      /*compactionFailed=*/0, reqA);
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0, reqB);
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0, reqB);
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/2, reqC);
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/2,
+      /*compactionFailed=*/0, reqC);
 
   EXPECT_EQ(stats.thinkingBlockDiscards, 3);
 }
@@ -117,7 +120,7 @@ TEST(RuntimeStatsAccumulate, AccumulateSlotSumsThinkingDiscards) {
 TEST(RuntimeStatsAccumulate, AccumulateSlotResetClearsThinkingDiscards) {
   RuntimeStatsSnapshot stats;
   Request req = makeStubRequest();
-  stats.accumulateSlot(0, 0, 5, req);
+  stats.accumulateSlot(0, 0, 5, 0, req);
   EXPECT_EQ(stats.thinkingBlockDiscards, 5);
 
   stats.reset();
@@ -143,7 +146,9 @@ TEST(RuntimeStatsAccumulate, CancelBeforePrefillCountsZeroPromptTokens) {
   RuntimeStatsSnapshot stats;
   // Same call the cancel path makes via accumulateSlotRuntimeStats: nothing
   // was processed, so nPast and the generated vector are empty.
-  stats.accumulateSlot(/*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0, req);
+  stats.accumulateSlot(
+      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0, req);
 
   EXPECT_EQ(stats.promptTokens, 0);
 }
@@ -164,9 +169,26 @@ TEST(RuntimeStatsAccumulate, CompletedPrefillCountsFullPrompt) {
 
   RuntimeStatsSnapshot stats;
   stats.accumulateSlot(
-      /*nPast=*/42, /*nSlides=*/0, /*thinkingDiscards=*/0, req);
+      /*nPast=*/42, /*nSlides=*/0, /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0, req);
 
   EXPECT_EQ(stats.promptTokens, 42);
+}
+
+// Compaction-failed counter sums across slots and resets cleanly,
+// mirroring the thinkingBlockDiscards plumbing.
+TEST(RuntimeStatsAccumulate, AccumulateSlotSumsCompactionFailed) {
+  RuntimeStatsSnapshot stats;
+  Request reqA = makeStubRequest();
+  Request reqB = makeStubRequest();
+
+  stats.accumulateSlot(0, 0, 0, /*compactionFailed=*/1, reqA);
+  stats.accumulateSlot(0, 0, 0, /*compactionFailed=*/2, reqB);
+
+  EXPECT_EQ(stats.thinkingCompactionFailed, 3);
+
+  stats.reset();
+  EXPECT_EQ(stats.thinkingCompactionFailed, 0);
 }
 
 } // namespace
