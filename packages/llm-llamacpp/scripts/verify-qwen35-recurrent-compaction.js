@@ -19,7 +19,9 @@ const fs = require('bare-fs')
 const process = require('bare-process')
 const LlmLlamacpp = require('../index.js')
 
-const MODEL_PATH = path.resolve(__dirname, '../test/model/Qwen3.5-0.8B-Q8_0.gguf')
+const MODEL_PATH = process.env.QWEN_MODEL
+  ? path.resolve(process.env.QWEN_MODEL)
+  : path.resolve(__dirname, '../test/model/Qwen3.5-0.8B-Q8_0.gguf')
 
 if (!fs.existsSync(MODEL_PATH)) {
   console.error(`[verify] Qwen3.5 model not cached at ${MODEL_PATH}`)
@@ -44,7 +46,7 @@ async function main () {
       temp: '0',
       top_p: '1',
       device: 'gpu',
-      verbosity: '2',
+      verbosity: '3',
       tools: 'false'
     },
     logger: console,

@@ -160,12 +160,15 @@ void MtmdLlmContext::initializeCommonState() {
           isHarmonyModel_,
           harmonyCallToken_));
 
-  // Snapshot-required detection mirrors TextLlmContext: gate via
-  // `llama_memory_can_shift` so the predicate matches the actual
-  // capability of the memory module (the same gate fabric uses for
-  // `ctx_shift` decisions).
-  auto* const mem = llama_get_memory(modelCtx_.lctx);
-  needsRecurrentSnapshot_ = (mem != nullptr) && !llama_memory_can_shift(mem);
+  // Snapshot-required detection mirrors TextLlmContext: gate on the
+  // architectural predicate (recurrent or hybrid) rather than on
+  // `llama_memory_can_shift`, which is about RoPE K-shift and reports
+  // `true` for recurrent + hybrid memories. See TextLlmContext for
+  // the full rationale.
+  const auto* const model = modelCtx_.model;
+  needsRecurrentSnapshot_ =
+      (model != nullptr) &&
+      (llama_model_is_recurrent(model) || llama_model_is_hybrid(model));
 
   // EOS-inside-reasoning recovery is a Qwen3-specific workaround;
   // gate it on the explicit Qwen3-family predicate so non-Qwen
@@ -444,6 +447,14 @@ bool MtmdLlmContext::evalMessageWithTools(
     const std::vector<common_chat_msg>& chatMsgs,
     const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
     bool prefill) {
+  // Clear per-inference recurrent-rollback state at the START of each
+  // inference. A stale snapshot from a previous turn would otherwise
+  // block the new snapshot via `snapshotForRecurrentRollback`'s
+  // `!empty()` early-return.
+  reasoningRecurrentSnapshot_.clear();
+  postReasoningTokens_.clear();
+  capturingPostReasoning_ = false;
+
   mtmd::input_chunks chunks(mtmd_input_chunks_init());
 
   tokenizeChat(chatMsgs, tools, chunks, isCacheLoaded);
@@ -728,16 +739,19 @@ bool MtmdLlmContext::generateResponse(
   int nRemain = params_.n_predict;
   LlamaBatch batch(1, 0, 1); // batch for next token generation
 
-  // Per-inference reset of reasoning detection state. Mirrors
-  // TextLlmContext::onPrefillComplete so consecutive generations don't
-  // inherit a stale `inside_reasoning` flag or span.
+  // Per-inference reset of reasoning detection state.
+  //
+  // NOTE: do NOT touch `reasoningRecurrentSnapshot_`,
+  // `postReasoningTokens_`, or `capturingPostReasoning_` here — they
+  // were just populated by `evalMessageWithTools` (via
+  // `snapshotForRecurrentRollback` at end-of-prefill) and wiping them
+  // would render the recurrent-rollback path dead. They are cleared
+  // at the START of each inference in `evalMessageWithTools`, on
+  // context slide, and by `compactThinkSpan`'s RAII guard.
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
   thinkSpan_.reset();
   pendingThinkCloseCapture_ = false;
-  reasoningRecurrentSnapshot_.clear();
-  postReasoningTokens_.clear();
-  capturingPostReasoning_ = false;
 
   if (thinkingForcedOpen_) {
     if (outputCallback) {

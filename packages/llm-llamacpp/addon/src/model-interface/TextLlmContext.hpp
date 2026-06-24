@@ -343,13 +343,13 @@ private:
   // by `applyGenerationParams`.
   bool removeThinkingFromContext_ = false;
 
-  // True when this context's memory module rejects partial-tail
-  // erasures (`llama_memory_can_shift == false`) — Mamba / RWKV pure-
-  // recurrent and hybrid SSM + attention families (Qwen3.5, Qwen3-Next,
-  // Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear). For these
-  // we use the snapshot + replay path: snapshot the full sequence
-  // state before the forced opener is decoded, restore at end-of-
-  // generation, then batched-replay the captured post-reasoning
+  // True when this context's model is recurrent or hybrid
+  // (`llama_model_is_recurrent || llama_model_is_hybrid`) — Mamba /
+  // RWKV pure-recurrent and hybrid SSM + attention families (Qwen3.5,
+  // Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear).
+  // For these we use the snapshot + replay path: snapshot the full
+  // sequence state before the forced opener is decoded, restore at
+  // end-of-generation, then batched-replay the captured post-reasoning
   // tokens. Pure-attention models keep the existing
   // `seq_rm + seq_add` path untouched.
   bool needsRecurrentSnapshot_ = false;

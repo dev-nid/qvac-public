@@ -389,8 +389,8 @@ private:
   // the multimodal path until a Qwen3-family vision model ships.
   bool isQwen3ReasoningFamily_ = false;
 
-  // True when this context's memory module rejects partial-tail
-  // erasures (`llama_memory_can_shift == false`). Drives the
+  // True when this context's model is recurrent or hybrid
+  // (`llama_model_is_recurrent || llama_model_is_hybrid`). Drives the
   // snapshot + replay path in `compactThinkSpan`. See
   // `TextLlmContext::needsRecurrentSnapshot_` for the full rationale.
   bool needsRecurrentSnapshot_ = false;

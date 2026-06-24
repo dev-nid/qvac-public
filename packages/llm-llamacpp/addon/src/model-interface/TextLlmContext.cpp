@@ -81,16 +81,23 @@ void TextLlmContext::initializeCommonState() {
     modelCtx_.vocab = llama_model_get_vocab(modelCtx_.model);
   }
 
-  // Memory modules that don't support partial-tail erasure (Mamba /
-  // RWKV pure-recurrent, hybrid SSM + attention like Qwen3.5,
-  // Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H,
-  // Kimi-Linear) need the snapshot + replay path in `compactThinkSpan`
-  // because the recurrent half can't be rolled back via `seq_rm`.
-  // `llama_memory_can_shift` is fabric's canonical probe for this
-  // capability and is what the fabric server uses to gate `ctx_shift`
-  // and cache-reuse decisions, so we reuse the same predicate.
-  auto* const mem = llama_get_memory(modelCtx_.lctx);
-  needsRecurrentSnapshot_ = (mem != nullptr) && !llama_memory_can_shift(mem);
+  // Models with recurrent state (Mamba / RWKV pure-recurrent) or
+  // hybrid SSM + attention (Qwen3.5, Qwen3-Next, Jamba,
+  // Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear) need the snapshot +
+  // replay path in `compactThinkSpan` because the recurrent hidden
+  // state isn't positionally indexed and `seq_rm` on an interior
+  // range silently leaves the SSM inconsistent.
+  //
+  // We deliberately do NOT gate on `llama_memory_can_shift`: that
+  // predicate is about RoPE-based K-shift (position shifting) and
+  // returns `true` for all memory types in fabric today, including
+  // recurrent and hybrid. The real architectural property we care
+  // about is "does this model have a recurrent half?", which is
+  // exactly what these two model predicates report.
+  const auto* const model = modelCtx_.model;
+  needsRecurrentSnapshot_ =
+      (model != nullptr) &&
+      (llama_model_is_recurrent(model) || llama_model_is_hybrid(model));
   // EOS-inside-reasoning recovery (close-marker substitution +
   // trailing newlines) is a Qwen3-specific workaround. Gate it on the
   // explicit Qwen3-family predicate so the policy is documented at the
@@ -415,6 +422,15 @@ bool TextLlmContext::evalMessageWithTools(
     const std::vector<common_chat_msg>& chatMsgs,
     const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
     bool prefill) {
+  // Clear per-inference recurrent-rollback state at the START of each
+  // inference. A stale snapshot from a previous turn (e.g. the prior
+  // turn was interrupted by `stopGeneration_` before `compactThinkSpan`
+  // ran) would otherwise block the new snapshot via the
+  // `!snapshot.empty()` early-return in `snapshotForRecurrentRollback`.
+  reasoningRecurrentSnapshot_.clear();
+  postReasoningTokens_.clear();
+  capturingPostReasoning_ = false;
+
   const std::vector<llama_token> inputTokens =
       preparePrefill(chatMsgs, tools, {}, {}, isCacheLoaded, prefill).tokens;
   const auto nTokens = static_cast<llama_pos>(inputTokens.size());
@@ -599,13 +615,20 @@ void TextLlmContext::onPrefillComplete(
 
   // Reset per-inference reasoning detection state here (shared by the
   // single-prompt and continuous-batching paths).
+  //
+  // NOTE: do NOT touch `reasoningRecurrentSnapshot_`,
+  // `postReasoningTokens_`, or `capturingPostReasoning_` here — the
+  // prefill loop in `evalMessageWithTools` (which has just completed)
+  // takes the snapshot at the body/forced-opener boundary, and
+  // wiping it here would render the recurrent-rollback path dead.
+  // Lifecycle for those fields: cleared at the START of each
+  // inference (in `resetPerInferenceRecurrentState`), invalidated on
+  // context slide (`applyContextDiscard`), and consumed by
+  // `compactThinkSpan`'s RAII guard.
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
   thinkSpan_.reset();
   pendingThinkCloseCapture_ = false;
-  reasoningRecurrentSnapshot_.clear();
-  postReasoningTokens_.clear();
-  capturingPostReasoning_ = false;
 
   // Template force-opened the reasoning channel (e.g. Qwen3 / DeepSeek-R1
   // assistant prefix ends with `<think>\n`): the opening tokens are
@@ -984,18 +1007,25 @@ llama_pos TextLlmContext::computeRecurrentSnapshotBoundary(
       !reasoningEnabled_) {
     return -1;
   }
-  // Forced-open templates inject the open marker as the last
-  // `forcedOpenTokenCount` tokens of the prefill. We want the
-  // snapshot to land BEFORE those decode so they end up dropped
-  // along with the reasoning body at end-of-generation. For non-
-  // forced reasoning the snapshot just lands at the end of prefill
-  // (boundary == prefillLen) — same effect as snapshotting at
-  // `onPrefillComplete`.
-  const llama_pos forcedCount =
-      thinkingForcedOpen_
-          ? static_cast<llama_pos>(reasoningState_.forcedOpenTokenCount)
-          : 0;
-  const llama_pos boundary = prefillLen - forcedCount;
+  // Snapshot at the END of prefill (after the chat-template-forced
+  // `<think>` opener is decoded into the cache). Rationale: hybrid
+  // SSM models keep their context exclusively in the recurrent hidden
+  // state, and that state needs to look like a structurally valid
+  // assistant turn from the model's training distribution. Snapshotting
+  // BEFORE the forced opener and replaying only the answer makes the
+  // SSM forget reasoning ever happened — Qwen3.5 then enters an
+  // unrecoverable `<think>` loop on the NEXT turn because the chat
+  // template's freshly-injected `<think>\n` arrives in an OOD
+  // recurrent state.
+  //
+  // Snapshot-at-end-of-prefill keeps the forced opener in the SSM's
+  // hidden state (small "opener residue" in the cache after rollback)
+  // — a known and accepted cost. The reasoning BODY is still dropped
+  // by the rollback, just not the 1–2 forced-opener tokens. The
+  // `MtmdLlmContext` codepath has always used this strategy; we mirror
+  // it here. Pure-attention models keep the existing `seq_rm` path,
+  // unaffected.
+  const llama_pos boundary = prefillLen;
   // Degenerate templates whose entire prefill IS the forced opener
   // give a boundary of 0; snapshotting at nPast_ == 0 is a valid
   // empty-sequence snapshot. Boundaries outside `[0, prefillLen]`
