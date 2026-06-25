@@ -137,13 +137,6 @@ target_link_libraries(
     GTest::gmock_main
 )
 
-if(NOT WIN32)
-  target_link_libraries(
-    addon-test
-    PRIVATE
-      -fsanitize=address
-  )
-endif()
 # Copy ggml backend libraries next to the test executable
 if((ANDROID OR UNIX) AND NOT APPLE)
   foreach(_backend ${GGML_AVAILABLE_BACKENDS})

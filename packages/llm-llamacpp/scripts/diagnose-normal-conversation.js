@@ -102,7 +102,7 @@ function dump (label, turns) {
       `cacheTokens=${t.stats.CacheTokens || '?'} ` +
       `gen=${t.stats.generatedTokens || '?'} ` +
       `discards=${t.stats.thinkingBlockDiscards || 0}`)
-    console.log(`  reasoning summary (first 250 chars):`)
+    console.log('  reasoning summary (first 250 chars):')
     console.log(`    ${t.reasoning.slice(0, 250).replace(/\n/g, ' / ')}`)
   }
 }

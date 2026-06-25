@@ -77,13 +77,13 @@ async function main () {
   // attention KV — this would catch a regression where the gate
   // accidentally fires on attention models.
   if (t1Failed !== 0 || t2Failed !== 0) {
-    console.error(`[FAIL] pure-attention path hit the recurrent rollback ` +
+    console.error('[FAIL] pure-attention path hit the recurrent rollback ' +
       `(t1Failed=${t1Failed}, t2Failed=${t2Failed})`)
     exitCode = 1
   }
   // And the compaction itself must still fire as before.
   if (t1Discards < 1) {
-    console.error(`[FAIL] turn 1 should drop at least one reasoning block ` +
+    console.error('[FAIL] turn 1 should drop at least one reasoning block ' +
       `(got ${t1Discards})`)
     exitCode = 1
   }
