@@ -49,6 +49,7 @@ add_executable(
   test_kv_leak_on_admit_failure.cpp
   test_runtime_stats.cpp
   test_reasoning_budget.cpp
+  test_cancel_rollback.cpp
   ${CMAKE_SOURCE_DIR}/addon/src/model-interface/AsyncWeightsLoader.cpp
   ${CMAKE_SOURCE_DIR}/addon/src/model-interface/MultiRequestBatcher.cpp
   ${CMAKE_SOURCE_DIR}/addon/src/model-interface/ContinuousBatchScheduler.cpp

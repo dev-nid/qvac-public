@@ -336,6 +336,15 @@ private:
   // all chunks decode and accepts the opener residue.
   void snapshotForRecurrentRollback();
 
+  // Cancel-during-generation cleanup. On recurrent / hybrid memory,
+  // restores the end-of-prefill snapshot to drop any partially decoded
+  // generation (including an in-flight reasoning span) from both
+  // attention KV and recurrent state. On pure-attention models or when
+  // no snapshot is available, only flushes the UTF-8 buffer. Used by
+  // the cancel exits in `generateResponse`.
+  void cancelGenerationCleanup(
+      const std::function<void(const std::string&)>& outputCallback);
+
   ToolsCompactController& tools_;
   common_init_result_ptr llamaInit_;
   mtmd::context_ptr ctxVision_;

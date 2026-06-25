@@ -531,6 +531,29 @@ bool MtmdLlmContext::evalMessageWithTools(
     throw qvac_errors::StatusError(ADDON_ID, toString(EncoderFailed), errorMsg);
   }
 
+  // Snapshot the sequence state at prefill entry on recurrent / hybrid
+  // memory so a mid-prefill cancellation can roll back to the exact
+  // pre-prefill cache. Captures both attention KV and the recurrent
+  // hidden state, restored in one shot on cancel. Required because
+  // `llama_memory_seq_pos_max` does not report image-chunk extended
+  // metadata (Qwen3VL M-RoPE x/y), so a metadata-only resync cannot
+  // recover the exact pre-cancel position between mtmd chunks.
+  RecurrentStateSnapshot prefillEntrySnapshot;
+  const ContextUsage prefillEntryUsage = current_;
+  if (needsRecurrentSnapshot_) {
+    if (!snapshotRecurrentState(
+            modelCtx_.lctx, seqId_, current_.pos, prefillEntrySnapshot)) {
+      // Capture failed: cancel will fall back to the no-op
+      // `removeLastNTokens` path. Surface via the same counter the rest
+      // of the recurrent-rollback code uses so this is visible from JS.
+      ++thinkingCompactionFailed_;
+      QLOG_IF(
+          Priority::WARNING,
+          "[MtmdLlm] failed to capture prefill-entry recurrent snapshot; "
+          "mid-prefill cancel will not roll back recurrent state\n");
+    }
+  }
+
   llama_pos nPastLocal = current_.pos;
 
   for (size_t i = 0; i < nChunks; i++) {
@@ -538,44 +561,39 @@ bool MtmdLlmContext::evalMessageWithTools(
     const auto* chunk = mtmd_input_chunks_get(chunksPtr, i);
 
     if (stopGeneration_.load()) {
-      llama_pos totalDelta = nPastLocal - current_.pos;
-      current_.pos = nPastLocal;
-      // [TODO] Temporary recurrent-memory fix: removeLastNTokens() may no-op for
-      // hybrid/SSM models. A proper cancellation rollback needs llama.cpp
-      // sequence checkpoint save + restore so partially evaluated tokens can
-      // be restored without corrupting recurrent state.
-      const llama_pos removedTokens = removeLastNTokens(totalDelta);
-      if (removedTokens == 0 && totalDelta > 0) {
-        // [TODO] Replace this metadata resync in the next PR with real
-        // checkpoint save/restore rollback. This branch means rollback did not
-        // remove the partially evaluated prompt, which is expected for
-        // Qwen3VL hybrid/recurrent memory until checkpoint restore exists.
-        //
-        // The subtle case is cancellation between mtmd chunks: the image chunk
-        // has already returned from mtmd_helper_eval_chunk_single(), so
-        // nPastLocal has been advanced to the next chunk's cursor by the
-        // Qwen3VL M-RoPE span (max(nx, ny)). But the following text chunk has
-        // not run yet. llama memory currently contains only the committed image
-        // KV cells, whose normal sequence position is the image chunk's pos.t;
-        // the image x/y coordinates are stored as extended metadata and are not
-        // reported by llama_memory_seq_pos_max().
-        //
-        // If we save nPastLocal as cache metadata here, disk reload can fail
-        // because the saved nPast is ahead of the positions actually restored
-        // from llama memory. Persist the memory-derived position until proper
-        // rollback can restore the exact pre-cancel state.
-        auto* mem = llama_get_memory(modelCtx_.lctx);
-        if (mem == nullptr) {
-          throw qvac_errors::StatusError(
-              ADDON_ID,
-              qvac_errors::general_error::toString(
-                  qvac_errors::general_error::InternalError),
-              "[MtmdLlm] llama memory is null while syncing canceled prefill "
-              "position");
+      if (needsRecurrentSnapshot_ && !prefillEntrySnapshot.empty()) {
+        // Recurrent / hybrid path: restore the pre-prefill snapshot to
+        // drop partially decoded chunks (including any committed image
+        // KV cells) in one call. `nPastLocal` is discarded because the
+        // restore returns the cache to its pre-prefill cursor.
+        if (restoreRecurrentState(
+                modelCtx_.lctx, seqId_, prefillEntrySnapshot)) {
+          current_ = prefillEntryUsage;
+          refreshCurrentCacheTokensFromMemory();
+        } else {
+          // Restore underflowed: the recurrent half is in an undefined
+          // state. The fallback below is best-effort only; recurrent
+          // memory does not honour `removeLastNTokens`, so the cache
+          // may stay inconsistent until the next full reset.
+          ++thinkingCompactionFailed_;
+          QLOG_IF(
+              Priority::WARNING,
+              string_format(
+                  "[MtmdLlm] prefill-entry recurrent snapshot restore "
+                  "failed on cancel (nPastLocal=%d, snapshotPos=%d, "
+                  "seqId=%d); recurrent state may be inconsistent until "
+                  "the next full reset\n",
+                  nPastLocal,
+                  prefillEntrySnapshot.nPast,
+                  seqId_));
+          const llama_pos totalDelta = nPastLocal - current_.pos;
+          current_.pos = nPastLocal;
+          removeLastNTokens(totalDelta);
         }
-        const llama_pos posMax = llama_memory_seq_pos_max(mem, seqId_);
-        current_.pos = posMax < 0 ? 0 : posMax + 1;
-        refreshCurrentCacheTokensFromMemory();
+      } else {
+        const llama_pos totalDelta = nPastLocal - current_.pos;
+        current_.pos = nPastLocal;
+        removeLastNTokens(totalDelta);
       }
       stopGeneration_.store(false);
       return false;
@@ -659,6 +677,28 @@ void MtmdLlmContext::flushPendingUtf8ToCallback(
   std::string remaining = utf8Buffer_.flush();
   if (!remaining.empty()) {
     outputCallback(remaining);
+  }
+}
+
+void MtmdLlmContext::cancelGenerationCleanup(
+    const std::function<void(const std::string&)>& outputCallback) {
+  flushPendingUtf8ToCallback(outputCallback);
+  // Recurrent / hybrid: restore the end-of-prefill snapshot so the
+  // cache state is exactly post-prefill, dropping any partial answer
+  // or in-flight reasoning tokens from both KV halves in one call.
+  if (needsRecurrentSnapshot_ && !reasoningRecurrentSnapshot_.empty()) {
+    if (restoreRecurrentState(
+            modelCtx_.lctx, seqId_, reasoningRecurrentSnapshot_)) {
+      current_.pos = reasoningRecurrentSnapshot_.nPast;
+      refreshCurrentCacheTokensFromMemory();
+    } else {
+      ++thinkingCompactionFailed_;
+    }
+    reasoningRecurrentSnapshot_.clear();
+    postReasoningTokens_.clear();
+    capturingPostReasoning_ = false;
+    thinkSpan_.reset();
+    pendingThinkCloseCapture_ = false;
   }
 }
 
@@ -770,14 +810,14 @@ bool MtmdLlmContext::generateResponse(
 
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    flushPendingUtf8ToCallback(outputCallback);
+    cancelGenerationCleanup(outputCallback);
     return true;
   }
 
   while (nRemain != 0) {
     if (stopGeneration_.load()) {
       stopGeneration_.store(false);
-      flushPendingUtf8ToCallback(outputCallback);
+      cancelGenerationCleanup(outputCallback);
       return true;
     }
     if ((current_.pos + 1 >
@@ -904,6 +944,14 @@ bool MtmdLlmContext::generateResponse(
 
     common_batch_clear(*batch);
     if (stopGeneration_.load()) {
+      if (needsRecurrentSnapshot_) {
+        // Hybrid / recurrent: skip EOT injection and route through the
+        // post-loop cancel branch below. The end-of-prefill snapshot
+        // restore in `cancelGenerationCleanup` drops everything sampled
+        // since prefill, so decoding EOT first would only advance the
+        // recurrent state and corrupt the rollback target.
+        break;
+      }
       handleStopRequestAndAddEot(batch);
       break;
     }
@@ -922,6 +970,17 @@ bool MtmdLlmContext::generateResponse(
     capturePendingThinkClose();
   }
 
+  // Unified post-loop cancel cleanup for hybrid / recurrent: the
+  // mid-loop cancel exit above leaves `stopGeneration_` set so the
+  // snapshot restore in `cancelGenerationCleanup` runs exactly once and
+  // `compactThinkSpan` is skipped (there is nothing to compact after a
+  // full rollback). Pure-attention falls through to `compactThinkSpan`
+  // because its cancel exit decoded EOT and cleared the flag.
+  if (stopGeneration_.load()) {
+    stopGeneration_.store(false);
+    cancelGenerationCleanup(outputCallback);
+    return true;
+  }
   if (nRemain == 0) {
     flushPendingUtf8ToCallback(outputCallback);
   }

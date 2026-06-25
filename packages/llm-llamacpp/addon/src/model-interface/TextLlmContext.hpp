@@ -275,10 +275,13 @@ private:
   // pause and snapshot the sequence state for the recurrent rollback
   // path. Returns the sentinel `-1` when no snapshot is needed for
   // this inference (memory module supports shift, feature disabled,
-  // or reasoning channel not recognised). For forced-open templates
-  // the boundary lands at `prefillLen - forcedOpenTokenCount` so the
-  // forced opener is decoded AFTER the snapshot and ends up dropped
-  // along with the reasoning body at end-of-generation.
+  // or reasoning channel not recognised). Snapshots at END of prefill
+  // (boundary == `prefillLen`) on hybrid SSM models so the forced
+  // opener stays in the recurrent state and the next turn does not
+  // arrive at an OOD SSM hidden state — see the implementation
+  // comment in `computeRecurrentSnapshotBoundary` for the full
+  // rationale. The reasoning body is still dropped by rollback; only
+  // the 1–2 forced-opener tokens remain as accepted residue.
   [[nodiscard]] llama_pos computeRecurrentSnapshotBoundary(
       llama_pos prefillLen) const;
 
