@@ -8,10 +8,13 @@
 #include <llama.h>
 
 #include "../utils/ChatTemplateUtils.hpp"
+#include "../utils/ReasoningRollbackState.hpp"
 #include "../utils/ReasoningUtils.hpp"
 #include "../utils/RecurrentStateSnapshot.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
+#include "ContextShifter.hpp"
 #include "LlmContext.hpp"
+#include "ReasoningBlockCompactor.hpp"
 #include "SequenceDriver.hpp"
 #include "ToolsCompactController.hpp"
 #include "common/common.h"
@@ -265,10 +268,10 @@ private:
       const std::string& thinkingStartTag, const std::string& thinkingEndTag,
       const std::string& forcedOpenText);
 
-  // Append `tokenId` to `postReasoningTokens_` when the post-reasoning
-  // capture phase is active (close marker committed AND a recurrent
-  // snapshot was taken at open). No-op for pure-attention models where
-  // capture never starts.
+  // Delegates to `rollbackState_.recordPostReasoningToken` when the
+  // post-reasoning capture phase is active (close marker committed AND
+  // a recurrent snapshot was taken at open). No-op for pure-attention
+  // models where capture never starts.
   void recordPostReasoningTokenIfActive(llama_token tokenId);
 
   // Returns the token index in the prefill stream at which we should
@@ -286,10 +289,10 @@ private:
       llama_pos prefillLen) const;
 
   // Takes a full-state snapshot of `seqId_` at the current `nPast_`
-  // and stores it in `reasoningRecurrentSnapshot_`. Called from the
-  // prefill loop once exactly the prompt body has been decoded. On
-  // failure logs + increments `thinkingCompactionFailed_` and leaves
-  // the snapshot empty, which turns `compactThinkSpan` into a no-op
+  // and stores it in `rollbackState_`. Called from the prefill loop
+  // once exactly the prompt body has been decoded. On failure logs
+  // and increments the `thinkingCompactionFailed` runtime stat,
+  // leaving the snapshot empty so `compactThinkSpan` becomes a no-op
   // for this turn (the answer is still delivered).
   void snapshotForRecurrentRollback();
 
@@ -304,12 +307,8 @@ private:
   std::vector<llama_token> forcedTokens_;
 
   llama_pos nPast_ = 0;
-  llama_pos nDiscarded_ = 0;
   llama_pos firstMsgTokens_ = 0;
   llama_pos perSeqCtxCeiling_ = -1;
-  int32_t nSlides_ = 0;
-  int32_t thinkingBlockDiscards_ = 0;
-  int32_t thinkingCompactionFailed_ = 0;
   bool pendingBatchFirstMsg_ = false;
   bool generationStarted_ = false;
   std::string assistantOutput_;
@@ -351,40 +350,27 @@ private:
   // RWKV pure-recurrent and hybrid SSM + attention families (Qwen3.5,
   // Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear).
   // For these we use the snapshot + replay path: snapshot the full
-  // sequence state before the forced opener is decoded, restore at
-  // end-of-generation, then batched-replay the captured post-reasoning
-  // tokens. Pure-attention models keep the existing
+  // sequence state at end-of-prefill, restore at end-of-generation,
+  // then batched-replay the captured post-reasoning tokens.
+  // Pure-attention models keep the existing
   // `seq_rm + seq_add` path untouched.
   bool needsRecurrentSnapshot_ = false;
 
-  // [start, end) KV positions of the reasoning block emitted in this
-  // inference, if any. `end == -1` marks an open (still-being-emitted)
-  // span. Single-block policy: only the first `<think>...</think>` pair
-  // is tracked; later blocks (which no supported model currently emits)
-  // are ignored.
-  std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
-  // True when the close marker was detected but its token has not yet
-  // been committed to the KV cache; the next `onLogitsReady` records
-  // the end position once the commit has happened.
-  bool pendingThinkCloseCapture_ = false;
-
-  // Partial-only snapshot of the recurrent (SSM) hidden state taken
-  // when the open marker is detected on a hybrid / recurrent model.
-  // Restored at end-of-generation, then `postReasoningTokens_` are
-  // replayed through `llama_decode` so the SSM advances over the
-  // post-reasoning tail without re-absorbing the dropped span. Empty
-  // for pure-attention models (where compaction is just `seq_rm +
-  // seq_add` on the attention KV).
-  qvac_lib_inference_addon_llama::utils::RecurrentStateSnapshot
-      reasoningRecurrentSnapshot_;
-  // Tokens emitted AFTER the reasoning close marker, captured during
-  // generation. Replayed at compaction time on hybrid / recurrent
-  // models. Always empty for pure-attention models.
-  std::vector<llama_token> postReasoningTokens_;
-  // True after the close marker is committed AND a recurrent snapshot
-  // was captured at open. Gates `postReasoningTokens_` capture in
-  // `onLogitsReady` and `handleReasoningEOS`.
-  bool capturingPostReasoning_ = false;
+  // Shared rollback state for recurrent / hybrid SSM models. Owns the
+  // prefill-entry snapshot (cancel during prefill), the end-of-prefill
+  // snapshot (compaction + cancel during generation), and the
+  // post-reasoning token replay buffer. Always empty / inactive on
+  // pure-attention models, where compaction is just `seq_rm + seq_add`
+  // on the attention KV.
+  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState
+      rollbackState_;
+  // Reasoning-block tracker + compactor: owns the `<think>...</think>`
+  // span, close-capture flag, and the pure-attention + recurrent
+  // compaction paths plus their stats counters.
+  qvac_lib_inference_addon_llama::ReasoningBlockCompactor compactor_;
+  // Context-window slider: owns `nDiscarded`, `nSlides`, and clears
+  // post-slide-invalidated state on the compactor and rollback owners.
+  qvac_lib_inference_addon_llama::ContextShifter shifter_;
 
   std::atomic<bool> stopGeneration_ = false;
 };

@@ -7,11 +7,14 @@
 #include <llama.h>
 #include <llama/mtmd/mtmd.h>
 
+#include "../utils/ReasoningRollbackState.hpp"
 #include "../utils/ReasoningUtils.hpp"
 #include "../utils/RecurrentStateSnapshot.hpp"
 #include "../utils/UTF8TokenBuffer.hpp"
+#include "ContextShifter.hpp"
 #include "ContextSlider.hpp"
 #include "LlmContext.hpp"
+#include "ReasoningBlockCompactor.hpp"
 #include "SequenceDriver.hpp"
 #include "ToolsCompactController.hpp"
 #include "inference-addon-cpp/Logger.hpp"
@@ -323,17 +326,16 @@ private:
       const std::string& thinkingStartTag, const std::string& thinkingEndTag,
       const std::string& forcedOpenText);
 
-  // Append `tokenId` to `postReasoningTokens_` while the post-reasoning
-  // capture phase is active (close marker committed AND a recurrent
-  // snapshot was taken at open). No-op for pure-attention models.
+  // Delegates to `rollbackState_.recordPostReasoningToken` while the
+  // post-reasoning capture phase is active (close marker committed AND
+  // a recurrent snapshot was taken at open). No-op for pure-attention
+  // models.
   void recordPostReasoningTokenIfActive(llama_token tokenId);
 
   // Snapshot the full sequence state at end-of-prefill on memory
   // modules that don't support partial-tail erasure. Called from
-  // `evalMessageWithTools` after the chunked prefill completes. The
-  // text path takes a finer-grained snapshot mid-prefill (split
-  // before the forced opener); the multimodal path snapshots after
-  // all chunks decode and accepts the opener residue.
+  // `evalMessageWithTools` after the chunked prefill completes; forced
+  // openers remain as accepted residue in the restored prefix.
   void snapshotForRecurrentRollback();
 
   // Cancel-during-generation cleanup. On recurrent / hybrid memory,
@@ -409,23 +411,20 @@ private:
   // by `applyGenerationParams`.
   bool removeThinkingFromContext_ = false;
 
-  // [start, end) KV positions of the reasoning block emitted in this
-  // inference. `end == -1` marks an open (still-being-emitted) span.
-  std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
-  bool pendingThinkCloseCapture_ = false;
-
-  // Partial-only snapshot of the recurrent (SSM) hidden state taken at
-  // the open marker on hybrid / recurrent models. Restored at end-of-
-  // generation, then `postReasoningTokens_` are replayed through
-  // `llama_decode` so the SSM advances over the post-reasoning tail
-  // without re-absorbing the dropped span.
-  qvac_lib_inference_addon_llama::utils::RecurrentStateSnapshot
-      reasoningRecurrentSnapshot_;
-  std::vector<llama_token> postReasoningTokens_;
-  bool capturingPostReasoning_ = false;
-
-  int32_t thinkingBlockDiscards_ = 0;
-  int32_t thinkingCompactionFailed_ = 0;
+  // Shared rollback state for recurrent / hybrid SSM models. Owns the
+  // prefill-entry snapshot (cancel during prefill), the end-of-prefill
+  // snapshot (compaction + cancel during generation), and the
+  // post-reasoning token replay buffer. Inactive on pure-attention
+  // models.
+  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState
+      rollbackState_;
+  // Reasoning-block tracker + compactor: owns the `<think>...</think>`
+  // span, close-capture flag, and the pure-attention + recurrent
+  // compaction paths plus their stats counters.
+  qvac_lib_inference_addon_llama::ReasoningBlockCompactor compactor_;
+  // Context-window slider: owns `nDiscarded`, `nSlides`, and clears
+  // post-slide-invalidated state on the compactor and rollback owners.
+  qvac_lib_inference_addon_llama::ContextShifter shifter_;
 
   std::atomic<bool> stopGeneration_ = false;
 };
