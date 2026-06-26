@@ -627,8 +627,19 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
     { generationParams: { remove_thinking_from_context: true } }
   )
   t.comment(`turn 2 stats: ${JSON.stringify(t2.stats)}`)
+  t.comment(`turn 2 response (len=${t2.response.length}): ${t2.response.slice(0, 300)}`)
   t.is(toNumber(t2.stats.thinkingCompactionFailed), 0,
     'turn 2 compaction should not fail')
   t.ok(t2.response.length > 0,
     'turn 2 should still produce a response (generation succeeds after rollback)')
+
+  // Functional check on the answer itself. The end-of-prefill snapshot
+  // keeps the forced `<think>\n` opener in the SSM hidden state; if
+  // the replay buffer omits the matching close marker, turn 2 inherits
+  // an unbalanced (opener-without-closer) recurrent state and the
+  // resulting answer tends to drift off-topic or loop. With temp=0,
+  // a balanced replay reliably produces "Madrid" somewhere in the
+  // response. A degenerate SSM does not.
+  t.ok(/madrid/i.test(t2.response),
+    'turn 2 should answer "capital of Spain" with Madrid (proves the SSM did not degenerate)')
 })

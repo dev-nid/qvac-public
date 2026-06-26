@@ -847,6 +847,11 @@ bool MtmdLlmContext::generateResponse(
         // Defer end capture — the close-marker token has not yet been
         // committed to the cache.
         compactor_.requestCloseCapture();
+        // Seed the recurrent replay buffer with the close-marker
+        // token so the restored SSM state ends `<think>...</think>`
+        // balanced before the captured answer tail. See
+        // `ReasoningBlockCompactor::recordCloseMarkerForReplay`.
+        compactor_.recordCloseMarkerForReplay(tokenId);
       }
     }
 
@@ -881,6 +886,12 @@ bool MtmdLlmContext::generateResponse(
           common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
       reasoningState_.inside_reasoning = false;
       compactor_.requestCloseCapture();
+      // EOS-substitution: the original EOS already hit
+      // `recordPostReasoningTokenIfActive` above with capture off, and
+      // the substituted close-tag token never does. Seed the replay
+      // buffer here so the SSM state restores with a balanced
+      // `<think>...</think>` span.
+      compactor_.recordCloseMarkerForReplay(tokenId);
 
       if (outputCallback) {
         std::string completeChars = utf8Buffer_.addToken(tokenStr);

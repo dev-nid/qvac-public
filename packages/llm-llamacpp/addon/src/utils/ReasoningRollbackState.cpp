@@ -56,6 +56,13 @@ void ReasoningRollbackState::recordPostReasoningToken(llama_token id) {
   postReasoningTokens_.push_back(id);
 }
 
+void ReasoningRollbackState::appendPostReasoningToken(llama_token id) {
+  if (id == LLAMA_TOKEN_NULL) {
+    return;
+  }
+  postReasoningTokens_.push_back(id);
+}
+
 void ReasoningRollbackState::clipPostReasoningTokens(size_t maxSize) {
   if (postReasoningTokens_.size() > maxSize) {
     postReasoningTokens_.resize(maxSize);
@@ -81,6 +88,12 @@ void ReasoningRollbackState::reset() noexcept {
   reasoningBoundary_.clear();
   postReasoningTokens_.clear();
   capturingPostReasoning_ = false;
+}
+
+void ReasoningRollbackState::seedReasoningBoundaryForTesting(
+    std::vector<uint8_t> data, llama_pos nPast) noexcept {
+  reasoningBoundary_.data = std::move(data);
+  reasoningBoundary_.nPast = nPast;
 }
 
 } // namespace utils

@@ -123,6 +123,11 @@ protected:
            "QWEN3_BATCH_MODEL_PATH",
            MP::OnMissing::Skip,
            "https://huggingface.co/QuantFactory/Qwen3-0.6B-GGUF");
+    qwen35HybridModel_ =
+        MP("Qwen3.5-0.8B-Q8_0.gguf",
+           "QWEN35_BATCH_MODEL_PATH",
+           MP::OnMissing::Skip,
+           "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF");
     harmonyModel_ =
         MP("gpt-oss-20b-Q2_K.gguf",
            "HARMONY_BATCH_MODEL_PATH",
@@ -167,6 +172,7 @@ protected:
   std::unordered_map<std::string, std::string> config_;
   test_common::TestModelPath model_;
   test_common::TestModelPath qwen3Model_;
+  test_common::TestModelPath qwen35HybridModel_;
   test_common::TestModelPath harmonyModel_;
 };
 
@@ -754,6 +760,65 @@ TEST_F(
   EXPECT_FALSE(hasUnclosedThinkBlock(outputs[1])) << outputs[1];
   EXPECT_TRUE(containsCaseInsensitive(outputs[0], "BLUE")) << outputs[0];
   EXPECT_TRUE(containsCaseInsensitive(outputs[1], "GREEN")) << outputs[1];
+}
+
+/// Regression: Qwen3.5 is a hybrid SSM family; on the continuous-batching
+/// path the end-of-prefill recurrent snapshot must be taken inside
+/// `TextLlmContext::onPrefillComplete` (not only inside the single-prompt
+/// `evalMessageWithTools` prefill loop). Without the snapshot,
+/// `compactThinkSpan` aborts early for hybrid models and
+/// `remove_thinking_from_context` becomes a silent no-op for batched
+/// requests. This test pins the success path by submitting two reasoning
+/// prompts in parallel with `remove_thinking_from_context = true` and
+/// asserting that at least one slot reports a thinking discard with zero
+/// compaction failures.
+TEST_F(
+    ContinuousBatchingIntegrationTest,
+    TwoPromptBatchQwen35HybridDropsThinkBlocks) {
+  REQUIRE_MODEL(qwen35HybridModel_);
+  // Qwen3.5 thinking traces are long; give each slot enough cache and
+  // generation budget to actually close `</think>` so the compactor fires.
+  config_["ctx_size"] = "16384";
+  config_["n_predict"] = "3072";
+  config_["parallel"] = "2";
+  auto model = loadModel(qwen35HybridModel_);
+
+  // Mirror the chat shape used by the single-prompt reasoning integration
+  // tests (system + short user prompt). With `temp=0` Qwen3.5 reliably
+  // opens and closes `<think>` for this shape, which is what the compactor
+  // needs to fire.
+  auto makeOptInPrompt = []() {
+    LlamaModel::Prompt p;
+    p.input =
+        R"([{"role":"system","content":"You are an AI assistant. )"
+        R"(Always provide a clear answer after thinking"},)"
+        R"({"role":"user","content":"what are you thinking"}])";
+    p.generationParams.remove_thinking_from_context = true;
+    return p;
+  };
+
+  std::vector<LlamaModel::Prompt> prompts{makeOptInPrompt(), makeOptInPrompt()};
+  auto outputs = model->processPromptBatch(prompts);
+
+  ASSERT_EQ(outputs.size(), 2u);
+  EXPECT_FALSE(outputs[0].empty());
+  EXPECT_FALSE(outputs[1].empty());
+
+  const auto stats = model->runtimeStats();
+  const double thinkingDiscards =
+      test_common::getStatValue(stats, "thinkingBlockDiscards");
+  const double compactionFailed =
+      test_common::getStatValue(stats, "thinkingCompactionFailed");
+
+  EXPECT_GE(thinkingDiscards, 1.0)
+      << "scheduler path must take the end-of-prefill recurrent snapshot "
+         "so `compactThinkSpan` can fire on the hybrid; got "
+      << thinkingDiscards << " discards. outputs[0]=" << outputs[0]
+      << " outputs[1]=" << outputs[1];
+  EXPECT_EQ(compactionFailed, 0.0)
+      << "recurrent restore + replay should succeed on the scheduler path; "
+         "got "
+      << compactionFailed << " failures";
 }
 
 TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchHarmonyToolCalls) {

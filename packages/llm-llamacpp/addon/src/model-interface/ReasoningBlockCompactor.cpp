@@ -33,6 +33,16 @@ void ReasoningBlockCompactor::setOpenSpan(llama_pos start) {
   thinkSpan_ = std::make_pair(start, static_cast<llama_pos>(-1));
 }
 
+void ReasoningBlockCompactor::recordCloseMarkerForReplay(llama_token id) {
+  if (!removeThinkingFromContext_ || !reasoningEnabled_) {
+    return;
+  }
+  if (!needsRecurrentSnapshot_ || !rollback_.hasReasoningBoundary()) {
+    return;
+  }
+  rollback_.appendPostReasoningToken(id);
+}
+
 void ReasoningBlockCompactor::onCloseCommitted(llama_pos pos) {
   if (!pendingThinkCloseCapture_) {
     return;

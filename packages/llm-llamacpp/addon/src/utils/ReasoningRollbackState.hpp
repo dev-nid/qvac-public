@@ -80,6 +80,11 @@ public:
     return capturingPostReasoning_;
   }
   void recordPostReasoningToken(llama_token id);
+  // Unconditional append used to seed the replay buffer with the close
+  // marker token id (and any other tokens that must land in the
+  // replayed prefix) before `capturingPostReasoning_` is flipped on.
+  // Skips null token ids; never checks the capture flag.
+  void appendPostReasoningToken(llama_token id);
   [[nodiscard]] const std::vector<llama_token>&
   postReasoningTokens() const noexcept {
     return postReasoningTokens_;
@@ -102,6 +107,15 @@ public:
   // Clears all per-inference state. Safe to call regardless of which
   // (if any) snapshots are currently held.
   void reset() noexcept;
+
+  // Test seam. Seeds the reasoning-boundary snapshot from raw payload
+  // bytes so unit tests can exercise downstream gates that depend on
+  // `hasReasoningBoundary()` without loading a real `llama_context`.
+  // Production code MUST use `captureReasoningBoundary` instead — the
+  // payload here is not validated and would fail
+  // `llama_state_seq_set_data_ext` if anything tried to restore from it.
+  void seedReasoningBoundaryForTesting(
+      std::vector<uint8_t> data, llama_pos nPast) noexcept;
 
 private:
   RecurrentStateSnapshot prefillEntry_;

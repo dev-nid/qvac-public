@@ -648,6 +648,15 @@ void TextLlmContext::syncPosition(llama_pos currentPos) { nPast_ = currentPos; }
 void TextLlmContext::onPrefillComplete(
     llama_pos currentPos, size_t prefillTokenCount) {
   nPast_ = currentPos;
+  // Unified end-of-prefill snapshot for recurrent / hybrid models.
+  // Both prefill drivers — the single-prompt loop in
+  // `evalMessageWithTools` and `ContinuousBatchScheduler::stepLocked`
+  // — funnel through here once the final prefill chunk is decoded, so
+  // taking the snapshot here makes the rollback path work uniformly
+  // for both. Idempotent (the underlying capture early-returns when a
+  // boundary snapshot already exists) and a no-op when feature gates
+  // are off, so it's safe to call unconditionally.
+  snapshotForRecurrentRollback();
   if (pendingBatchFirstMsg_) {
     firstMsgTokens_ = nPast_;
     const llama_pos ctxSize = ctxCeiling();
@@ -662,14 +671,14 @@ void TextLlmContext::onPrefillComplete(
   // single-prompt and continuous-batching paths).
   //
   // NOTE: do NOT reset `rollbackState_`'s reasoning-boundary snapshot
-  // or post-reasoning buffers here — the prefill loop in
-  // `evalMessageWithTools` (which has just completed)
-  // takes the end-of-prefill snapshot, and wiping it here would render
-  // the recurrent-rollback path dead.
-  // Lifecycle for those fields: cleared at the START of each
-  // inference (in `resetPerInferenceRecurrentState`), invalidated on
-  // context slide (`applyContextDiscard`), and consumed by
-  // `compactThinkSpan`'s RAII guard.
+  // or post-reasoning buffers here — the snapshot was just taken above
+  // and wiping it would render the recurrent-rollback path dead.
+  // Lifecycle: single-prompt path calls `rollbackState_.reset()` at
+  // the start of `evalMessageWithTools`; the continuous-batching
+  // scheduler constructs a fresh driver per slot so the state starts
+  // empty. Subsequent invalidation happens on context slide
+  // (`applyContextDiscard`) and consumption is via `compactThinkSpan`'s
+  // RAII guard.
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
   compactor_.reset();
@@ -911,6 +920,11 @@ SequenceStepResult TextLlmContext::onLogitsReady(
       // Defer end capture — the close-marker token has not yet been
       // committed to the cache.
       compactor_.requestCloseCapture();
+      // Seed the recurrent replay buffer with the close-marker token
+      // so the restored SSM state ends `<think>...</think>` balanced
+      // before the captured answer tail. See
+      // `ReasoningBlockCompactor::recordCloseMarkerForReplay`.
+      compactor_.recordCloseMarkerForReplay(tokenId);
     }
   }
 
@@ -933,6 +947,12 @@ SequenceStepResult TextLlmContext::onLogitsReady(
           common_token_to_piece(modelCtx_.lctx, tokenId, params_.special);
       reasoningState_.inside_reasoning = false;
       compactor_.requestCloseCapture();
+      // EOS-substitution: original EOS reached
+      // `recordPostReasoningTokenIfActive` above while capture was
+      // still inactive, and the substituted close-tag token never
+      // does. Seed the replay buffer here for the same reason as the
+      // normal-close path.
+      compactor_.recordCloseMarkerForReplay(tokenId);
       if (reasoningState_.cached_newline_token != LLAMA_TOKEN_NULL) {
         forcedTokens_.push_back(reasoningState_.cached_newline_token);
         forcedTokens_.push_back(reasoningState_.cached_newline_token);
@@ -1495,6 +1515,10 @@ bool TextLlmContext::handleReasoningEOS(
 
   // Close marker just committed — record span end before injecting
   // the trailing newlines (they are excluded from the span).
+  // Seed the replay buffer with the substituted close-tag token id
+  // first so it lands ahead of the newlines that the loop below
+  // records once `onCloseCommitted` flips capture on.
+  compactor_.recordCloseMarkerForReplay(tokenId);
   compactor_.onCloseCommitted(nPast);
 
   // Inject 2 newlines after closing tag

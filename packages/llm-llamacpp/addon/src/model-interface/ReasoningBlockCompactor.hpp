@@ -89,6 +89,19 @@ public:
     rollback_.recordPostReasoningToken(id);
   }
 
+  // Seeds the replay buffer with the reasoning close-marker token id.
+  // Called from the close-detection sites BEFORE
+  // `capturePendingThinkClose()` / `onCloseCommitted()` flip capture on,
+  // so the close marker lands at the head of the replay sequence ahead
+  // of any subsequent tokens recorded through `recordPostReasoningToken`.
+  // Gated on the recurrent-snapshot feature and an existing boundary
+  // snapshot — pure-attention models neither restore nor replay.
+  // Without this, the restored SSM state would contain the forced
+  // `<think>\n` opener with no matching close marker before the
+  // answer tail, which is an unbalanced (out-of-distribution) recurrent
+  // state for hybrid models on the next turn.
+  void recordCloseMarkerForReplay(llama_token id);
+
   // ---- End-of-prefill snapshot ----
   //
   // Captures the full sequence state at `pos` when the feature gates
