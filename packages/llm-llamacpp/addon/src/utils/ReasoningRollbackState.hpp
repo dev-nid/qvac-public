@@ -83,7 +83,9 @@ public:
   // Unconditional append used to seed the replay buffer with the close
   // marker token id (and any other tokens that must land in the
   // replayed prefix) before `capturingPostReasoning_` is flipped on.
-  // Skips null token ids; never checks the capture flag.
+  // Skips null token ids; never checks the capture flag. Bumps the
+  // seeded-prefix counter so `clipPostReasoningTokens` cannot drop
+  // structural tokens.
   void appendPostReasoningToken(llama_token id);
   [[nodiscard]] const std::vector<llama_token>&
   postReasoningTokens() const noexcept {
@@ -92,10 +94,19 @@ public:
   [[nodiscard]] size_t postReasoningTokenCount() const noexcept {
     return postReasoningTokens_.size();
   }
-  // Truncate the replay buffer to at most `maxSize` tokens. Used when
-  // the tools-compact tail trim shrinks the live tail between the
-  // close-marker capture and replay.
-  void clipPostReasoningTokens(size_t maxSize);
+  // Number of seeded structural tokens at the head of the replay
+  // buffer (close marker, etc.) that `clipPostReasoningTokens` must
+  // preserve regardless of the live-cache tail size.
+  [[nodiscard]] size_t seededPostReasoningCount() const noexcept {
+    return seededPostReasoningCount_;
+  }
+  // Truncate the replay buffer so the captured suffix holds at most
+  // `maxCapturedTail` tokens. The seeded prefix (close marker + any
+  // other tokens added via `appendPostReasoningToken`) is never
+  // dropped, so passing 0 still preserves the structural prefix.
+  // Used when the tools-compact tail trim shrinks the live tail
+  // between close-marker capture and replay.
+  void clipPostReasoningTokens(size_t maxCapturedTail);
   void clearPostReasoning() noexcept;
 
   // Replays captured tokens through the decoder, attaching them at
@@ -121,6 +132,11 @@ private:
   RecurrentStateSnapshot prefillEntry_;
   RecurrentStateSnapshot reasoningBoundary_;
   std::vector<llama_token> postReasoningTokens_;
+  // Count of structural tokens at the head of `postReasoningTokens_`
+  // that must survive `clipPostReasoningTokens`. Incremented by
+  // `appendPostReasoningToken`; reset to zero whenever the buffer is
+  // cleared.
+  size_t seededPostReasoningCount_ = 0;
   bool capturingPostReasoning_ = false;
 };
 

@@ -26,6 +26,7 @@ TEST(ReasoningRollbackStateAppend, AppendsRegardlessOfCaptureFlag) {
   rollback.appendPostReasoningToken(42);
   rollback.appendPostReasoningToken(7);
   ASSERT_EQ(rollback.postReasoningTokenCount(), 2u);
+  EXPECT_EQ(rollback.seededPostReasoningCount(), 2u);
   EXPECT_EQ(rollback.postReasoningTokens()[0], 42);
   EXPECT_EQ(rollback.postReasoningTokens()[1], 7);
 }
@@ -34,6 +35,7 @@ TEST(ReasoningRollbackStateAppend, SkipsNullToken) {
   ReasoningRollbackState rollback;
   rollback.appendPostReasoningToken(LLAMA_TOKEN_NULL);
   EXPECT_EQ(rollback.postReasoningTokenCount(), 0u);
+  EXPECT_EQ(rollback.seededPostReasoningCount(), 0u);
 }
 
 TEST(ReasoningRollbackStateAppend, PreservesOrderWithCapturedTokens) {
@@ -59,6 +61,94 @@ TEST(ReasoningRollbackStateAppend, ResetClearsBuffer) {
   rollback.appendPostReasoningToken(2);
   ASSERT_EQ(rollback.postReasoningTokenCount(), 2u);
   rollback.reset();
+  EXPECT_EQ(rollback.postReasoningTokenCount(), 0u);
+  EXPECT_EQ(rollback.seededPostReasoningCount(), 0u);
+}
+
+TEST(ReasoningRollbackStateClip, PreservesSeededCloseMarkerWithEmptyCapturedTail) {
+  // `compact()` passes `pos - end` as the captured-tail cap. When no
+  // post-close tokens were sampled (e.g. EOS hit immediately after
+  // `</think>`), that cap is zero. The seeded close marker MUST
+  // survive — dropping it would replay an unbalanced
+  // `<think>\n` + answer-tail recurrent state on the next turn.
+  ReasoningRollbackState rollback;
+  rollback.appendPostReasoningToken(/*closeMarker=*/100);
+  ASSERT_EQ(rollback.seededPostReasoningCount(), 1u);
+
+  rollback.clipPostReasoningTokens(/*maxCapturedTail=*/0);
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 1u);
+  EXPECT_EQ(rollback.postReasoningTokens()[0], 100);
+}
+
+TEST(ReasoningRollbackStateClip, PreservesMultipleSeededStructuralTokens) {
+  // Future callers may seed more than one structural token before
+  // capture flips on. Clipping with an empty live tail must preserve
+  // the entire seeded prefix, not just the first token.
+  ReasoningRollbackState rollback;
+  rollback.appendPostReasoningToken(/*closeMarker=*/100);
+  rollback.appendPostReasoningToken(/*structuralNewline=*/198);
+  rollback.startPostReasoningCapture(true);
+  rollback.recordPostReasoningToken(/*capturedTail=*/2500);
+  ASSERT_EQ(rollback.seededPostReasoningCount(), 2u);
+
+  rollback.clipPostReasoningTokens(/*maxCapturedTail=*/0);
+
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 2u);
+  EXPECT_EQ(rollback.postReasoningTokens()[0], 100);
+  EXPECT_EQ(rollback.postReasoningTokens()[1], 198);
+}
+
+TEST(ReasoningRollbackStateClip, KeepsSeededPrefixAndCapsCapturedTail) {
+  // Replay buffer is [close_marker, t0, t1, t2]. Live cache only has
+  // two post-close tokens left (tools-compact trimmed one). Clip cap
+  // is the captured-tail length (2), not the total. The close marker
+  // stays; only the last captured token is dropped.
+  ReasoningRollbackState rollback;
+  rollback.appendPostReasoningToken(/*closeMarker=*/100);
+  rollback.startPostReasoningCapture(true);
+  rollback.recordPostReasoningToken(/*t0=*/198);
+  rollback.recordPostReasoningToken(/*t1=*/2500);
+  rollback.recordPostReasoningToken(/*t2=*/9999);
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 4u);
+
+  rollback.clipPostReasoningTokens(/*maxCapturedTail=*/2);
+
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 3u);
+  EXPECT_EQ(rollback.postReasoningTokens()[0], 100);
+  EXPECT_EQ(rollback.postReasoningTokens()[1], 198);
+  EXPECT_EQ(rollback.postReasoningTokens()[2], 2500);
+}
+
+TEST(ReasoningRollbackStateClip, ClipsAllCapturedTokensWhenNoSeededPrefix) {
+  // Baseline for the old shape: if the buffer has only captured tail
+  // tokens, cap 0 still means drop everything.
+  ReasoningRollbackState rollback;
+  rollback.startPostReasoningCapture(true);
+  rollback.recordPostReasoningToken(1);
+  rollback.recordPostReasoningToken(2);
+  ASSERT_EQ(rollback.seededPostReasoningCount(), 0u);
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 2u);
+
+  rollback.clipPostReasoningTokens(/*maxCapturedTail=*/0);
+
+  EXPECT_EQ(rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(ReasoningRollbackStateClip, ClearPostReasoningResetsSeededCount) {
+  // Seeded count must follow the buffer lifecycle: a fresh inference
+  // (post-clear) must not see a stale count that would let the next
+  // clip preserve nonexistent tokens.
+  ReasoningRollbackState rollback;
+  rollback.appendPostReasoningToken(100);
+  ASSERT_EQ(rollback.seededPostReasoningCount(), 1u);
+  rollback.clearPostReasoning();
+  EXPECT_EQ(rollback.seededPostReasoningCount(), 0u);
+
+  rollback.startPostReasoningCapture(true);
+  rollback.recordPostReasoningToken(1);
+  rollback.recordPostReasoningToken(2);
+  ASSERT_EQ(rollback.postReasoningTokenCount(), 2u);
+  rollback.clipPostReasoningTokens(/*maxCapturedTail=*/0);
   EXPECT_EQ(rollback.postReasoningTokenCount(), 0u);
 }
 
@@ -139,6 +229,7 @@ TEST(ReasoningBlockCompactorReplaySeed, AppendsWhenAllGatesAndBoundaryPresent) {
 
   fx.compactor.recordCloseMarkerForReplay(/*closeMarker=*/123);
   ASSERT_EQ(fx.rollback.postReasoningTokenCount(), 1u);
+  EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 1u);
   EXPECT_EQ(fx.rollback.postReasoningTokens()[0], 123);
 }
 
@@ -152,4 +243,5 @@ TEST(ReasoningBlockCompactorReplaySeed, SkipsNullCloseMarker) {
 
   fx.compactor.recordCloseMarkerForReplay(LLAMA_TOKEN_NULL);
   EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+  EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 0u);
 }

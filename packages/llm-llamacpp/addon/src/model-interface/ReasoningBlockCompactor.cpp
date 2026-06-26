@@ -204,8 +204,14 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
   // The kept prefix is `[0, snapshot.nPast)`. For forced-open
   // templates, that includes the opener residue documented by the
   // snapshot-at-end-of-prefill strategy.
-  // tools_compact tail trim may have shrunk the live tail since the
-  // post-reasoning tokens were captured, so clamp first.
+  //
+  // `pos - end` is the captured post-reasoning tail length (the live
+  // cache holds tokens at positions `[end, pos)`). The replay buffer
+  // additionally holds a seeded close marker at its head, which
+  // `clipPostReasoningTokens` preserves regardless of the cap; passing
+  // the captured-tail length here drops any captured tokens that the
+  // tools-compact tail trim has since removed from the live cache,
+  // without touching the structural prefix.
   const llama_pos snapshotPos = rollback_.reasoningBoundaryNPast();
   rollback_.clipPostReasoningTokens(static_cast<size_t>(pos - end));
 

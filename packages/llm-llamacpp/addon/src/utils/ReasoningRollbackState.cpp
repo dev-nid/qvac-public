@@ -61,16 +61,19 @@ void ReasoningRollbackState::appendPostReasoningToken(llama_token id) {
     return;
   }
   postReasoningTokens_.push_back(id);
+  ++seededPostReasoningCount_;
 }
 
-void ReasoningRollbackState::clipPostReasoningTokens(size_t maxSize) {
-  if (postReasoningTokens_.size() > maxSize) {
-    postReasoningTokens_.resize(maxSize);
+void ReasoningRollbackState::clipPostReasoningTokens(size_t maxCapturedTail) {
+  const size_t maxTotal = seededPostReasoningCount_ + maxCapturedTail;
+  if (postReasoningTokens_.size() > maxTotal) {
+    postReasoningTokens_.resize(maxTotal);
   }
 }
 
 void ReasoningRollbackState::clearPostReasoning() noexcept {
   postReasoningTokens_.clear();
+  seededPostReasoningCount_ = 0;
   capturingPostReasoning_ = false;
 }
 
@@ -87,6 +90,7 @@ void ReasoningRollbackState::reset() noexcept {
   prefillEntry_.clear();
   reasoningBoundary_.clear();
   postReasoningTokens_.clear();
+  seededPostReasoningCount_ = 0;
   capturingPostReasoning_ = false;
 }
 
