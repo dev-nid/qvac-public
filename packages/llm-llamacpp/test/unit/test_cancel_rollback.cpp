@@ -475,8 +475,7 @@ TEST_F(
 // Newly constructed driver: no snapshot. Guards the initial state — a
 // stray non-empty snapshot here would leak into the first inference's
 // `runtimeStats()` and report zeroed-out counters.
-TEST_F(
-    TextLlmContextCancelTest, FreshDriverReportsNoUserVisiblePerfSnapshot) {
+TEST_F(TextLlmContextCancelTest, FreshDriverReportsNoUserVisiblePerfSnapshot) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -497,8 +496,7 @@ TEST_F(
 // equals the live read; hybrid would freeze BEFORE its replay decode).
 // The override hands the captured value back and clears the slot, so a
 // second `take` returns `nullopt`.
-TEST_F(
-    TextLlmContextCancelTest, CompactThinkSpanCapturesAndTakeIsIdempotent) {
+TEST_F(TextLlmContextCancelTest, CompactThinkSpanCapturesAndTakeIsIdempotent) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -553,7 +551,8 @@ TEST_F(
   // first. The fresh `evalMessageWithTools` must drop the stale value
   // so the next runtimeStats read does not silently surface it.
   std::vector<common_chat_msg> chatMsgs2 = {
-      makeMsg("user", "Hi"), makeMsg("assistant", "Hello"),
+      makeMsg("user", "Hi"),
+      makeMsg("assistant", "Hello"),
       makeMsg("user", "And again")};
   ASSERT_TRUE(driver.evalMessageWithTools(
       chatMsgs2, {}, /*isCacheLoaded=*/false, /*prefill=*/true));

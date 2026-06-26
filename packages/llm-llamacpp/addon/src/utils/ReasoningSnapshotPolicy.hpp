@@ -11,7 +11,7 @@ namespace utils {
     bool needsRecurrentSnapshot, bool removeThinkingFromContext,
     bool reasoningEnabled, bool thinkingForcedOpen) noexcept {
   return needsRecurrentSnapshot && removeThinkingFromContext &&
-      reasoningEnabled && thinkingForcedOpen;
+         reasoningEnabled && thinkingForcedOpen;
 }
 
 } // namespace utils
