@@ -328,14 +328,15 @@ private:
 
   // Delegates to `rollbackState_.recordPostReasoningToken` while the
   // post-reasoning capture phase is active (close marker committed AND
-  // a recurrent snapshot was taken at open). No-op for pure-attention
+  // a recurrent boundary snapshot exists). No-op for pure-attention
   // models.
   void recordPostReasoningTokenIfActive(llama_token tokenId);
 
   // Snapshot the full sequence state at end-of-prefill on memory
-  // modules that don't support partial-tail erasure. Called from
-  // `evalMessageWithTools` after the chunked prefill completes; forced
-  // openers remain as accepted residue in the restored prefix.
+  // modules that don't support partial-tail erasure. No-op unless the
+  // template force-opened reasoning during prefill; generated-opener
+  // recurrent turns are left uncompacted rather than replaying a close
+  // marker against a prefix that never saw the opener.
   void snapshotForRecurrentRollback();
 
   // Cancel-during-generation cleanup. On recurrent / hybrid memory,

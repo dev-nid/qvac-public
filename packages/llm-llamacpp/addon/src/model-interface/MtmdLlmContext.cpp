@@ -19,6 +19,7 @@
 #include "inference-addon-cpp/Logger.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
+#include "utils/ReasoningSnapshotPolicy.hpp"
 #include "utils/RecurrentStateSnapshot.hpp"
 #include "utils/ScopeGuard.hpp"
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1136,11 +1137,20 @@ void MtmdLlmContext::setOpenThinkSpan(llama_pos start) {
 }
 
 void MtmdLlmContext::snapshotForRecurrentRollback() {
+  if (!shouldCaptureRecurrentReasoningBoundary(
+          needsRecurrentSnapshot_,
+          removeThinkingFromContext_,
+          reasoningEnabled_,
+          thinkingForcedOpen_)) {
+    return;
+  }
   // Multimodal prefill decodes chunks (images + text) one at a time
   // via `mtmd_helper_eval_chunk_single`, so the recurrent rollback
   // anchor is the completed prefill state. For forced-open templates
   // this leaves the opener in the restored prefix — a small accepted
-  // residue compared to the reasoning body.
+  // residue compared to the reasoning body. Generated-opener templates
+  // are skipped by the gate above because the completed prefill state
+  // has no matching opener for the replayed close marker.
   compactor_.snapshotAtPrefillBoundary(
       modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
 }

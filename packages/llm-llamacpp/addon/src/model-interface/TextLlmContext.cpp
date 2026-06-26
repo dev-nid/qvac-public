@@ -18,6 +18,7 @@
 #include "inference-addon-cpp/Logger.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
+#include "utils/ReasoningSnapshotPolicy.hpp"
 #include "utils/ReasoningUtils.hpp"
 #include "utils/RecurrentStateSnapshot.hpp"
 #include "utils/ScopeGuard.hpp"
@@ -1098,28 +1099,35 @@ void TextLlmContext::configureReasoningTags(
 
 llama_pos TextLlmContext::computeRecurrentSnapshotBoundary(
     llama_pos prefillLen) const {
-  if (!needsRecurrentSnapshot_ || !removeThinkingFromContext_ ||
-      !reasoningEnabled_) {
+  if (!shouldCaptureRecurrentReasoningBoundary(
+          needsRecurrentSnapshot_,
+          removeThinkingFromContext_,
+          reasoningEnabled_,
+          thinkingForcedOpen_)) {
     return -1;
   }
-  // Snapshot at the END of prefill (after the chat-template-forced
-  // `<think>` opener is decoded into the cache). Rationale: hybrid
-  // SSM models keep their context exclusively in the recurrent hidden
-  // state, and that state needs to look like a structurally valid
-  // assistant turn from the model's training distribution. Snapshotting
-  // BEFORE the forced opener and replaying only the answer makes the
-  // SSM forget reasoning ever happened — Qwen3.5 then enters an
-  // unrecoverable `<think>` loop on the NEXT turn because the chat
-  // template's freshly-injected `<think>\n` arrives in an OOD
-  // recurrent state.
+  // Snapshot at the END of prefill only after the chat template
+  // force-opened `<think>` and decoded that opener into the cache.
+  // Rationale: hybrid SSM models keep their context exclusively in
+  // the recurrent hidden state, and that state needs to look like a
+  // structurally valid assistant turn from the model's training
+  // distribution. Snapshotting BEFORE the forced opener and replaying
+  // only the answer makes the SSM forget reasoning ever happened —
+  // Qwen3.5 then enters an unrecoverable `<think>` loop on the NEXT
+  // turn because the chat template's freshly-injected `<think>\n`
+  // arrives in an OOD recurrent state.
   //
   // Snapshot-at-end-of-prefill keeps the forced opener in the SSM's
   // hidden state (small "opener residue" in the cache after rollback)
   // — a known and accepted cost. The reasoning BODY is still dropped
-  // by the rollback, just not the 1–2 forced-opener tokens. The
-  // `MtmdLlmContext` codepath has always used this strategy; we mirror
-  // it here. Pure-attention models keep the existing `seq_rm` path,
-  // unaffected.
+  // by the rollback, just not the 1–2 forced-opener tokens.
+  //
+  // Generated-opener templates are different: the end-of-prefill
+  // snapshot does not contain `<think>`, so replaying a close marker
+  // after restore would produce `prompt + </think> + answer`. We skip
+  // recurrent compaction for those turns until there is a dedicated
+  // generated-opener strategy. Pure-attention models keep the existing
+  // `seq_rm` path, unaffected.
   const llama_pos boundary = prefillLen;
   // Degenerate templates whose entire prefill IS the forced opener
   // give a boundary of 0; snapshotting at nPast_ == 0 is a valid
@@ -1132,6 +1140,13 @@ llama_pos TextLlmContext::computeRecurrentSnapshotBoundary(
 }
 
 void TextLlmContext::snapshotForRecurrentRollback() {
+  if (!shouldCaptureRecurrentReasoningBoundary(
+          needsRecurrentSnapshot_,
+          removeThinkingFromContext_,
+          reasoningEnabled_,
+          thinkingForcedOpen_)) {
+    return;
+  }
   compactor_.snapshotAtPrefillBoundary(
       modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
 }

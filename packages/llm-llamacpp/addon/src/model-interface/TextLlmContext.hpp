@@ -270,7 +270,7 @@ private:
 
   // Delegates to `rollbackState_.recordPostReasoningToken` when the
   // post-reasoning capture phase is active (close marker committed AND
-  // a recurrent snapshot was taken at open). No-op for pure-attention
+  // a recurrent boundary snapshot exists). No-op for pure-attention
   // models where capture never starts.
   void recordPostReasoningTokenIfActive(llama_token tokenId);
 
@@ -278,22 +278,22 @@ private:
   // pause and snapshot the sequence state for the recurrent rollback
   // path. Returns the sentinel `-1` when no snapshot is needed for
   // this inference (memory module supports shift, feature disabled,
-  // or reasoning channel not recognised). Snapshots at END of prefill
-  // (boundary == `prefillLen`) on hybrid SSM models so the forced
-  // opener stays in the recurrent state and the next turn does not
-  // arrive at an OOD SSM hidden state — see the implementation
-  // comment in `computeRecurrentSnapshotBoundary` for the full
-  // rationale. The reasoning body is still dropped by rollback; only
-  // the 1–2 forced-opener tokens remain as accepted residue.
+  // reasoning channel not recognised, or the template did not
+  // force-open reasoning during prefill). Snapshots at END of prefill
+  // (boundary == `prefillLen`) only when the forced opener is already
+  // in the cache, so the restored recurrent state stays structurally
+  // balanced after replay.
   [[nodiscard]] llama_pos computeRecurrentSnapshotBoundary(
       llama_pos prefillLen) const;
 
   // Takes a full-state snapshot of `seqId_` at the current `nPast_`
-  // and stores it in `rollbackState_`. Called from the prefill loop
-  // once exactly the prompt body has been decoded. On failure logs
-  // and increments the `thinkingCompactionFailed` runtime stat,
-  // leaving the snapshot empty so `compactThinkSpan` becomes a no-op
-  // for this turn (the answer is still delivered).
+  // and stores it in `rollbackState_`. No-op unless the template
+  // force-opened reasoning during prefill; generated-opener recurrent
+  // turns are left uncompacted rather than replaying a close marker
+  // against a prefix that never saw the opener. On failure logs and
+  // increments the `thinkingCompactionFailed` runtime stat, leaving
+  // the snapshot empty so `compactThinkSpan` becomes a no-op for this
+  // turn (the answer is still delivered).
   void snapshotForRecurrentRollback();
 
   ToolsCompactController& tools_;

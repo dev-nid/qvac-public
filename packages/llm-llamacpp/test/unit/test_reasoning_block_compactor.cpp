@@ -6,9 +6,12 @@
 #include "model-interface/ReasoningBlockCompactor.hpp"
 #include "model-interface/ToolsCompactController.hpp"
 #include "utils/ReasoningRollbackState.hpp"
+#include "utils/ReasoningSnapshotPolicy.hpp"
 
 using qvac_lib_inference_addon_llama::ReasoningBlockCompactor;
 using qvac_lib_inference_addon_llama::utils::ReasoningRollbackState;
+using qvac_lib_inference_addon_llama::utils::
+    shouldCaptureRecurrentReasoningBoundary;
 
 // Unit coverage for the hybrid / recurrent close-marker replay seam.
 //
@@ -19,6 +22,43 @@ using qvac_lib_inference_addon_llama::utils::ReasoningRollbackState;
 //   1. the unconditional append primitive (`appendPostReasoningToken`),
 //   2. the compactor wrapper (`recordCloseMarkerForReplay`) feature gates,
 //   3. the success path against a seeded boundary snapshot.
+
+TEST(ReasoningSnapshotPolicy, CapturesOnlyForForcedOpenRecurrentReasoning) {
+  EXPECT_TRUE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/true,
+      /*removeThinkingFromContext=*/true,
+      /*reasoningEnabled=*/true,
+      /*thinkingForcedOpen=*/true));
+}
+
+TEST(ReasoningSnapshotPolicy, SkipsGeneratedOpenRecurrentReasoning) {
+  // Generated-opener recurrent turns cannot use an end-of-prefill
+  // snapshot: the restored prefix would not contain `<think>`, so
+  // replaying `</think>` would poison the next recurrent state.
+  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/true,
+      /*removeThinkingFromContext=*/true,
+      /*reasoningEnabled=*/true,
+      /*thinkingForcedOpen=*/false));
+}
+
+TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
+  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/false,
+      /*removeThinkingFromContext=*/true,
+      /*reasoningEnabled=*/true,
+      /*thinkingForcedOpen=*/true));
+  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/true,
+      /*removeThinkingFromContext=*/false,
+      /*reasoningEnabled=*/true,
+      /*thinkingForcedOpen=*/true));
+  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/true,
+      /*removeThinkingFromContext=*/true,
+      /*reasoningEnabled=*/false,
+      /*thinkingForcedOpen=*/true));
+}
 
 TEST(ReasoningRollbackStateAppend, AppendsRegardlessOfCaptureFlag) {
   ReasoningRollbackState rollback;
