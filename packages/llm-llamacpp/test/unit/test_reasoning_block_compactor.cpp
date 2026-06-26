@@ -65,7 +65,9 @@ TEST(ReasoningRollbackStateAppend, ResetClearsBuffer) {
   EXPECT_EQ(rollback.seededPostReasoningCount(), 0u);
 }
 
-TEST(ReasoningRollbackStateClip, PreservesSeededCloseMarkerWithEmptyCapturedTail) {
+TEST(
+    ReasoningRollbackStateClip,
+    PreservesSeededCloseMarkerWithEmptyCapturedTail) {
   // `compact()` passes `pos - end` as the captured-tail cap. When no
   // post-close tokens were sampled (e.g. EOS hit immediately after
   // `</think>`), that cap is zero. The seeded close marker MUST
