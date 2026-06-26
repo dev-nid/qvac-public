@@ -45,8 +45,7 @@ TextLlmContext::TextLlmContext(
     common_params& commonParams, common_init_result_ptr llamaInit,
     ToolsCompactController& tools)
     : tools_(tools), llamaInit_(std::move(llamaInit)), params_(commonParams),
-      compactor_(rollbackState_, tools_),
-      shifter_(compactor_, rollbackState_) {
+      compactor_(rollbackState_, tools_), shifter_(compactor_, rollbackState_) {
   modelCtx_.model = llamaInit_->model();
   modelCtx_.lctx = llamaInit_->context();
   initializeCommonState();
@@ -719,8 +718,13 @@ void TextLlmContext::emitOutputPiece(
 
 llama_pos TextLlmContext::applyContextDiscard() {
   const auto outcome = shifter_.applyGenerationDiscard(
-      modelCtx_.lctx, seqId_, nPast_, firstMsgTokens_, ctxCeiling(),
-      /*cacheTokens=*/-1, "[TextLlm]");
+      modelCtx_.lctx,
+      seqId_,
+      nPast_,
+      firstMsgTokens_,
+      ctxCeiling(),
+      /*cacheTokens=*/-1,
+      "[TextLlm]");
   if (outcome.kind == ContextShifter::Outcome::Kind::Slid) {
     nPast_ = outcome.newPos;
     return outcome.discarded;

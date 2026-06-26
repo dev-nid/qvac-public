@@ -78,7 +78,9 @@ void ReasoningBlockCompactor::snapshotAtPrefillBoundary(
         string_format(
             "%s thinking-block compaction skipped: failed to snapshot "
             "sequence state at prefill boundary (pos=%d, seqId=%d)\n",
-            labelTag, pos, seqId));
+            labelTag,
+            pos,
+            seqId));
     ++thinkingCompactionFailed_;
   }
 }
@@ -135,7 +137,11 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
             "%s thinking-block compaction skipped: recurrent / hybrid "
             "model has no boundary snapshot (start=%d, end=%d, pos=%d, "
             "seqId=%d)\n",
-            labelTag, start, end, pos, seqId));
+            labelTag,
+            start,
+            end,
+            pos,
+            seqId));
     return out;
   }
 
@@ -246,8 +252,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     return out;
   }
 
-  const llama_pos newPos =
-      snapshotPos + static_cast<llama_pos>(replayCount);
+  const llama_pos newPos = snapshotPos + static_cast<llama_pos>(replayCount);
   out.kind = Outcome::Kind::CompactedRecurrent;
   out.newPos = newPos;
   out.discarded = pos - newPos;

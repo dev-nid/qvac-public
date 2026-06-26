@@ -416,8 +416,7 @@ private:
   // snapshot (compaction + cancel during generation), and the
   // post-reasoning token replay buffer. Inactive on pure-attention
   // models.
-  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState
-      rollbackState_;
+  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState rollbackState_;
   // Reasoning-block tracker + compactor: owns the `<think>...</think>`
   // span, close-capture flag, and the pure-attention + recurrent
   // compaction paths plus their stats counters.

@@ -42,8 +42,7 @@ MtmdLlmContext::MtmdLlmContext(
     common_params& commonParams, common_init_result_ptr llamaInit,
     ToolsCompactController& tools)
     : tools_(tools), llamaInit_(std::move(llamaInit)), params_(commonParams),
-      compactor_(rollbackState_, tools_),
-      shifter_(compactor_, rollbackState_) {
+      compactor_(rollbackState_, tools_), shifter_(compactor_, rollbackState_) {
   modelCtx_.model = llamaInit_->model();
   modelCtx_.lctx = llamaInit_->context();
   initializeCommonState();
@@ -716,8 +715,13 @@ void MtmdLlmContext::refreshCurrentCacheTokensFromMemory() {
 
 void MtmdLlmContext::applyContextDiscard() {
   const auto outcome = shifter_.applyGenerationDiscard(
-      modelCtx_.lctx, seqId_, current_.pos, protectedPrefix_.pos,
-      /*effectiveCtx=*/-1, current_.cacheTokens, "[MtmdLlm]");
+      modelCtx_.lctx,
+      seqId_,
+      current_.pos,
+      protectedPrefix_.pos,
+      /*effectiveCtx=*/-1,
+      current_.cacheTokens,
+      "[MtmdLlm]");
   if (outcome.kind == ContextShifter::Outcome::Kind::Slid) {
     current_.pos = outcome.newPos;
     refreshCurrentCacheTokensFromMemory();
@@ -1189,9 +1193,8 @@ void MtmdLlmContext::compactThinkSpan() {
   if ((outcome.kind == OutcomeKind::CompactedAttention ||
        outcome.kind == OutcomeKind::CompactedRecurrent) &&
       outcome.keptPrefixEnd < protectedPrefix_.pos) {
-    const llama_pos removedProtectedTokens =
-        std::min(outcome.discarded,
-                 protectedPrefix_.pos - outcome.keptPrefixEnd);
+    const llama_pos removedProtectedTokens = std::min(
+        outcome.discarded, protectedPrefix_.pos - outcome.keptPrefixEnd);
     protectedPrefix_.pos = outcome.keptPrefixEnd;
     protectedPrefix_.cacheTokens -= removedProtectedTokens;
   }

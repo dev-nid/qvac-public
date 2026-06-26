@@ -25,8 +25,8 @@ ContextShifter::ContextShifter(
 
 ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
     ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
-    llama_pos protectedPrefixPos, llama_pos effectiveCtx,
-    llama_pos cacheTokens, const char* labelTag) {
+    llama_pos protectedPrefixPos, llama_pos effectiveCtx, llama_pos cacheTokens,
+    const char* labelTag) {
   // Slide notification is routed through the compactor's tools
   // controller so we keep a single tools reference per inference.
   auto outcome = trySlideGeneration(
@@ -58,8 +58,7 @@ ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
             "%s discarded %d tokens after the first message\n",
             labelTag,
             outcome.discarded));
-  } else if (
-      outcome.kind == ContextSlideOutcome::Kind::MemoryOperationFailed) {
+  } else if (outcome.kind == ContextSlideOutcome::Kind::MemoryOperationFailed) {
     std::string errorMsg = string_format(
         "%s failed to slide context memory during generation "
         "(nPast=%d, nDiscarded=%d)\n",

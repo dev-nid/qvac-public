@@ -362,8 +362,7 @@ private:
   // post-reasoning token replay buffer. Always empty / inactive on
   // pure-attention models, where compaction is just `seq_rm + seq_add`
   // on the attention KV.
-  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState
-      rollbackState_;
+  qvac_lib_inference_addon_llama::utils::ReasoningRollbackState rollbackState_;
   // Reasoning-block tracker + compactor: owns the `<think>...</think>`
   // span, close-capture flag, and the pure-attention + recurrent
   // compaction paths plus their stats counters.

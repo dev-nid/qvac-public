@@ -789,10 +789,9 @@ TEST_F(
   // needs to fire.
   auto makeOptInPrompt = []() {
     LlamaModel::Prompt p;
-    p.input =
-        R"([{"role":"system","content":"You are an AI assistant. )"
-        R"(Always provide a clear answer after thinking"},)"
-        R"({"role":"user","content":"what are you thinking"}])";
+    p.input = R"([{"role":"system","content":"You are an AI assistant. )"
+              R"(Always provide a clear answer after thinking"},)"
+              R"({"role":"user","content":"what are you thinking"}])";
     p.generationParams.remove_thinking_from_context = true;
     return p;
   };
