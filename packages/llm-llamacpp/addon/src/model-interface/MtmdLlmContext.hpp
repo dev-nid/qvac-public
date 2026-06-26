@@ -191,6 +191,9 @@ public:
   [[nodiscard]] int32_t getThinkingCompactionFailed() const override;
   void resetThinkingCompactionFailed() override;
 
+  [[nodiscard]] std::optional<llama_perf_context_data>
+  takeUserVisiblePerfSnapshot() override;
+
   /**
    * The load media method. It loads the media from memory buffer.
    *
@@ -425,6 +428,15 @@ private:
   // Context-window slider: owns `nDiscarded`, `nSlides`, and clears
   // post-slide-invalidated state on the compactor and rollback owners.
   qvac_lib_inference_addon_llama::ContextShifter shifter_;
+
+  // Snapshot of `llama_perf_context()` taken at the start of
+  // `compactThinkSpan` — i.e. right after user-visible generation
+  // completes and before any recurrent replay decode runs. Consumed by
+  // `runtimeStats()` via `takeUserVisiblePerfSnapshot()` so the replay's
+  // `llama_decode` calls (which accumulate into `n_p_eval` /
+  // `t_p_eval_ms`) do not inflate user-facing prompt / TTFT / ppTPS.
+  // Reset at the start of each inference and on `resetState`.
+  std::optional<llama_perf_context_data> userVisiblePerf_;
 
   std::atomic<bool> stopGeneration_ = false;
 };

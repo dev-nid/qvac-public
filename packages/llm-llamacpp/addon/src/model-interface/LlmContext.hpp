@@ -347,6 +347,30 @@ public:
   virtual void resetThinkingCompactionFailed() {}
 
   /**
+   * Consume the per-inference user-visible `llama_perf_context` snapshot
+   * if one was captured (currently only by contexts that may run a
+   * recurrent replay decode during thinking-block compaction). Returns
+   * `std::nullopt` when no snapshot was taken, in which case the caller
+   * should fall back to a live `llama_perf_context()` read.
+   *
+   * Snapshot rationale: the recurrent / hybrid thinking-block compactor
+   * replays the post-reasoning tail through `llama_decode`, which
+   * accumulates into `n_p_eval` / `t_p_eval_ms` (and therefore inflates
+   * `promptTokens`, `ppTPS`, and `TTFT`). Those tokens were already
+   * delivered to the caller, so the replay must not be counted as new
+   * user-visible work. Capturing perf just before the replay, and
+   * reporting that snapshot from `runtimeStats()`, preserves accurate
+   * stats while still letting the replay update the cache state.
+   *
+   * Idempotent: returning the snapshot also clears the internal slot so
+   * subsequent calls (until the next inference) see `nullopt`.
+   */
+  [[nodiscard]] virtual std::optional<llama_perf_context_data>
+  takeUserVisiblePerfSnapshot() {
+    return std::nullopt;
+  }
+
+  /**
    * Wall-clock milliseconds spent in the vision encoder (mtmd/CLIP ViT
    * forward + projection) during the most recent inference. 0 for
    * text-only contexts, which never run a vision encoder.

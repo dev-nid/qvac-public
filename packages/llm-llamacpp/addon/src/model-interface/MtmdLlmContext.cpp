@@ -457,6 +457,12 @@ bool MtmdLlmContext::evalMessageWithTools(
   // `!empty()` early-return.
   rollbackState_.reset();
 
+  // Drop any stale user-visible perf snapshot from a prior turn so this
+  // inference's `runtimeStats()` read sees either the new snapshot
+  // (captured by `compactThinkSpan` before its potential replay decode)
+  // or a live `llama_perf_context()` value — never a stale one.
+  userVisiblePerf_.reset();
+
   mtmd::input_chunks chunks(mtmd_input_chunks_init());
 
   tokenizeChat(chatMsgs, tools, chunks, isCacheLoaded);
@@ -1086,6 +1092,13 @@ void MtmdLlmContext::resetThinkingCompactionFailed() {
   compactor_.resetCompactionFailed();
 }
 
+std::optional<llama_perf_context_data>
+MtmdLlmContext::takeUserVisiblePerfSnapshot() {
+  auto snapshot = userVisiblePerf_;
+  userVisiblePerf_.reset();
+  return snapshot;
+}
+
 void MtmdLlmContext::configureReasoningTags(
     const std::string& thinkingStartTag, const std::string& thinkingEndTag,
     const std::string& forcedOpenText) {
@@ -1167,6 +1180,18 @@ void MtmdLlmContext::recordPostReasoningTokenIfActive(llama_token tokenId) {
 }
 
 void MtmdLlmContext::compactThinkSpan() {
+  // Freeze the user-visible perf counters before the compactor's
+  // recurrent path runs `restore + llama_decode` to replay the post-
+  // reasoning tail. Those replay decodes accumulate into `n_p_eval` /
+  // `t_p_eval_ms`, which would otherwise inflate prompt / TTFT / ppTPS
+  // in `runtimeStats()` even though the tokens were already delivered
+  // to the caller. Captured unconditionally (pure-attention has no
+  // decode, so the snapshot is a no-cost stand-in for the live read)
+  // and only when not already set, so a re-entrant call within the
+  // same inference does not overwrite the original cutoff.
+  if (!userVisiblePerf_.has_value()) {
+    userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
+  }
   const auto outcome =
       compactor_.compact(modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
   using OutcomeKind = ReasoningBlockCompactor::Outcome::Kind;
@@ -1297,6 +1322,7 @@ void MtmdLlmContext::resetState(bool resetStats) {
 
   compactor_.reset();
   rollbackState_.reset();
+  userVisiblePerf_.reset();
 
   // Clear UTF-8 buffer when resetting state
   utf8Buffer_.clear();

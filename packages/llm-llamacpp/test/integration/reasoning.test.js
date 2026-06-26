@@ -643,3 +643,83 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
   t.ok(/madrid/i.test(t2.response),
     'turn 2 should answer "capital of Spain" with Madrid (proves the SSM did not degenerate)')
 })
+
+// `runtimeStats()` reports a per-inference user-visible perf snapshot
+// captured at the start of `compactThinkSpan`. On hybrid SSM models
+// the compactor then runs `restore + llama_decode` to replay the post-
+// reasoning tail through the SSM; without the snapshot, those replay
+// decodes accumulate into `n_p_eval` / `t_p_eval_ms` and inflate
+// user-facing `promptTokens` (and `ppTPS` / `TTFT`) by the replay
+// length. This regression test pins the contract by running the same
+// prompt + seed twice on Qwen3.5 with compaction toggled. Both runs
+// share the same prefill, so a non-inflated `promptTokens` must match
+// to within the noise floor introduced by per-instance load
+// determinism — the `=false` baseline gives the true prefill count
+// without any replay path. Without the snapshot the `=true` run is
+// strictly larger; with the snapshot the two runs report the same
+// `promptTokens`.
+safeTest('Qwen3.5 remove_thinking_from_context does not inflate runtime perf stats', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 1_800_000
+}, async t => {
+  const [modelName, dirPath] = await ensureModel({
+    modelName: QWEN35_MODEL.name,
+    downloadUrl: QWEN35_MODEL.url
+  })
+  const modelPath = path.join(dirPath, modelName)
+
+  const baseConfig = {
+    device: useCpu ? 'cpu' : 'gpu',
+    gpu_layers: '999',
+    seed: '50',
+    temp: '0',
+    top_p: '1',
+    verbosity: '2',
+    ...QWEN35_REASONING_CONFIG
+  }
+
+  async function runOnce (removeThinking) {
+    const inference = new LlmLlamacpp({
+      files: { model: [modelPath] },
+      config: baseConfig,
+      logger: console,
+      opts: { stats: true }
+    })
+    try {
+      await inference.load()
+      const messages = createInitialMessages()
+      const { stats } = await runCompletionWithStats(
+        inference,
+        messages,
+        { generationParams: { remove_thinking_from_context: removeThinking } }
+      )
+      return stats
+    } finally {
+      await inference.unload().catch(() => {})
+    }
+  }
+
+  // Baseline first: compaction off, no replay decode, perf counters
+  // reflect a clean prefill.
+  const off = await runOnce(false)
+  t.comment(`compaction=off stats: ${JSON.stringify(off)}`)
+
+  // Then with compaction on. Same prompt + seed + cfg, so the prefill
+  // token count is byte-for-byte identical. The only difference is
+  // that the hybrid replay decode runs after generation.
+  const on = await runOnce(true)
+  t.comment(`compaction=on  stats: ${JSON.stringify(on)}`)
+
+  t.is(toNumber(on.thinkingCompactionFailed), 0,
+    'compaction-on run must not fail (otherwise the snapshot-and-replay path was not exercised)')
+  t.ok(toNumber(on.thinkingBlockDiscards) >= 1,
+    'compaction-on run must actually drop a reasoning block (otherwise no replay decode ran)')
+
+  // The contract: `promptTokens` reflects the user-visible prefill,
+  // NOT the prefill plus the replayed post-reasoning tail. With the
+  // snapshot fix the two runs match; without it the compaction-on run
+  // is strictly larger by the replay length.
+  t.is(toNumber(on.promptTokens), toNumber(off.promptTokens),
+    `promptTokens must match between compaction on/off (on=${on.promptTokens}, off=${off.promptTokens}); ` +
+    'a larger on-value means the recurrent replay decode was counted as user-visible prompt work')
+})

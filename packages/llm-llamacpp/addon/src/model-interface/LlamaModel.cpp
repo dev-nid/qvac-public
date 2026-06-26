@@ -957,7 +957,16 @@ LlamaModel::batchRuntimeStatsLocked() const {
 
 qvac_lib_inference_addon_cpp::RuntimeStats
 LlamaModel::singleRuntimeStatsLocked() const {
-  auto perfData = llama_perf_context(state_->llmContext_->getCtx());
+  // Prefer the per-inference snapshot taken at the start of
+  // `compactThinkSpan`. That snapshot is the user-visible cutoff, BEFORE
+  // any recurrent replay decode rolled extra `llama_decode` calls into
+  // `n_p_eval` / `t_p_eval_ms`. When no snapshot exists (pure-attention
+  // models, prefill-only requests, or `runtimeStats()` called between
+  // turns) we fall back to a live `llama_perf_context()` read — same as
+  // the legacy behaviour.
+  auto snapshot = state_->llmContext_->takeUserVisiblePerfSnapshot();
+  auto perfData =
+      snapshot.value_or(llama_perf_context(state_->llmContext_->getCtx()));
   constexpr double kMillisInSecond = 1000.0;
   const bool wasPrefill = state_->lastRun_.wasPrefill;
   const double timeToFirstToken = wasPrefill ? 0.0 : perfData.t_p_eval_ms;
