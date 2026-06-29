@@ -786,6 +786,66 @@ TEST_F(CacheManagementTest, SwitchAfterCacheDirectoryDeletedUsesNewKey) {
 
   EXPECT_TRUE(fs::exists(session2_path));
   EXPECT_FALSE(fs::exists(deleted_cache_dir));
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What did I just ask about? Answer shortly."}])",
+        session2_path,
+        true);
+  });
+
+  auto stats = model->runtimeStats();
+  EXPECT_GT(getStatValue(stats, "CacheTokens"), 0.0);
+}
+
+TEST_F(CacheManagementTest, SameKeyAfterCacheFileDeletedStartsFresh) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  const fs::path deleted_cache_dir = "deleted_cache_dir";
+  const std::string deleted_cache_path =
+      (deleted_cache_dir / "session.bin").string();
+
+  fs::remove_all(deleted_cache_dir);
+  fs::create_directories(deleted_cache_dir);
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "Explain bitcoin, ethereum, and blockchain in three concise bullet points."}])",
+        deleted_cache_path,
+        true);
+  });
+
+  auto* mem = llama_get_memory(model->getContext());
+  ASSERT_NE(mem, nullptr);
+  const llama_pos firstNPast = llama_memory_seq_pos_max(mem, 0) + 1;
+  ASSERT_GT(firstNPast, 0);
+  EXPECT_TRUE(fs::exists(deleted_cache_path));
+
+  fs::remove_all(deleted_cache_dir);
+  fs::create_directories(deleted_cache_dir);
+
+  LlamaModel::Prompt prompt;
+  prompt.prefill = true;
+  prompt.input = R"([{"role": "user", "content": "Hi."}])";
+  prompt.cacheKey = deleted_cache_path;
+  prompt.saveCacheToDisk = true;
+
+  EXPECT_NO_THROW({ model->processPrompt(prompt); });
+
+  const llama_pos secondNPast = llama_memory_seq_pos_max(mem, 0) + 1;
+  EXPECT_GT(secondNPast, 0);
+  EXPECT_LT(secondNPast, firstNPast)
+      << "same-key reuse after cache deletion kept stale in-memory KV state";
+  EXPECT_TRUE(fs::exists(deleted_cache_path));
 }
 
 TEST_F(CacheManagementTest, ClearAfterCacheDirectoryDeletedDisablesCache) {

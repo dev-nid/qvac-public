@@ -114,6 +114,7 @@ If a cache write fails (e.g. the disk is full, the path is unwritable, or `llama
 
 - On the **explicit-save** path (`saveCacheToDisk: true`): the error propagates from `model.run()`. The in-memory KV state is still valid; the caller can retry or continue without saving.
 - On the **cache-switch** and **cache-clear** paths (automatic flush on key change or `cacheKey` omission): the error propagates from `model.run()` and the cache is left disabled. Subsequent calls without a `cacheKey` will proceed without attempting the flush again.
+- If the active cache's backing file or parent directory was externally removed before a switch, clear, or same-key reuse, the stale in-memory cache is discarded and the next request starts from a fresh context instead of throwing `UnableToSaveSessionFile`.
 
 ## Cache token count
 

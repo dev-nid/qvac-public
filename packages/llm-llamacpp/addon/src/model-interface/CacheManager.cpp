@@ -92,16 +92,19 @@ bool CacheManager::handleCache(
               __func__,
               sessionPath_.c_str()));
       saveActiveCacheForTransition();
-      sessionPath_.clear();
-      cacheDisabled_ = true;
+      invalidate();
     }
     cacheUsedInLastPrompt_ = false;
     return false;
   }
 
   if (!cacheDisabled_ && sessionPath_ == cacheKey) {
-    cacheUsedInLastPrompt_ = true;
-    return false;
+    if (discardActiveCacheIfBackingStoreMissing()) {
+      cacheUsedInLastPrompt_ = false;
+    } else {
+      cacheUsedInLastPrompt_ = true;
+      return false;
+    }
   }
 
   if (hasActiveCache() && sessionPath_ != cacheKey) {
@@ -129,6 +132,7 @@ bool CacheManager::handleCache(
 
   try {
     bool loaded = loadCache();
+    activeCacheSavedToDisk_ = loaded;
     if (!loaded) {
       resetStateCallback_(true);
     }
@@ -269,10 +273,11 @@ void CacheManager::saveCache() {
         ADDON_ID, toString(InvalidInputFormat), errorMsg);
   }
   writeCacheFile(sessionPath_);
+  activeCacheSavedToDisk_ = true;
 }
 
 void CacheManager::saveActiveCacheForTransition() {
-  if (discardActiveCacheIfParentMissing()) {
+  if (discardActiveCacheIfBackingStoreMissing()) {
     return;
   }
 
@@ -280,7 +285,7 @@ void CacheManager::saveActiveCacheForTransition() {
     saveCache();
     resetStateCallback_(true);
   } catch (...) {
-    if (discardActiveCacheIfParentMissing()) {
+    if (discardActiveCacheIfBackingStoreMissing()) {
       return;
     }
     resetStateCallback_(true);
@@ -289,8 +294,14 @@ void CacheManager::saveActiveCacheForTransition() {
   }
 }
 
-bool CacheManager::discardActiveCacheIfParentMissing() {
-  if (!hasActiveCache() || !isParentDirectoryMissing(sessionPath_)) {
+bool CacheManager::discardActiveCacheIfBackingStoreMissing() {
+  if (!hasActiveCache()) {
+    return false;
+  }
+  const bool parentMissing = isParentDirectoryMissing(sessionPath_);
+  const bool persistedFileMissing =
+      activeCacheSavedToDisk_ && !isFileInitialized(sessionPath_);
+  if (!parentMissing && !persistedFileMissing) {
     return false;
   }
 
@@ -379,6 +390,7 @@ void CacheManager::invalidate() {
   sessionPath_.clear();
   cacheDisabled_ = true;
   cacheUsedInLastPrompt_ = false;
+  activeCacheSavedToDisk_ = false;
 }
 
 bool CacheManager::isCacheDisabled() const { return cacheDisabled_; }

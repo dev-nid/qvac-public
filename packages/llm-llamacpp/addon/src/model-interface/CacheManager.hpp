@@ -37,7 +37,7 @@ public:
 
 private:
   void saveActiveCacheForTransition();
-  bool discardActiveCacheIfParentMissing();
+  bool discardActiveCacheIfBackingStoreMissing();
   void writeCacheFile(const std::string& path);
   static void atomicPromoteFile(const std::string& from, const std::string& to);
   static bool isFileInitialized(const std::filesystem::path& path);
@@ -49,4 +49,5 @@ private:
   std::string sessionPath_;
   bool cacheDisabled_ = true;
   bool cacheUsedInLastPrompt_ = false;
+  bool activeCacheSavedToDisk_ = false;
 };
