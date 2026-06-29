@@ -776,7 +776,6 @@ bool ContinuousBatchScheduler::stepLocked(std::unique_lock<std::mutex>* lock) {
   }
 
   drainFinishedLocked();
-
   return true;
 }
 
@@ -1129,8 +1128,8 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
     // by this request — internal rollback maintenance must not deflate
     // it, mirroring the `prefillTimeMs` cutoff applied to `TTFT`.
     nPast = slot.peakNPastAtFinalize.has_value()
-        ? *slot.peakNPastAtFinalize
-        : static_cast<int64_t>(slot.driver->getNPast());
+                ? *slot.peakNPastAtFinalize
+                : static_cast<int64_t>(slot.driver->getNPast());
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =
         static_cast<int64_t>(slot.driver->getThinkingBlockDiscards());

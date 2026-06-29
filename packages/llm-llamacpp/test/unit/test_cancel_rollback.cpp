@@ -397,9 +397,7 @@ TEST_F(
 // snapshot is reserved for normal thinking-block compaction and must
 // NOT be used for cancel. Successful restore must keep
 // `thinkingCompactionFailed` at zero.
-TEST_F(
-    TextLlmContextCancelTest,
-    OnCancelRestoresPreRequestSnapshotOnHybrid) {
+TEST_F(TextLlmContextCancelTest, OnCancelRestoresPreRequestSnapshotOnHybrid) {
   auto model = loadTextModel(qwen35HybridModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3.5 hybrid model not found";
