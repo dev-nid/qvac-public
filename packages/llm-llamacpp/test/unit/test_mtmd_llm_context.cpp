@@ -458,9 +458,7 @@ TEST_F(
 // Companion JS coverage lives in `gemma4.test.js` (pure-attention
 // multimodal); this is the hybrid-multimodal C++ counterpart called out by
 // the reviewer.
-TEST_F(
-    MtmdLlmContextTest,
-    Qwen35MultimodalHonoursRemoveThinkingFromContext) {
+TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
   if (!hasValidQwen35Model()) {
     GTEST_SKIP() << "Qwen3.5 multimodal model or projection file not found";
   }
@@ -522,8 +520,7 @@ TEST_F(
   // shape, not a compaction bug. Skip the discard assertion in that case
   // so the test does not become flaky on prompt-dependent behaviour
   // (mirrors gemma4.test.js's reasoning-channel detection).
-  const bool reasoningClosed =
-      output.find("</think>") != std::string::npos;
+  const bool reasoningClosed = output.find("</think>") != std::string::npos;
   if (!reasoningClosed) {
     GTEST_SKIP() << "Qwen3.5 multimodal did not close </think> within "
                     "n_predict=1024 — discard assertion skipped "

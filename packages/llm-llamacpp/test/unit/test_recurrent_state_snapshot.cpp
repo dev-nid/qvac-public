@@ -146,8 +146,7 @@ TEST(RecurrentStateSnapshotTest, MoveConstructTransfersFileOwnership) {
   EXPECT_FALSE(dst.empty());
   EXPECT_EQ(dst.nPast, 7);
   EXPECT_EQ(dst.filePath(), tmp.string());
-  EXPECT_TRUE(fs::exists(tmp))
-      << "move must not delete the underlying file";
+  EXPECT_TRUE(fs::exists(tmp)) << "move must not delete the underlying file";
 
   dst.clear();
   EXPECT_FALSE(fs::exists(tmp));
@@ -199,8 +198,7 @@ TEST(RecurrentStateSnapshotTest, SnapshotOnNullCtxFails) {
 TEST(RecurrentStateSnapshotTest, RestoreOnNullCtxFails) {
   RecurrentStateSnapshot snap;
   snap.seedForTesting("dummy_nonexistent_path.bin", /*nPastAt=*/0);
-  EXPECT_FALSE(
-      restoreRecurrentState(/*lctx=*/nullptr, /*seqId=*/0, snap));
+  EXPECT_FALSE(restoreRecurrentState(/*lctx=*/nullptr, /*seqId=*/0, snap));
 }
 
 TEST(
@@ -210,8 +208,7 @@ TEST(
   // empty-shortcut path because the ctx check guards first); this is
   // the documented contract — programming errors are surfaced.
   RecurrentStateSnapshot snap;
-  EXPECT_FALSE(
-      restoreRecurrentState(/*lctx=*/nullptr, /*seqId=*/0, snap));
+  EXPECT_FALSE(restoreRecurrentState(/*lctx=*/nullptr, /*seqId=*/0, snap));
 }
 
 TEST(RecurrentStateSnapshotTest, ReplayEmptyTokensIsNoOpEvenWithNullCtx) {

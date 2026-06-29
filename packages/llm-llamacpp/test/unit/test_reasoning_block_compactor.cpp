@@ -391,7 +391,8 @@ TEST(
       fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
 
   EXPECT_EQ(
-      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedRecurrentRestore);
+      outcome.kind,
+      ReasoningBlockCompactor::Outcome::Kind::FailedRecurrentRestore);
 
   // Retained-state contract: snap to the snapshot anchor so the caller
   // can resume from a known prefix even though the underlying state is
@@ -441,8 +442,8 @@ TEST(
     // No requestCloseCapture / onCloseCommitted -> end stays -1.
     ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
 
-    const auto outcome =
-        fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+    const auto outcome = fx.compactor.compact(
+        /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
     EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
     EXPECT_EQ(fx.compactor.compactionFailed(), 0);
   }
@@ -458,8 +459,8 @@ TEST(
     fx.compactor.requestCloseCapture();
     fx.compactor.onCloseCommitted(/*pos=*/20);
 
-    const auto outcome =
-        fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+    const auto outcome = fx.compactor.compact(
+        /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
     EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
     EXPECT_EQ(fx.compactor.compactionFailed(), 0);
   }

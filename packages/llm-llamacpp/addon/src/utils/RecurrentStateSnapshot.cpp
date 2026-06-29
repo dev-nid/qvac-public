@@ -46,10 +46,10 @@ std::string makeUniqueSnapshotPath(llama_seq_id seqId) {
     // cleaned up on destruct / clear.
     base = ".";
   }
-  const std::string filename =
-      "qvac_llamacpp_seq_" + std::to_string(currentProcessId()) + "_" +
-      std::to_string(static_cast<int>(seqId)) + "_" + std::to_string(id) +
-      ".bin";
+  const std::string filename = "qvac_llamacpp_seq_" +
+                               std::to_string(currentProcessId()) + "_" +
+                               std::to_string(static_cast<int>(seqId)) + "_" +
+                               std::to_string(id) + ".bin";
   return (base / filename).string();
 }
 
@@ -74,8 +74,7 @@ RecurrentStateSnapshot::~RecurrentStateSnapshot() {
 
 RecurrentStateSnapshot::RecurrentStateSnapshot(
     RecurrentStateSnapshot&& other) noexcept
-    : nPast(other.nPast),
-      filePath_(std::move(other.filePath_)),
+    : nPast(other.nPast), filePath_(std::move(other.filePath_)),
       captured_(other.captured_) {
   other.filePath_.clear();
   other.nPast = 0;
@@ -163,7 +162,10 @@ bool snapshotRecurrentState(
   // `postReasoningTokens_` at restore time.
   std::string path = makeUniqueSnapshotPath(seqId);
   const size_t savedBytes = llama_state_seq_save_file(
-      lctx, path.c_str(), seqId, /*tokens=*/nullptr,
+      lctx,
+      path.c_str(),
+      seqId,
+      /*tokens=*/nullptr,
       /*n_token_count=*/0);
   if (savedBytes == 0) {
     removeFileQuiet(path);
