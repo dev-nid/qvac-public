@@ -632,6 +632,16 @@ void ContinuousBatchScheduler::drainFinishedLocked() {
   for (const auto& req : finished | std::views::filter(hasValidDriverF())) {
     auto& slot = *slots_[req.seqId];
     auto outputCallback = getOutputCallback(slot, req.seqId);
+    // Capture the pre-finalize cursor for cancelled requests so the
+    // cancel-rollback in `onCancel` (which rewinds `nPast` to the
+    // pre-request cursor) cannot deflate `CacheTokens` in the
+    // user-visible stats. Non-cancelled paths leave it `nullopt` and
+    // accumulate the live driver position as before.
+    if (req.stopReason == StopReason::Cancelled ||
+        req.stopReason == StopReason::DecodeError) {
+      slot.peakNPastAtFinalize =
+          static_cast<int64_t>(slot.driver->getNPast());
+    }
     finalizeTerminalDriver(
         *slot.driver, req.stopReason, slot.prefillOnly, outputCallback);
     accumulateSlotRuntimeStats(slot, req);
@@ -899,6 +909,12 @@ void ContinuousBatchScheduler::cancelSlotLocked(uint32_t seqId) noexcept {
     // drainFinishedLocked() is left throwing so live requests still surface the
     // error.
     try {
+      // See the equivalent capture in `drainFinishedLocked`. Record the
+      // driver's `nPast` BEFORE `onCancel` rewinds it so `CacheTokens`
+      // in the user-visible stats reflects the work actually performed,
+      // not the post-rollback cursor.
+      slots_[seqId]->peakNPastAtFinalize =
+          static_cast<int64_t>(slots_[seqId]->driver->getNPast());
       slots_[seqId]->driver->onCancel({});
       if (req != nullptr) {
         accumulateSlotRuntimeStats(*slots_[seqId], *req);
@@ -1106,7 +1122,15 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t thinkingDiscards = 0;
   int64_t compactionFailed = 0;
   if (slot.driver) {
-    nPast = static_cast<int64_t>(slot.driver->getNPast());
+    // For cancelled requests `onCancel` rewinds the driver's `nPast`
+    // to the pre-request cursor (cancel = "request never happened").
+    // We prefer the slot's pre-cancel cursor snapshot (`peakNPastAtFinalize`)
+    // so user-visible `CacheTokens` reflects the work actually performed
+    // by this request — internal rollback maintenance must not deflate
+    // it, mirroring the `prefillTimeMs` cutoff applied to `TTFT`.
+    nPast = slot.peakNPastAtFinalize.has_value()
+        ? *slot.peakNPastAtFinalize
+        : static_cast<int64_t>(slot.driver->getNPast());
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =
         static_cast<int64_t>(slot.driver->getThinkingBlockDiscards());

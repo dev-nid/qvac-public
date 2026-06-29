@@ -326,6 +326,12 @@ private:
     size_t outputIndex = 0;
     bool saveCacheToDisk = false;
     bool prefillOnly = false;
+    // Driver `nPast` captured just before `finalizeTerminalDriver`
+    // (which may run `onCancel` and roll the driver back to the
+    // pre-request cursor). Set to `nullopt` for non-cancelled paths;
+    // `accumulateSlotRuntimeStats` falls back to the live
+    // `driver->getNPast()` in that case.
+    std::optional<int64_t> peakNPastAtFinalize;
   };
 
   void ensureWorkerStartedLocked();

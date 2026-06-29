@@ -389,15 +389,17 @@ TEST_F(
 }
 
 // `onCancel` on a hybrid driver with `remove_thinking_from_context: true`:
-// after prefill (which takes the end-of-prefill snapshot), calling
-// `onCancel` directly must restore the snapshot (no-op on cache position
-// since we haven't generated anything past it) AND clear the per-inference
-// rollback buffers cleanly. We can only observe the buffer cleanup through
-// the runtime stat `thinkingCompactionFailed` — it must stay 0 on the
-// success path (snapshot restore succeeded).
+// after prefill (which takes the prefill-entry AND end-of-prefill
+// snapshots), calling `onCancel` directly must restore the
+// PREFILL-ENTRY snapshot — i.e. roll the cache back to the cursor that
+// existed BEFORE this request's prompt was submitted, matching the
+// "request never happened" cancel semantics. The end-of-prefill
+// snapshot is reserved for normal thinking-block compaction and must
+// NOT be used for cancel. Successful restore must keep
+// `thinkingCompactionFailed` at zero.
 TEST_F(
     TextLlmContextCancelTest,
-    OnCancelRestoresEndOfPrefillSnapshotOnHybrid) {
+    OnCancelRestoresPreRequestSnapshotOnHybrid) {
   auto model = loadTextModel(qwen35HybridModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3.5 hybrid model not found";
@@ -409,36 +411,48 @@ TEST_F(
   TextLlmContext driver(params, shared, tools, /*seqId=*/0);
   driver.setRemoveThinkingFromContext(true);
 
+  // Pre-request cursor before any prompt is submitted. For a freshly
+  // constructed driver this is 0; we capture it explicitly so the
+  // assertion below documents the invariant rather than the value.
+  const llama_pos preRequestNPast = driver.getNPast();
+
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
   ASSERT_TRUE(driver.evalMessageWithTools(
       chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
   const llama_pos posAfterPrefill = driver.getNPast();
-  const llama_pos seqPosAfterPrefill = seqPosMax(*model);
-  ASSERT_GT(posAfterPrefill, 0);
-  ASSERT_EQ(seqPosAfterPrefill, posAfterPrefill - 1)
-      << "post-prefill cache cursor must match driver-tracked nPast";
+  ASSERT_GT(posAfterPrefill, preRequestNPast)
+      << "prefill must advance the cursor for the test to be meaningful";
 
-  // Cancel before any generation tokens have been sampled. The snapshot
-  // anchor sits at end-of-prefill, so restore should leave nPast where
-  // it is and only clear the rollback buffers.
+  // Cancel after prefill but before any generation token is sampled.
+  // The pre-request checkpoint sits at `preRequestNPast`, so restore
+  // must wind the cursor BACK to that cursor — not leave it at the
+  // post-prefill position.
   driver.onCancel([](const std::string&) {});
 
-  EXPECT_EQ(driver.getNPast(), posAfterPrefill)
-      << "onCancel on hybrid must restore to end-of-prefill position";
-  EXPECT_EQ(seqPosMax(*model), seqPosAfterPrefill)
-      << "onCancel restore must leave the underlying llama_context's "
-         "seq_pos_max at end-of-prefill (no spurious forward progress, no "
-         "underflow)";
+  EXPECT_EQ(driver.getNPast(), preRequestNPast)
+      << "onCancel on hybrid must restore to the PRE-REQUEST cursor, not "
+         "the end-of-prefill cursor — cancel semantics is 'request never "
+         "happened'";
+  // `seq_pos_max` after a full pre-request restore: either -1 (sequence
+  // is now empty) or `preRequestNPast - 1` if there were prior turns.
+  // For this fresh driver pre-request was 0, so we expect -1.
+  if (preRequestNPast == 0) {
+    EXPECT_EQ(seqPosMax(*model), static_cast<llama_pos>(-1))
+        << "pre-request restore on a fresh driver must clear the sequence";
+  }
   EXPECT_EQ(driver.getThinkingCompactionFailed(), 0)
       << "successful snapshot restore must not bump the failure counter";
 }
 
-// Pure-attention `onCancel` keeps existing behavior: it chains to
-// `onGenerationFinished` which runs tools-compact tail trim and
-// `compactThinkSpan`. Neither should crash on a freshly prefilled context.
+// Pure-attention `onCancel` must now also roll back to the pre-request
+// cursor via `removeLastNTokens` (no recurrent snapshot is taken on
+// this path). The previous behavior — chain into `onGenerationFinished`
+// which leaves the cancelled prompt in the cache — violated the
+// "request never happened" cancel semantics and left an orphaned
+// `<think>` opener for templates that force-open the reasoning channel.
 TEST_F(
     TextLlmContextCancelTest,
-    OnCancelOnPureAttentionRunsExistingFinalization) {
+    OnCancelOnPureAttentionRollsBackToPreRequestCursor) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -450,12 +464,23 @@ TEST_F(
   TextLlmContext driver(params, shared, tools, /*seqId=*/0);
   driver.setRemoveThinkingFromContext(true);
 
+  const llama_pos preRequestNPast = driver.getNPast();
+
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
   ASSERT_TRUE(driver.evalMessageWithTools(
       chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
+  ASSERT_GT(driver.getNPast(), preRequestNPast);
 
   EXPECT_NO_THROW(driver.onCancel([](const std::string&) {}));
-  EXPECT_EQ(driver.getThinkingCompactionFailed(), 0);
+
+  EXPECT_EQ(driver.getNPast(), preRequestNPast)
+      << "onCancel on pure-attention must roll the cache back to the "
+         "PRE-REQUEST cursor via `removeLastNTokens`, matching the "
+         "hybrid cancel semantics";
+  EXPECT_EQ(driver.getThinkingCompactionFailed(), 0)
+      << "pure-attention cancel must not bump the failure counter "
+         "(the seq_rm rollback path cannot fail like the snapshot "
+         "restore path can)";
 }
 
 // ============================================================================
@@ -790,11 +815,13 @@ TEST(
   longPrompt.input = R"([
     {"role":"user","content":"Write a long story about a dragon."}
   ])";
-  // Enable `remove_thinking_from_context` so the end-of-prefill snapshot
-  // (`reasoningRecurrentSnapshot_`) actually gets populated. Without
-  // this, `onCancel`'s rollback branch is skipped (snapshot is empty)
-  // and the test reduces to a recovery smoke check that doesn't
-  // exercise the new generation-cancel restore path.
+  // `remove_thinking_from_context` does NOT gate the cancel-restore
+  // path anymore — that path now uses the `prefillEntry` snapshot,
+  // which is captured unconditionally for hybrid / recurrent models.
+  // We leave the flag enabled so this test also exercises the
+  // `reasoningBoundary` capture lifecycle alongside the cancel path,
+  // catching regressions where the two snapshots interfere with each
+  // other.
   longPrompt.generationParams.remove_thinking_from_context = true;
 
   std::atomic<bool> generationDone{false};
@@ -823,14 +850,14 @@ TEST(
       << "model did not unwind within 10s of cancel";
   gen.join();
 
-  // Stronger than "no throw": the new post-sampling cancel route in
+  // Stronger than "no throw": the unified post-loop cancel route in
   // generateResponse promises that mid-generation cancel on hybrid runs
-  // through `onCancel` (snapshot restore) and never through the EOT
-  // fallback. A successful restore leaves `thinkingCompactionFailed` at
-  // zero — the only path that bumps that counter for cancel is a failed
-  // `restoreRecurrentState`. We allow `nullopt` in case the runtime
-  // stats vector omits the key on this build, but if it's present it
-  // must be zero.
+  // through `onCancel` (snapshot restore to the PRE-REQUEST cursor) and
+  // never through the EOT fallback. A successful restore leaves
+  // `thinkingCompactionFailed` at zero — the only path that bumps that
+  // counter for cancel is a failed `restorePrefillEntry`. We allow
+  // `nullopt` in case the runtime stats vector omits the key on this
+  // build, but if it's present it must be zero.
   const auto compactionFailed = statInt(*model, "thinkingCompactionFailed");
   if (compactionFailed.has_value()) {
     EXPECT_EQ(*compactionFailed, 0)

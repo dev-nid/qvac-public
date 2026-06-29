@@ -315,7 +315,6 @@ private:
   /// text spans, so every position advance keeps the KV-cell count honest.
   void advanceTextSpan(llama_pos newPos);
   void applyContextDiscard();
-  void handleStopRequestAndAddEot(LlamaBatch& batchPtr);
   void initializeCommonState();
   [[nodiscard]] llama_pos ctxCeiling() const;
 
@@ -376,6 +375,17 @@ private:
   double visionEncodeMs_ = 0.0;
   int32_t visionEncodeTiles_ = 0;
   bool pendingBatchFirstMsg_ = false;
+  // Pre-request checkpoint: `current_` and `protectedPrefix_` as they
+  // were when `evalMessageWithTools` started. Used by
+  // `cancelGenerationCleanup` so a cancel at any stage (mid-prefill or
+  // mid-generation) rolls the cache back to the cursor that existed
+  // BEFORE this request's prompt was submitted — i.e. cancel means
+  // "this request never happened", matching the prefill-stage cancel
+  // semantics. The `reasoningBoundary` snapshot (post-prefill) is
+  // reserved for normal thinking-block compaction in
+  // `compactThinkSpan`; it is no longer used for cancel.
+  ContextUsage preRequestUsage_;
+  ContextUsage preRequestProtectedPrefix_;
 
   // UTF-8 token buffer for handling incomplete emoji sequences
   qvac_lib_inference_addon_llama::UTF8TokenBuffer utf8Buffer_;

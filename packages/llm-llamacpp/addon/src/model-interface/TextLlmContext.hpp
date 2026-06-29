@@ -259,7 +259,6 @@ private:
   /// Slide the context window if the next token would not fit. Returns
   /// the number of tokens discarded (0 when no slide happened).
   llama_pos applyContextDiscard();
-  void handleStopRequestAndAddEot(LlamaBatch& batch);
 
   // Reasoning-block KV-cache compaction helpers. Single-block policy:
   // at most one `<think>...</think>` block is tracked per inference.
@@ -312,6 +311,16 @@ private:
   llama_pos nPast_ = 0;
   llama_pos firstMsgTokens_ = 0;
   llama_pos perSeqCtxCeiling_ = -1;
+  // Pre-request checkpoint: `nPast_` and `firstMsgTokens_` as they were
+  // when `evalMessageWithTools` started. Used by `onCancel` so a cancel
+  // at any stage (mid-prefill or mid-generation) rolls the cache back
+  // to the cursor that existed BEFORE this request's prompt was
+  // submitted — i.e. cancel means "this request never happened",
+  // matching the prefill-stage cancel semantics. The `reasoningBoundary`
+  // snapshot (post-prefill) is reserved for normal thinking-block
+  // compaction in `compactThinkSpan`; it is no longer used for cancel.
+  llama_pos preRequestNPast_ = 0;
+  llama_pos preRequestFirstMsgTokens_ = 0;
   bool pendingBatchFirstMsg_ = false;
   bool generationStarted_ = false;
   std::string assistantOutput_;
