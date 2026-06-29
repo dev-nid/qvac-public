@@ -65,6 +65,17 @@ bool CacheManager::isFileInitialized(const std::filesystem::path& path) {
   return size != 0;
 }
 
+bool CacheManager::isParentDirectoryMissing(const std::filesystem::path& path) {
+  const auto parent = path.parent_path();
+  if (parent.empty()) {
+    return false;
+  }
+
+  std::error_code errorCode;
+  const bool exists = std::filesystem::exists(parent, errorCode);
+  return !errorCode && !exists;
+}
+
 bool CacheManager::handleCache(
     ParsedPromptPayload& parsedPrompt, const std::string& inputPrompt,
     std::function<ParsedPromptPayload(const std::string&)> formatPrompt,
@@ -80,14 +91,10 @@ bool CacheManager::handleCache(
               "%s: No cacheKey provided, clearing existing cache '%s'\n",
               __func__,
               sessionPath_.c_str()));
-      try {
-        saveCache();
-      } catch (...) {
+      const bool stateReset = saveActiveCacheForTransition();
+      if (!stateReset) {
         resetStateCallback_(true);
-        invalidate();
-        throw;
       }
-      resetStateCallback_(true);
       sessionPath_.clear();
       cacheDisabled_ = true;
     }
@@ -108,16 +115,14 @@ bool CacheManager::handleCache(
             __func__,
             sessionPath_.c_str(),
             cacheKey.c_str()));
-    try {
-      saveCache();
-    } catch (...) {
+    const bool stateReset = saveActiveCacheForTransition();
+    if (!stateReset) {
       resetStateCallback_(true);
-      invalidate();
-      throw;
     }
+  } else {
+    resetStateCallback_(true);
   }
 
-  resetStateCallback_(true);
   cacheUsedInLastPrompt_ = false;
 
   sessionPath_ = cacheKey;
@@ -270,6 +275,40 @@ void CacheManager::saveCache() {
         ADDON_ID, toString(InvalidInputFormat), errorMsg);
   }
   writeCacheFile(sessionPath_);
+}
+
+bool CacheManager::saveActiveCacheForTransition() {
+  if (discardActiveCacheIfParentMissing()) {
+    return true;
+  }
+
+  try {
+    saveCache();
+    return false;
+  } catch (...) {
+    if (discardActiveCacheIfParentMissing()) {
+      return true;
+    }
+    resetStateCallback_(true);
+    invalidate();
+    throw;
+  }
+}
+
+bool CacheManager::discardActiveCacheIfParentMissing() {
+  if (!hasActiveCache() || !isParentDirectoryMissing(sessionPath_)) {
+    return false;
+  }
+
+  QLOG_IF(
+      Priority::DEBUG,
+      string_format(
+          "%s: active cache parent was removed, dropping stale cache '%s'\n",
+          __func__,
+          sessionPath_.c_str()));
+  resetStateCallback_(true);
+  invalidate();
+  return true;
 }
 
 void CacheManager::writeCacheFile(const std::string& path) {

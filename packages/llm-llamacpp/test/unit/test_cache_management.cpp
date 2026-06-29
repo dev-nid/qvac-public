@@ -49,6 +49,12 @@ protected:
         fs::remove(tmp);
       }
     }
+    for (const auto& session_dir :
+         {std::string("deleted_cache_dir"),
+          std::string("cache_target_dir_a"),
+          std::string("cache_target_dir_b")}) {
+      fs::remove_all(session_dir);
+    }
   }
 
   bool hasValidModel() { return fs::exists(test_model_path); }
@@ -742,6 +748,46 @@ TEST_F(CacheManagementTest, SaveFailureThrowsAndRemovesTmp) {
   EXPECT_FALSE(fs::exists(bad_path));
 }
 
+TEST_F(CacheManagementTest, SwitchAfterCacheDirectoryDeletedUsesNewKey) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  const fs::path deleted_cache_dir = "deleted_cache_dir";
+  const std::string deleted_cache_path =
+      (deleted_cache_dir / "session.bin").string();
+
+  fs::remove_all(deleted_cache_dir);
+  fs::create_directories(deleted_cache_dir);
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
+        deleted_cache_path,
+        true);
+  });
+  EXPECT_TRUE(fs::exists(deleted_cache_path));
+
+  fs::remove_all(deleted_cache_dir);
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
+        session2_path,
+        true);
+  });
+
+  EXPECT_TRUE(fs::exists(session2_path));
+  EXPECT_FALSE(fs::exists(deleted_cache_dir));
+}
+
 TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
   if (!hasValidModel()) {
     FAIL() << "Test model not found";
@@ -752,24 +798,29 @@ TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
     FAIL() << "Model failed to load";
   }
 
-  // Prime the CacheManager with a key in a non-existent dir. No write yet
+  const std::string bad_path_a = "cache_target_dir_a";
+  const std::string bad_path_b = "cache_target_dir_b";
+  fs::create_directories(bad_path_a);
+  fs::create_directories(bad_path_b);
+
+  // Prime the CacheManager with a directory path. No write yet
   // (saveCacheToDisk=false) — this just registers sessionPath_.
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "hi"}])",
-        "/tmp/qvac_test_no_such_dir_a/session.bin",
+        bad_path_a,
         false);
   });
 
   // Trigger a cache-switch: handleCache flushes the old key to a
-  // non-existent directory → throws UnableToSaveSessionFile.
+  // directory path, so promotion fails with UnableToSaveSessionFile.
   // With the invalidate-on-throw fix, state is left clean (disabled).
   try {
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "hi"}])",
-        "/tmp/qvac_test_no_such_dir_b/session.bin",
+        bad_path_b,
         false);
     FAIL() << "expected UnableToSaveSessionFile throw";
   } catch (const qvac_errors::StatusError& e) {
@@ -796,17 +847,20 @@ TEST_F(CacheManagementTest, HandleCacheClearFailureInvalidatesState) {
     FAIL() << "Model failed to load";
   }
 
-  // Prime with a key in a non-existent dir (no write yet).
+  const std::string bad_path = "cache_target_dir_a";
+  fs::create_directories(bad_path);
+
+  // Prime with a directory path (no write yet).
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "hi"}])",
-        "/tmp/qvac_test_no_such_dir_a/session.bin",
+        bad_path,
         false);
   });
 
   // Trigger the cache-clear path (empty cacheKey): handleCache flushes the
-  // active key to a non-existent directory → throws UnableToSaveSessionFile.
+  // active key to a directory path → throws UnableToSaveSessionFile.
   try {
     processPromptString(model, R"([{"role": "user", "content": "hi"}])");
     FAIL() << "expected UnableToSaveSessionFile throw";
@@ -833,22 +887,27 @@ TEST_F(CacheManagementTest, HandleCacheSwitchFailureRetryWithNewKeySucceeds) {
     FAIL() << "Model failed to load";
   }
 
-  // Prime with a key in a non-existent dir (no write) — registers sessionPath_.
+  const std::string bad_path_a = "cache_target_dir_a";
+  const std::string bad_path_b = "cache_target_dir_b";
+  fs::create_directories(bad_path_a);
+  fs::create_directories(bad_path_b);
+
+  // Prime with a directory path (no write) — registers sessionPath_.
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "hi"}])",
-        "/tmp/qvac_test_no_such_dir_a/session.bin",
+        bad_path_a,
         false);
   });
 
-  // Switch to another bad key — flushes the old key to a non-existent dir →
+  // Switch to another bad key — flushes the old key to a directory path →
   // throws UnableToSaveSessionFile.
   try {
     processPromptWithCacheOptions(
         model,
         R"([{"role": "user", "content": "hi"}])",
-        "/tmp/qvac_test_no_such_dir_b/session.bin",
+        bad_path_b,
         false);
     FAIL() << "expected UnableToSaveSessionFile throw";
   } catch (const qvac_errors::StatusError& e) {
