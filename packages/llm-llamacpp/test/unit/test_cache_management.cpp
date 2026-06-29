@@ -807,10 +807,7 @@ TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
   // (saveCacheToDisk=false) — this just registers sessionPath_.
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "hi"}])",
-        bad_path_a,
-        false);
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_a, false);
   });
 
   // Trigger a cache-switch: handleCache flushes the old key to a
@@ -818,10 +815,7 @@ TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
   // With the invalidate-on-throw fix, state is left clean (disabled).
   try {
     processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "hi"}])",
-        bad_path_b,
-        false);
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_b, false);
     FAIL() << "expected UnableToSaveSessionFile throw";
   } catch (const qvac_errors::StatusError& e) {
     EXPECT_NE(
@@ -853,10 +847,7 @@ TEST_F(CacheManagementTest, HandleCacheClearFailureInvalidatesState) {
   // Prime with a directory path (no write yet).
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "hi"}])",
-        bad_path,
-        false);
+        model, R"([{"role": "user", "content": "hi"}])", bad_path, false);
   });
 
   // Trigger the cache-clear path (empty cacheKey): handleCache flushes the
@@ -895,20 +886,14 @@ TEST_F(CacheManagementTest, HandleCacheSwitchFailureRetryWithNewKeySucceeds) {
   // Prime with a directory path (no write) — registers sessionPath_.
   EXPECT_NO_THROW({
     processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "hi"}])",
-        bad_path_a,
-        false);
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_a, false);
   });
 
   // Switch to another bad key — flushes the old key to a directory path →
   // throws UnableToSaveSessionFile.
   try {
     processPromptWithCacheOptions(
-        model,
-        R"([{"role": "user", "content": "hi"}])",
-        bad_path_b,
-        false);
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_b, false);
     FAIL() << "expected UnableToSaveSessionFile throw";
   } catch (const qvac_errors::StatusError& e) {
     EXPECT_NE(
