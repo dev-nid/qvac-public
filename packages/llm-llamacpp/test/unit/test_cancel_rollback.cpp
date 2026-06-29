@@ -29,8 +29,8 @@
 // coverage:
 //   1. Snapshot / restore primitive against a real `llama_context`
 //      (hybrid + pure-attention). Pins the foundational behaviour that
-//      `llama_state_seq_get_data_ext` / `set_data_ext` with `flags=0`
-//      rewind both the attention KV and the recurrent state.
+//      `llama_state_seq_save_file` / `load_file` rewind both the
+//      attention KV and the recurrent state.
 //   2. Cancel-rollback wiring on `TextLlmContext` and `MtmdLlmContext`
 //      end-to-end through their public entrypoints (`evalMessageWithTools`,
 //      `onCancel`, `generateResponse`, `stop`).
@@ -242,10 +242,9 @@ TEST_F(CancelRollbackPrimitiveTest, SnapshotRestoreRoundtripQwen3PureAttention) 
   EXPECT_EQ(seqPosMax(*model), posBefore);
 }
 
-// Snapshot taken before any tokens have been decoded: payload size for
-// hybrid memories is non-zero because the recurrent state itself is
-// serialized even when there are no positions, but restore must still be
-// idempotent against a freshly reset context.
+// Snapshot taken before any tokens have been decoded: no temp file is
+// needed because there is no committed sequence state yet, but restore
+// must still be idempotent against a freshly reset context.
 TEST_F(CancelRollbackPrimitiveTest, SnapshotEmptySequenceHybridIsRestorable) {
   auto model = loadTextModel(qwen35HybridModelPath());
   if (!model) {
@@ -466,11 +465,20 @@ TEST_F(
 // `compactThinkSpan` freezes the perf counters just before any recurrent
 // replay decode runs, so `runtimeStats()` can report the pre-replay
 // (user-visible) values rather than counters inflated by internal cache
-// maintenance. The base `LlmContext::takeUserVisiblePerfSnapshot` returns
-// `nullopt` by default; `TextLlmContext` overrides it to consume the
-// captured snapshot. These tests pin the capture / take / clear contract
-// without requiring a hybrid model (the lifecycle is identical regardless
-// of memory module — pure-attention just doesn't do replay decode).
+// maintenance. The capture is gated on
+// `needsRecurrentSnapshot_ && compactor_.hasOpenSpan()` because:
+//   * pure-attention compaction does not replay (no inflation to freeze
+//     against — the live read is already correct), and
+//   * capturing for pure-attention races against lazy GPU-side decode
+//     telemetry (the snapshot can lag the live counters by one token
+//     because the final `llama_synchronize()` happens later in
+//     `resetState`).
+// The base `LlmContext::takeUserVisiblePerfSnapshot` returns `nullopt`
+// by default; `TextLlmContext` overrides it to consume the captured
+// snapshot. Hybrid coverage (snapshot actually populated and consumed)
+// lives in the `reasoning.test.js` integration suite — driving a hybrid
+// inference with reasoning content from a unit test would require
+// reproducing a non-trivial chunk of the model harness.
 
 // Newly constructed driver: no snapshot. Guards the initial state — a
 // stray non-empty snapshot here would leak into the first inference's
@@ -490,47 +498,19 @@ TEST_F(TextLlmContextCancelTest, FreshDriverReportsNoUserVisiblePerfSnapshot) {
       << "Newly constructed driver must report no user-visible perf snapshot";
 }
 
-// After a full prefill + generation, `compactThinkSpan` runs at the end
-// of `onGenerationFinished` and captures the perf snapshot
-// unconditionally (pure-attention has no replay, so the snapshot
-// equals the live read; hybrid would freeze BEFORE its replay decode).
-// The override hands the captured value back and clears the slot, so a
-// second `take` returns `nullopt`.
-TEST_F(TextLlmContextCancelTest, CompactThinkSpanCapturesAndTakeIsIdempotent) {
-  auto model = loadTextModel(qwen3PureAttentionModelPath());
-  if (!model) {
-    GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
-  }
-
-  LlmModelContext shared = makeShared(*model);
-  ToolsCompactController tools(std::nullopt);
-  common_params params = model->getCommonParams();
-  TextLlmContext driver(params, shared, tools, /*seqId=*/0);
-
-  std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
-  ASSERT_TRUE(driver.generateResponse([](const std::string&) {}));
-
-  auto snapshot = driver.takeUserVisiblePerfSnapshot();
-  ASSERT_TRUE(snapshot.has_value())
-      << "compactThinkSpan must capture the user-visible perf snapshot at "
-         "end-of-generation";
-  EXPECT_GT(snapshot->n_p_eval, 0)
-      << "Snapshot must record the prefill it captured perf for";
-
-  EXPECT_FALSE(driver.takeUserVisiblePerfSnapshot().has_value())
-      << "takeUserVisiblePerfSnapshot must be consumed on read";
-}
-
-// A fresh inference must start from a clean slate: the stale snapshot
-// from a prior turn is cleared at the start of `evalMessageWithTools`
-// so the new inference's `runtimeStats()` never sees the previous
-// turn's frozen counters. Without this clear, `runtimeStats()` after
-// the next turn would silently report the old turn's pre-replay values.
+// Pure-attention models do not need (and do not capture) a user-visible
+// perf snapshot in `compactThinkSpan`: the only purpose of the
+// snapshot is to freeze `n_p_eval` / `t_p_eval_ms` BEFORE the recurrent
+// replay decode inflates them, and pure-attention compaction is a pure
+// cache-edit (`seq_rm + seq_add`) with no replay. Capturing for pure-
+// attention also opens a one-token race against lazy GPU-side decode
+// telemetry, so the capture is now gated on
+// `needsRecurrentSnapshot_ && compactor_.hasOpenSpan()`. This test
+// pins the contract: a pure-attention inference must leave the
+// snapshot empty so `runtimeStats()` falls back to the live read.
 TEST_F(
     TextLlmContextCancelTest,
-    EvalMessageWithToolsClearsStaleUserVisiblePerfSnapshot) {
+    CompactThinkSpanLeavesPerfSnapshotEmptyForPureAttention) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -541,25 +521,15 @@ TEST_F(
   common_params params = model->getCommonParams();
   TextLlmContext driver(params, shared, tools, /*seqId=*/0);
 
-  // Turn 1: full flow → snapshot captured.
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
   ASSERT_TRUE(driver.evalMessageWithTools(
       chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
   ASSERT_TRUE(driver.generateResponse([](const std::string&) {}));
 
-  // Turn 2: start a new inference WITHOUT taking turn 1's snapshot
-  // first. The fresh `evalMessageWithTools` must drop the stale value
-  // so the next runtimeStats read does not silently surface it.
-  std::vector<common_chat_msg> chatMsgs2 = {
-      makeMsg("user", "Hi"),
-      makeMsg("assistant", "Hello"),
-      makeMsg("user", "And again")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      chatMsgs2, {}, /*isCacheLoaded=*/false, /*prefill=*/true));
-
   EXPECT_FALSE(driver.takeUserVisiblePerfSnapshot().has_value())
-      << "evalMessageWithTools must clear any stale user-visible perf "
-         "snapshot from the previous turn";
+      << "Pure-attention compactThinkSpan must NOT capture a snapshot — "
+         "the live read in runtimeStats is already correct and capturing "
+         "early races against lazy GPU perf telemetry";
 }
 
 // ============================================================================

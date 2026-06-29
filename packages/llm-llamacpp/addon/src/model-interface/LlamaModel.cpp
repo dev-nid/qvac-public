@@ -932,14 +932,26 @@ LlamaModel::batchRuntimeStatsLocked() const {
   // in-flight batches without LlamaModel having to cache state.
   const batching::RuntimeStatsSnapshot stats =
       state_->batchScheduler_->runtimeStats();
-  // TTFT comes from `llama_perf_context` to match legacy single-prompt
-  // semantics; the scheduler does not yet expose a batch-aware TTFT.
-  // Reset the perf counters so the next single-prompt run sees a clean
-  // slate.
-  auto perfData = llama_perf_context(state_->llmContext_->getCtx());
+  // TTFT, like every other batch stat above, is now sourced from the
+  // scheduler's own per-step timing (`prefillTimeMs`). Reading
+  // `llama_perf_context().t_p_eval_ms` here would also include any
+  // `llama_decode` work that ran in `onGenerationFinished` — most
+  // notably the recurrent / hybrid replay decode inside
+  // `compactThinkSpan` — and silently inflate user-visible TTFT with
+  // internal cache maintenance time. The scheduler categorises every
+  // step into prefill vs decode at `recordDecodeStep` time (before
+  // any compactor work), so `prefillTimeMs` is the right user-visible
+  // cutoff.
+  //
+  // We still reset the live perf counters so they cannot leak across
+  // the batch / single-prompt boundary: a subsequent single-prompt
+  // request whose `compactThinkSpan` does not capture a
+  // `userVisiblePerf_` snapshot (pure-attention, prefill-only) falls
+  // back to a live `llama_perf_context()` read in
+  // `singleRuntimeStatsLocked`.
   llama_perf_context_reset(state_->llmContext_->getCtx());
   return {
-      {"TTFT", perfData.t_p_eval_ms},
+      {"TTFT", stats.prefillTimeMs()},
       {"TPS", stats.decodeTokensPerSecond()},
       {"ppTPS", stats.prefillTokensPerSecond()},
       {"CacheTokens", stats.cacheTokens},

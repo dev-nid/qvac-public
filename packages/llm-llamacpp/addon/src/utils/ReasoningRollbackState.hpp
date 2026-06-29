@@ -119,14 +119,13 @@ public:
   // (if any) snapshots are currently held.
   void reset() noexcept;
 
-  // Test seam. Seeds the reasoning-boundary snapshot from raw payload
-  // bytes so unit tests can exercise downstream gates that depend on
-  // `hasReasoningBoundary()` without loading a real `llama_context`.
+  // Test seam. Seeds the reasoning-boundary snapshot with a sentinel
+  // file path so unit tests can exercise downstream gates that depend
+  // on `hasReasoningBoundary()` without loading a real `llama_context`.
   // Production code MUST use `captureReasoningBoundary` instead — the
-  // payload here is not validated and would fail
-  // `llama_state_seq_set_data_ext` if anything tried to restore from it.
-  void seedReasoningBoundaryForTesting(
-      std::vector<uint8_t> data, llama_pos nPast) noexcept;
+  // path here is not a valid llama state file and would fail
+  // `llama_state_seq_load_file` if anything tried to restore from it.
+  void seedReasoningBoundaryForTesting(llama_pos nPast) noexcept;
 
 private:
   RecurrentStateSnapshot prefillEntry_;

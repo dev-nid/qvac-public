@@ -10,8 +10,8 @@ namespace utils {
 bool ReasoningRollbackState::capturePrefillEntry(
     ::llama_context* ctx, llama_seq_id seqId, llama_pos nPast) {
   // Drop any leftover prefill-entry snapshot from a previous request
-  // so a failed capture below cannot leave stale bytes accessible to
-  // `restorePrefillEntry`.
+  // so a failed capture below cannot leave a stale temp file available
+  // to `restorePrefillEntry`.
   prefillEntry_.clear();
   return snapshotRecurrentState(ctx, seqId, nPast, prefillEntry_);
 }
@@ -95,9 +95,14 @@ void ReasoningRollbackState::reset() noexcept {
 }
 
 void ReasoningRollbackState::seedReasoningBoundaryForTesting(
-    std::vector<uint8_t> data, llama_pos nPast) noexcept {
-  reasoningBoundary_.data = std::move(data);
-  reasoningBoundary_.nPast = nPast;
+    llama_pos nPast) noexcept {
+  // Sentinel path — does not point at a real llama state file. Only
+  // the `hasReasoningBoundary()` / `empty()` gates are exercised by
+  // tests that call this seam; any restore attempt would fail
+  // `llama_state_seq_load_file` (and is correctly never invoked from
+  // these tests).
+  reasoningBoundary_.seedForTesting(
+      "qvac_test_reasoning_boundary_sentinel.bin", nPast);
 }
 
 } // namespace utils

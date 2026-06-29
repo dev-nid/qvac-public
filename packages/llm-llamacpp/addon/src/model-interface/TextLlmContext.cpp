@@ -1178,11 +1178,21 @@ void TextLlmContext::compactThinkSpan() {
   // reasoning tail. Those replay decodes accumulate into `n_p_eval` /
   // `t_p_eval_ms`, which would otherwise inflate prompt / TTFT / ppTPS
   // in `runtimeStats()` even though the tokens were already delivered
-  // to the caller. Captured unconditionally (pure-attention has no
-  // decode, so the snapshot is a no-cost stand-in for the live read)
-  // and only when not already set, so a re-entrant call within the
-  // same inference does not overwrite the original cutoff.
-  if (!userVisiblePerf_.has_value()) {
+  // to the caller.
+  //
+  // Only capture for the recurrent / hybrid path that actually replays
+  // — pure-attention compaction is a single `seq_rm + seq_add` with no
+  // extra `llama_decode`, so reading the live counters at
+  // `runtimeStats()` time already produces the correct user-visible
+  // numbers. Capturing for pure-attention also opens a race on
+  // backends where decode telemetry is finalised lazily (e.g. Metal),
+  // because the snapshot is taken before the final
+  // `llama_synchronize()` in `resetState` and can lag the live counters
+  // by a token. Gated on the same `needsRecurrentSnapshot_` predicate
+  // the compactor itself uses, with the captured-span guard on top so
+  // we only freeze when the recurrent path can actually fire.
+  if (needsRecurrentSnapshot_ && compactor_.hasOpenSpan() &&
+      !userVisiblePerf_.has_value()) {
     userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
   }
   const auto outcome =
@@ -1447,7 +1457,18 @@ void TextLlmContext::resetState(bool resetStats) {
   thinkingForcedOpenText_.clear();
   compactor_.reset();
   rollbackState_.reset();
-  userVisiblePerf_.reset();
+  // `userVisiblePerf_` belongs to the per-inference perf-stat surface
+  // (same family as block discards / compaction failures above): it is
+  // populated by `compactThinkSpan` and consumed by `runtimeStats()`.
+  // The post-inference cleanup in `processPromptImpl` calls us with
+  // `resetStats=false` AFTER generation but BEFORE the caller reads
+  // `runtimeStats()`, so wiping the snapshot here would silently
+  // re-promote the inflated live `n_p_eval` (which now includes the
+  // recurrent replay decode) into the user-visible counters. Tie the
+  // reset to the same flag as the other per-inference perf state.
+  if (resetStats) {
+    userVisiblePerf_.reset();
+  }
 
   clearSequenceMemory(modelCtx_.lctx);
 
@@ -1563,6 +1584,18 @@ bool TextLlmContext::handleReasoningEOS(
   // Seed the replay buffer with the substituted close-tag token id
   // first so it lands ahead of the newlines that the loop below
   // records once `onCloseCommitted` flips capture on.
+  //
+  // `onCloseCommitted` is gated on `pendingThinkCloseCapture_`: that
+  // flag is the finaliser for the iter-deferred "marker seen, commit
+  // position next iter" handshake used by the normal buffer-transition
+  // path. EOS substitution skips that handshake (there is no real
+  // `</think>` token going through `updateReasoningBuffer` to trip
+  // `requestCloseCapture`), so flip it here so the compactor actually
+  // records the span end. Without this, the substituted close is
+  // invisible to the compactor and `compactThinkSpan` later bails at
+  // `end < 0` — observable as multi-turn reasoning blocks no longer
+  // being compacted when the model emits EOS instead of `</think>`.
+  compactor_.requestCloseCapture();
   compactor_.recordCloseMarkerForReplay(tokenId);
   compactor_.onCloseCommitted(nPast);
 

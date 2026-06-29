@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <llama.h>
@@ -9,52 +10,123 @@
 namespace qvac_lib_inference_addon_llama {
 namespace utils {
 
-// Owning byte buffer holding a full-state snapshot of a single
-// sequence. Captured via `llama_state_seq_get_data_ext` with
-// `flags == 0`, which on hybrid memories (Qwen3.5 / Qwen3-Next /
-// Jamba / ...) covers BOTH the attention KV and the recurrent (SSM /
-// RWKV) hidden state.
+// Owning handle for a per-sequence state snapshot persisted to a temp
+// file on disk. Captured via `llama_state_seq_save_file`, which under
+// the hood calls `state_seq_write_data(io, seq_id, /*flags=*/0)` —
+// llama.cpp's full-state sequence path, routed to disk instead of an
+// in-memory byte buffer.
+// On hybrid memories this covers BOTH the attention KV and the
+// recurrent (SSM / RWKV) hidden state for `seqId`, so a later
+// `llama_state_seq_load_file` rebuilds the entire sequence in one
+// shot without needing `seq_rm` (which the recurrent module rejects
+// for partial-tail ranges that include the final committed pos).
 //
-// Why full state: a partial-only snapshot rolls back only the
-// recurrent half, and restoring it leaves the attention KV ahead with
-// the post-snapshot tail still present. Trimming that tail with
-// `seq_rm` is rejected by the recurrent memory module
-// (`llama_memory_recurrent::seq_rm`) for any partial-tail range that
-// includes the final committed position — Mamba/RWKV-style state is
-// not reversible, so the API only accepts full clears or
-// non-overlapping ranges. A full-state snapshot sidesteps the issue:
-// `state_seq_set_data_ext(flags=0)` rebuilds the entire sequence in
-// one shot, so no `seq_rm` is needed.
+// Why disk: the in-memory variant duplicated the live cache buffer
+// llama.cpp already owns. On hybrid models that buffer is large and
+// the snapshot lifetime spans an entire turn, so the duplication was
+// a meaningful overhead. The file path itself costs only a few dozen
+// bytes; the heavy data sits in a temp file that is RAII-removed on
+// clear / destruct / move-out.
+//
+// Move-only: the temp file is owned by this object. Copying would
+// either alias the path (double delete) or duplicate the file (slow,
+// wasteful) — neither is useful for our usage. Moves transfer file
+// ownership and leave the source in an empty state.
 //
 // `nPast` records the next-position-to-write at snapshot time. The
 // caller uses it as the replay anchor and the post-restore `nPast_`.
-struct RecurrentStateSnapshot {
-  std::vector<uint8_t> data;
+class RecurrentStateSnapshot {
+public:
+  RecurrentStateSnapshot() = default;
+  ~RecurrentStateSnapshot();
+
+  RecurrentStateSnapshot(const RecurrentStateSnapshot&) = delete;
+  RecurrentStateSnapshot& operator=(const RecurrentStateSnapshot&) = delete;
+  RecurrentStateSnapshot(RecurrentStateSnapshot&& other) noexcept;
+  RecurrentStateSnapshot& operator=(RecurrentStateSnapshot&& other) noexcept;
+
+  // `nPast` is intentionally a public field — it mirrors the caller's
+  // sequence cursor at snapshot time and is read/written together with
+  // `empty()` / `filePath()` by the rollback machinery.
   llama_pos nPast = 0;
 
-  [[nodiscard]] bool empty() const noexcept { return data.empty(); }
-  [[nodiscard]] size_t size() const noexcept { return data.size(); }
-  void clear() noexcept {
-    data.clear();
-    nPast = 0;
+  // A snapshot is "empty" only when no capture has been recorded yet.
+  // A successful capture at `nPastAt <= 0` records an empty-sequence
+  // snapshot (`captured_ == true`, `filePath_.empty()`); restoring it
+  // clears the live sequence so the recurrent / hybrid memory rewinds
+  // to the same pre-decode state the in-memory variant produced.
+  [[nodiscard]] bool empty() const noexcept { return !captured_; }
+  [[nodiscard]] const std::string& filePath() const noexcept {
+    return filePath_;
   }
+  // True when the snapshot owns an on-disk payload. False for a
+  // captured-but-empty snapshot (anchor for "rewind sequence to
+  // empty" on restore). Mostly useful for tests / diagnostics.
+  [[nodiscard]] bool hasFile() const noexcept { return !filePath_.empty(); }
+
+  // Best-effort cleanup. Removes the underlying file (if any) and
+  // resets `nPast` / `captured_`. Safe to call multiple times, safe on
+  // a snapshot that never adopted a file.
+  void clear() noexcept;
+
+  // Test seam. Adopts a path without going through
+  // `llama_state_seq_save_file`, so unit tests can exercise the
+  // `hasReasoningBoundary()` / `empty()` gates without loading a real
+  // `llama_context`. The path does not have to exist on disk —
+  // production code MUST use `snapshotRecurrentState` instead so the
+  // payload is actually valid for restore.
+  void seedForTesting(std::string filePath, llama_pos nPastAt) noexcept;
+
+  // Test seam. Marks the snapshot captured at `nPastAt` with no
+  // backing file, mirroring the empty-sequence capture path. Lets
+  // unit tests assert the captured-empty restore branch without
+  // standing up a real `llama_context`.
+  void seedEmptyForTesting(llama_pos nPastAt) noexcept;
+
+  // Transfer ownership of a temp file produced by
+  // `llama_state_seq_save_file` into this snapshot. Removes any
+  // previously owned file. Used by `snapshotRecurrentState`; not
+  // intended for general callers.
+  void adoptFile(std::string filePath, llama_pos nPastAt) noexcept;
+
+  // Mark this snapshot as a successful capture of an empty sequence
+  // (no on-disk payload). Restore behaviour for this state is "clear
+  // the sequence's memory" — equivalent to the legacy in-memory
+  // `set_data_ext` on the empty-state serialization.
+  void adoptEmpty(llama_pos nPastAt) noexcept;
+
+private:
+  std::string filePath_;
+  bool captured_ = false;
 };
 
-// Captures the full state of `seqId` into `out`, recording `nPastAt`
-// alongside the data. Calls `llama_state_seq_get_size_ext(..., 0)`
-// and, if size > 0, `llama_state_seq_get_data_ext(..., 0)`.
+// Captures the full state of `seqId` into `out` by writing it to a
+// fresh per-process unique temp file via `llama_state_seq_save_file`,
+// recording `nPastAt` alongside the path.
 //
-// Returns true on success. Returns false when the data fetch
-// underflows the reported size — `out` is cleared so it cannot be
-// partially restored later.
+// Returns true on success. Returns false when the save call reports a
+// 0-byte write — `out` is cleared (and any partial file removed) so a
+// later restore cannot accidentally read a half-written payload.
+//
+// Empty sequences (`nPastAt <= 0`) are treated as a successful
+// capture with no on-disk payload (see `adoptEmpty`); `out.empty()`
+// returns false afterwards so the rollback gates know a capture has
+// been recorded, and `restoreRecurrentState` will clear the sequence
+// memory to match.
 bool snapshotRecurrentState(
     ::llama_context* lctx, llama_seq_id seqId, llama_pos nPastAt,
     RecurrentStateSnapshot& out);
 
-// Restores `snapshot` into `seqId`, fully replacing the sequence's
-// attention KV and recurrent state. No-op when `snapshot` is empty.
-// Returns true on success, false when the underlying
-// `llama_state_seq_set_data_ext` reports a short read.
+// Restores `snapshot` into `seqId`. For snapshots backed by a file,
+// calls `llama_state_seq_load_file` to fully replace the sequence's
+// attention KV and recurrent state. For captured-but-empty snapshots
+// (no file, `nPast <= 0`), clears the sequence via
+// `llama_memory_seq_rm` so the recurrent / hybrid memory rewinds to a
+// truly empty state — the same end state the in-memory variant
+// achieved by restoring the serialized empty-state bytes.
+// No-op when `snapshot` is empty (i.e. nothing has been captured).
+// Returns true on success, false when the underlying load reports a
+// 0-byte read (corrupted / missing / truncated file).
 bool restoreRecurrentState(
     ::llama_context* lctx, llama_seq_id seqId,
     const RecurrentStateSnapshot& snapshot);

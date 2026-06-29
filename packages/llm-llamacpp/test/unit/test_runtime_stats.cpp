@@ -84,6 +84,32 @@ TEST(RuntimeStatsRates, ResetClearsRates) {
   EXPECT_DOUBLE_EQ(stats.prefillTokensPerSecond(), 0.0);
 }
 
+// Batch TTFT is sourced from `prefillTimeMs()` so it excludes decode steps
+// AND any internal compactor replay decode that runs in
+// `onGenerationFinished`. The accessor must sum only pure-prefill step
+// times and zero out on `reset()`.
+TEST(RuntimeStatsRates, PrefillTimeMsAccumulatesPurePrefillStepsOnly) {
+  RuntimeStatsSnapshot stats;
+  EXPECT_DOUBLE_EQ(stats.prefillTimeMs(), 0.0);
+
+  // Two pure-prefill steps: 50 ms + 30 ms = 80 ms.
+  stats.recordDecodeStep(/*active=*/2, /*prefill=*/100, /*decode=*/0,
+                         milliseconds(50));
+  stats.recordDecodeStep(/*active=*/2, /*prefill=*/40, /*decode=*/0,
+                         milliseconds(30));
+  EXPECT_DOUBLE_EQ(stats.prefillTimeMs(), 80.0);
+
+  // Mixed step (any decode token) charges to decode, not prefill: a
+  // compactor replay decode would land here and would NOT inflate
+  // user-visible TTFT.
+  stats.recordDecodeStep(/*active=*/3, /*prefill=*/1, /*decode=*/3,
+                         milliseconds(25));
+  EXPECT_DOUBLE_EQ(stats.prefillTimeMs(), 80.0);
+
+  stats.reset();
+  EXPECT_DOUBLE_EQ(stats.prefillTimeMs(), 0.0);
+}
+
 // Minimal `Request` constructed only with the fields `accumulateSlot`
 // reads (`generatedTokens.size()` and `prefillTokenCount` — both zero
 // here because we're isolating the `thinkingDiscards` aggregation).

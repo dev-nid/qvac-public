@@ -445,6 +445,95 @@ TEST_F(
   fs::remove(cachePath);
 }
 
+// Multimodal hybrid (Qwen3.5) compaction. `MtmdLlmContext` shares the
+// `ReasoningBlockCompactor` with `TextLlmContext` but applies its own
+// post-compact bookkeeping (`current_.pos` / `cacheTokens` / protected-
+// prefix). This pins the end-to-end multimodal compaction path:
+//   * a reasoning-capable hybrid multimodal model produces a `<think>` block,
+//   * end-of-prefill recurrent snapshot + restore + post-reasoning replay
+//     succeeds for the multimodal context,
+//   * `thinkingBlockDiscards` increments AND `thinkingCompactionFailed`
+//     stays at zero so the failure path is not silently masking a problem.
+//
+// Companion JS coverage lives in `gemma4.test.js` (pure-attention
+// multimodal); this is the hybrid-multimodal C++ counterpart called out by
+// the reviewer.
+TEST_F(
+    MtmdLlmContextTest,
+    Qwen35MultimodalHonoursRemoveThinkingFromContext) {
+  if (!hasValidQwen35Model()) {
+    GTEST_SKIP() << "Qwen3.5 multimodal model or projection file not found";
+  }
+  const fs::path imagePath = multimodalTestImagePath();
+  if (!fs::exists(imagePath)) {
+    GTEST_SKIP() << "Multimodal test image not found";
+  }
+
+  // The fixture's default `n_predict=10` is too small for a reasoning
+  // block to close — the SetUp budget was chosen for non-reasoning smoke
+  // tests. Bump it (plus a tight `temp=0` + binary-answer prompt below)
+  // so the model closes `</think>` and produces a visible answer within
+  // a single test run. `createQwen35Model` snapshots the config map, so
+  // the override is local to this test.
+  config_files["n_predict"] = "1024";
+  config_files["temp"] = "0";
+
+  auto model = createQwen35Model();
+  ASSERT_NE(model, nullptr) << "Qwen3.5 multimodal model failed to load";
+
+  LlamaModel::Prompt prompt;
+  // Binary-answer prompt: encourages the model to close reasoning quickly
+  // rather than producing a long description that risks blowing past
+  // `n_predict` before `</think>` lands. Mirrors the gemma4 integration
+  // test's "Answer in one word" pattern.
+  prompt.input =
+      R"([{"role": "system", "content": "Answer with just one word: yes or no."},)"
+      R"( {"role": "user", "type": "media", "content": ""},)"
+      R"( {"role": "user", "content": "Is there fruit in this image?"}])";
+  prompt.media.push_back(readBinaryFile(imagePath));
+  prompt.generationParams.remove_thinking_from_context = true;
+
+  std::string output;
+  ASSERT_NO_THROW({ output = model->processPrompt(prompt); });
+  EXPECT_GT(output.length(), 0u)
+      << "multimodal compaction must not break generation";
+
+  const auto stats = model->runtimeStats();
+  const double discards = getStatValue(stats, "thinkingBlockDiscards");
+  const double failed = getStatValue(stats, "thinkingCompactionFailed");
+  SCOPED_TRACE(
+      "thinkingBlockDiscards=" + std::to_string(discards) +
+      ", thinkingCompactionFailed=" + std::to_string(failed) +
+      ", output (first 200 chars): " + output.substr(0, 200));
+
+  // Failure-counter check runs unconditionally: `thinkingCompactionFailed`
+  // must be zero whether or not reasoning closed, because a non-zero
+  // counter means snapshot / restore / replay errored on the multimodal
+  // path — not that reasoning ran long. Assert this BEFORE any
+  // `GTEST_SKIP()`, since gtest aborts the test body at the skip site
+  // (the skip macro returns immediately; statements after it never run).
+  EXPECT_EQ(failed, 0.0)
+      << "multimodal recurrent compaction must not record any failures "
+         "(snapshot / restore / replay must succeed on the multimodal path)";
+
+  // The compactor only fires once `</think>` lands in the cache. If the
+  // model gets stuck inside reasoning (no close marker within
+  // `n_predict`), there is nothing to compact — that's a model-output
+  // shape, not a compaction bug. Skip the discard assertion in that case
+  // so the test does not become flaky on prompt-dependent behaviour
+  // (mirrors gemma4.test.js's reasoning-channel detection).
+  const bool reasoningClosed =
+      output.find("</think>") != std::string::npos;
+  if (!reasoningClosed) {
+    GTEST_SKIP() << "Qwen3.5 multimodal did not close </think> within "
+                    "n_predict=1024 — discard assertion skipped "
+                    "(failure-counter check above already ran)";
+  }
+  EXPECT_GE(discards, 1.0)
+      << "Qwen3.5 multimodal with remove_thinking_from_context=true "
+         "must compact at least one thinking block once </think> lands";
+}
+
 TEST_F(MtmdLlmContextTest, ProcessWithSessionCache) {
   if (!hasValidModel()) {
     FAIL() << "Multimodal model or projection file not found";

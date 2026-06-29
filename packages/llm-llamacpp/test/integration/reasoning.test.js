@@ -549,11 +549,11 @@ const QWEN35_REASONING_CONFIG = {
 }
 
 // Qwen3.5 is a hybrid SSM family. The recurrent half is rolled back
-// via a partial-only `llama_state_seq_get_data_ext` snapshot taken at
-// the open marker, restored at end-of-generation, and the post-
-// reasoning tail is replayed through `llama_decode` so the SSM advances
-// over it without absorbing the dropped span. The previous hard
-// rejection has been removed; this test pins the success path.
+// via a disk-backed full-state snapshot taken at the prefill boundary,
+// restored at end-of-generation, and the post-reasoning tail is
+// replayed through `llama_decode` so the SSM advances over it without
+// absorbing the dropped span. The previous hard rejection has been
+// removed; this test pins the success path.
 safeTest('Qwen3.5 honours remove_thinking_from_context opt-in', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 900_000
@@ -722,4 +722,208 @@ safeTest('Qwen3.5 remove_thinking_from_context does not inflate runtime perf sta
   t.is(toNumber(on.promptTokens), toNumber(off.promptTokens),
     `promptTokens must match between compaction on/off (on=${on.promptTokens}, off=${off.promptTokens}); ` +
     'a larger on-value means the recurrent replay decode was counted as user-visible prompt work')
+})
+
+// Continuous-batching counterpart of the perf-stats test above. The batch
+// runtime stats path used to source `TTFT` from the shared
+// `llama_perf_context().t_p_eval_ms`, which is read AFTER slot
+// finalization runs `onGenerationFinished -> compactThinkSpan -> restore
+// + llama_decode` (the replay decode). For hybrid models that inflated
+// batch TTFT by the entire replay decode time. The fix sources batch
+// TTFT from scheduler-owned `prefillTimeMs` (only pure-prefill batch
+// steps; the compactor's replay does not go through `recordDecodeStep`).
+//
+// We assert the contract by running the same prompt twice through the
+// batch path — once with compaction OFF (no replay, clean TTFT) and once
+// with compaction ON (replay fires, TTFT should still be clean). The
+// scheduler is engaged via `parallel: 2`. A regression where batch TTFT
+// falls back to live perf counters would show as on-run TTFT being
+// strictly larger than off-run TTFT by the replay-decode time.
+safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
+  skip: isDarwinX64 || isWindowsX64,
+  timeout: 1_800_000
+}, async t => {
+  const [modelName, dirPath] = await ensureModel({
+    modelName: QWEN35_MODEL.name,
+    downloadUrl: QWEN35_MODEL.url
+  })
+  const modelPath = path.join(dirPath, modelName)
+
+  // `parallel: '2'` enables the continuous-batching scheduler so
+  // `inference.run([...])` flows through `batchRuntimeStatsLocked`
+  // (not `singleRuntimeStatsLocked`), which is the path under test.
+  const baseConfig = {
+    device: useCpu ? 'cpu' : 'gpu',
+    gpu_layers: '999',
+    seed: '50',
+    temp: '0',
+    top_p: '1',
+    verbosity: '2',
+    parallel: '2',
+    ...QWEN35_REASONING_CONFIG
+  }
+
+  async function runBatchOnce (removeThinking) {
+    const inference = new LlmLlamacpp({
+      files: { model: [modelPath] },
+      config: baseConfig,
+      logger: console,
+      opts: { stats: true }
+    })
+    try {
+      await inference.load()
+      const batchInput = [{
+        id: 'q-france',
+        prompt: createInitialMessages(),
+        runOptions: { generationParams: { remove_thinking_from_context: removeThinking } }
+      }]
+      const batchResponse = await inference.run(batchInput)
+      const results = await batchResponse.await()
+      const output = results.length > 0 ? (results[0].output || '') : ''
+      return { stats: batchResponse.stats || {}, output }
+    } finally {
+      await inference.unload().catch(() => {})
+    }
+  }
+
+  // Baseline: no compaction, no replay decode in onGenerationFinished.
+  // Whatever TTFT the batch reports here is the true prefill cost on
+  // this host.
+  const off = await runBatchOnce(false)
+  t.comment(`batch compaction=off stats: ${JSON.stringify(off.stats)}`)
+
+  const on = await runBatchOnce(true)
+  t.comment(`batch compaction=on  stats: ${JSON.stringify(on.stats)}`)
+
+  t.is(toNumber(on.stats.thinkingCompactionFailed), 0,
+    'compaction-on batch must not fail (otherwise the replay path was not exercised)')
+  t.ok(toNumber(on.stats.thinkingBlockDiscards) >= 1,
+    'compaction-on batch must actually drop a reasoning block (otherwise no replay decode ran)')
+
+  // Tolerance: TTFT is wall-clock and noisy across runs, so we don't
+  // pin equality. We pin the regression shape — without the fix the
+  // on-run TTFT is strictly larger by the entire replay-decode time
+  // (often a meaningful fraction of prefill time). 1.5x slack is well
+  // above run-to-run noise on shared hardware but well below the
+  // unfixed inflation magnitude observed in CI runs.
+  const ttftOff = toNumber(off.stats.TTFT)
+  const ttftOn = toNumber(on.stats.TTFT)
+  t.ok(ttftOff > 0,
+    `batch off-run must report a non-zero TTFT (got ${ttftOff})`)
+  t.ok(ttftOn > 0,
+    `batch on-run must report a non-zero TTFT (got ${ttftOn})`)
+  t.ok(ttftOn <= ttftOff * 1.5,
+    `batch TTFT on=${ttftOn}ms must be within 1.5x of off=${ttftOff}ms — ` +
+    'a larger on-value means the recurrent replay decode was counted as user-visible TTFT')
+
+  // promptTokens is scheduler-owned (populated by `accumulateSlot` from
+  // `prefillTokenCount`, not from `llama_perf_context`), so this should
+  // match identically — same prompt, same seed.
+  t.is(toNumber(on.stats.promptTokens), toNumber(off.stats.promptTokens),
+    `batch promptTokens must match between compaction on/off (on=${on.stats.promptTokens}, off=${off.stats.promptTokens})`)
+})
+
+// ContextShifter clears reasoning spans (and the recurrent snapshot for
+// hybrid models) whenever a slide drops cache tokens. This test pins the
+// safety contract: a slide that fires while `remove_thinking_from_context`
+// is enabled must NOT leave the compactor in a state where it asserts,
+// crashes, or records a failure. After a slide the compactor's span
+// bookkeeping is reset; subsequent reasoning either re-opens a fresh
+// span (compacts cleanly) or the recurrent path no-ops because the
+// boundary snapshot is gone. Either outcome must keep
+// `thinkingCompactionFailed == 0`.
+//
+// We force the slide by squeezing `ctx_size` down to 512 (and setting
+// `n_discarded=64` so overflow triggers a slide instead of a hard
+// error) and running multiple turns whose cumulative tokens overflow
+// that budget. The chat-template wrapping plus turn-1 reasoning output
+// is enough to push later turns past the ctx limit on Qwen3-0.6B — a
+// slide must fire to make room. Without compaction-aware slide
+// handling this used to crash on span-end-out-of-cache assertions;
+// with the fix it silently no-ops.
+safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
+  timeout: 600_000
+}, async t => {
+  const { inference } = await setupReasoningModel(t, false, {
+    configOverrides: {
+      // Tight ctx so the cumulative cache from multi-turn overflows
+      // ctx_size and ContextShifter is forced to run. 512 rounds up to
+      // the next 256 multiple, matching the budget used by
+      // sliding-context.test.js. n_predict is large enough that a
+      // single turn alone can fill the budget if the model decides to
+      // generate verbosely. `n_discarded > 0` is required to enable
+      // sliding (the default of 0 turns overflow into a hard error).
+      ctx_size: '512',
+      n_predict: '512',
+      n_discarded: '64'
+    }
+  })
+
+  // Drive turns sequentially, accumulating the full conversation in
+  // `messages`. Each turn issues a fresh `inference.run`, so the cache
+  // grows monotonically across turns and eventually trips the slide.
+  // We stop as soon as `contextSlides >= 1` so the test exits early on
+  // hosts where the model is more verbose than expected.
+  const messages = createInitialMessages()
+  let lastStats = {}
+  let lastResponse = ''
+  let sawSlide = false
+  let firstError = null
+
+  // Five turns is a comfortable upper bound — every additional turn
+  // roughly doubles cumulative tokens at this prompt scale, so the
+  // cache crosses 512 within 2–3 turns on every backend we test.
+  for (let turn = 1; turn <= 5 && !sawSlide; turn++) {
+    let turnStats = {}
+    let turnResponse = ''
+    try {
+      const result = await runCompletionWithStats(
+        inference,
+        messages,
+        { generationParams: { remove_thinking_from_context: true } }
+      )
+      turnStats = result.stats
+      turnResponse = result.response
+    } catch (err) {
+      firstError = firstError || err
+      break
+    }
+    lastStats = turnStats
+    lastResponse = turnResponse
+    t.comment(`turn ${turn} stats: ${JSON.stringify(turnStats)}`)
+    t.comment(`turn ${turn} response (len=${turnResponse.length}): ${turnResponse.slice(0, 120)}`)
+
+    // Pin per-turn invariants: every turn must succeed without
+    // incrementing the failure counter. A regression in the
+    // slide-clears-reasoning-state wiring would surface as a non-zero
+    // counter on the turn whose prefill triggered the slide.
+    t.is(toNumber(turnStats.thinkingCompactionFailed), 0,
+      `turn ${turn}: compaction must not record any failures ` +
+      `(got thinkingCompactionFailed=${turnStats.thinkingCompactionFailed})`)
+
+    if (toNumber(turnStats.contextSlides) >= 1) {
+      sawSlide = true
+    }
+    messages.push({ role: 'assistant', content: turnResponse })
+    messages.push({ role: 'user', content: 'Please elaborate further on the previous answer in great detail, covering all relevant background.' })
+  }
+
+  // Core safety contract: the combined feature surface must not crash.
+  // A regression where ContextShifter's reasoning-state reset is wired
+  // up incorrectly would surface here as a thrown StatusError (span
+  // end-out-of-cache, snapshot underflow, etc.).
+  t.is(firstError, null,
+    `multi-turn run with sliding + remove_thinking_from_context must not throw (${firstError && firstError.message})`)
+
+  // The slide must have actually fired — otherwise the test is not
+  // exercising the interaction it claims to.
+  t.ok(sawSlide,
+    `at least one turn must have triggered a context slide (last stats=${JSON.stringify(lastStats)}); ` +
+    'if no slide fired the test is not exercising the slide × compaction interaction — ' +
+    'shrink ctx_size further or raise the per-turn elaboration budget')
+
+  // Generation must still produce text on the slide turn itself —
+  // empty output would indicate the slide broke generation.
+  t.ok(lastResponse.length > 0,
+    'last turn (which slid) must still generate text')
 })

@@ -198,8 +198,8 @@ namespace {
 
 // Helper that wires up the compactor with the gates exposed by its
 // public API. The boundary snapshot is left empty by default; callers
-// that need `hasReasoningBoundary()` to be true seed it directly via
-// `RecurrentStateSnapshot.data`.
+// that need `hasReasoningBoundary()` to be true seed a sentinel
+// file-backed snapshot through the rollback test seam.
 struct CompactorFixture {
   ReasoningRollbackState rollback;
   // Tools-compact controller is unused by `recordCloseMarkerForReplay`
@@ -266,7 +266,7 @@ TEST(ReasoningBlockCompactorReplaySeed, AppendsWhenAllGatesAndBoundaryPresent) {
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
   fx.compactor.setNeedsRecurrentSnapshot(true);
-  fx.rollback.seedReasoningBoundaryForTesting({0xAB, 0xCD}, /*nPast=*/10);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
   ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
 
   fx.compactor.recordCloseMarkerForReplay(/*closeMarker=*/123);
@@ -280,10 +280,187 @@ TEST(ReasoningBlockCompactorReplaySeed, SkipsNullCloseMarker) {
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
   fx.compactor.setNeedsRecurrentSnapshot(true);
-  fx.rollback.seedReasoningBoundaryForTesting({0xAB}, /*nPast=*/5);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/5);
   ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
 
   fx.compactor.recordCloseMarkerForReplay(LLAMA_TOKEN_NULL);
   EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
   EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 0u);
+}
+
+// Pin the close-capture handshake contract used by every close-marker
+// site (normal buffer-transition path AND EOS-substitution path):
+// `onCloseCommitted` only records the span end after a prior
+// `requestCloseCapture()`. The EOS-substitution path in
+// `TextLlmContext::handleReasoningEOS` previously called
+// `onCloseCommitted` directly without flipping the flag, which silently
+// dropped the close position and left `compactThinkSpan` to bail at
+// `end < 0`. These tests document the contract so any future caller
+// regression surfaces here rather than as a "multi-turn compaction
+// quietly stops working" integration failure.
+TEST(ReasoningBlockCompactorCloseCommit, IsNoOpWithoutPriorRequest) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setOpenSpan(/*start=*/10);
+  ASSERT_TRUE(fx.compactor.hasOpenSpan());
+  ASSERT_FALSE(fx.compactor.hasPendingCloseCapture());
+
+  // No `requestCloseCapture()` ahead of this — the flag never flipped,
+  // so the commit is dropped and the span end stays unset.
+  fx.compactor.onCloseCommitted(/*pos=*/42);
+  EXPECT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
+}
+
+TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setOpenSpan(/*start=*/10);
+  ASSERT_TRUE(fx.compactor.hasOpenSpan());
+
+  fx.compactor.requestCloseCapture();
+  ASSERT_TRUE(fx.compactor.hasPendingCloseCapture());
+  fx.compactor.onCloseCommitted(/*pos=*/42);
+  EXPECT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+  EXPECT_FALSE(fx.compactor.hasPendingCloseCapture());
+}
+
+// ============================================================================
+// Failure stats — `Outcome::Kind::FailedRecurrentRestore` path
+// ============================================================================
+//
+// The recurrent compaction path increments `thinkingCompactionFailed_` and
+// returns a retained-state `Outcome` (rather than throwing or silently
+// dropping state) when the boundary restore underflows. Callers in
+// `TextLlmContext` / `MtmdLlmContext` use the returned `newPos` /
+// `keptPrefixEnd` / `discarded` fields to keep the cache cursor in a
+// defined position even though the underlying llama state is undefined —
+// this is the documented "best-effort" recovery contract.
+//
+// These tests pin three things:
+//   1. `thinkingCompactionFailed_` increments by exactly 1 per failure.
+//   2. `thinkingBlockDiscards_` does NOT increment (no successful drop).
+//   3. The retained-state fields snap to the snapshot anchor
+//      (`snapshotPos`), so the caller can resume from a known prefix.
+//
+// We force the failure via `ctx == nullptr`: `restoreRecurrentState` is
+// the first call inside the recurrent branch and short-returns false on
+// null `lctx`, producing `FailedRecurrentRestore`.
+//
+// Note on the symmetric `FailedRecurrentReplay` branch (see lines 242-259
+// of `ReasoningBlockCompactor.cpp`): it shares the same
+// `++thinkingCompactionFailed_` and retained-state shape, but reaching it
+// from a unit test requires either a test seam on `replayPostReasoning`
+// or a real `llama_context` — `ctx == nullptr` trips restore failure
+// first, so the replay branch is unreachable from this fixture. We
+// deliberately leave it as a code-reading equivalence rather than
+// introducing a new production test seam for parity.
+
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    RestoreFailureIncrementsCompactionFailedAndRetainsSnapshotAnchor) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+
+  constexpr llama_pos kSnapshotPos = 10;
+  constexpr llama_pos kSpanStart = 15;
+  constexpr llama_pos kSpanEnd = 20;
+  constexpr llama_pos kLivePos = 25;
+
+  // Seed a captured boundary so the recurrent branch is actually entered
+  // (the "no boundary captured" early-return is its own outcome — see
+  // `NoOpWhenBoundaryNotCaptured` above).
+  fx.rollback.seedReasoningBoundaryForTesting(kSnapshotPos);
+  ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
+
+  // A fully committed span — open + close + still inside the live cache.
+  fx.compactor.setOpenSpan(kSpanStart);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(kSpanEnd);
+  ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  ASSERT_EQ(fx.compactor.compactionFailed(), 0);
+  ASSERT_EQ(fx.compactor.blockDiscards(), 0);
+
+  // `ctx == nullptr` -> `restoreRecurrentState` returns false ->
+  // `restoreReasoningBoundary` returns false -> `FailedRecurrentRestore`.
+  const auto outcome =
+      fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
+
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedRecurrentRestore);
+
+  // Retained-state contract: snap to the snapshot anchor so the caller
+  // can resume from a known prefix even though the underlying state is
+  // undefined. `newPos == keptPrefixEnd == snapshotPos`, and
+  // `discarded == livePos - snapshotPos`.
+  EXPECT_EQ(outcome.newPos, kSnapshotPos);
+  EXPECT_EQ(outcome.keptPrefixEnd, kSnapshotPos);
+  EXPECT_EQ(outcome.discarded, kLivePos - kSnapshotPos);
+  // `spanStart` / `spanEnd` are populated unconditionally in the
+  // prologue of `compact()` (before any branch); pinning them here
+  // catches a regression that would clear them on the failure path.
+  EXPECT_EQ(outcome.spanStart, kSpanStart);
+  EXPECT_EQ(outcome.spanEnd, kSpanEnd);
+  EXPECT_EQ(outcome.replayedTokens, 0u);
+
+  // Stats: exactly one failure recorded, no success counted.
+  EXPECT_EQ(fx.compactor.compactionFailed(), 1);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+}
+
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    NoOpOutcomesDoNotIncrementCompactionFailed) {
+  // The "intentional retained state" half of the reviewer's concern:
+  // non-failure no-op paths (degenerate span where close never landed,
+  // and recurrent runs with no boundary captured) leave the cache
+  // untouched and MUST NOT bump the failure counter. Without this guard,
+  // any caller skipping `compactThinkSpan` (e.g. a turn where reasoning
+  // never closed) would silently inflate `thinkingCompactionFailed` and
+  // look like a real failure to dashboards.
+  //
+  // We deliberately do NOT cover the `end <= start` and `end > pos`
+  // sub-cases here because the public API does not expose a way to
+  // construct those configurations: `setOpenSpan` rejects `start < 0`
+  // and `onCloseCommitted` only ever monotonically writes `end`. Those
+  // bail-outs are defensive backstops that fire only if the compactor
+  // is mis-used by an internal caller.
+
+  // 1. Degenerate span (close never committed -> end < 0).
+  {
+    CompactorFixture fx;
+    fx.compactor.setRemoveThinkingFromContext(true);
+    fx.compactor.setReasoningEnabled(true);
+    fx.compactor.setNeedsRecurrentSnapshot(true);
+    fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+    fx.compactor.setOpenSpan(/*start=*/15);
+    // No requestCloseCapture / onCloseCommitted -> end stays -1.
+    ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+    const auto outcome =
+        fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+    EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+    EXPECT_EQ(fx.compactor.compactionFailed(), 0);
+  }
+
+  // 2. Recurrent path with no boundary captured -> NoOp, not a failure.
+  {
+    CompactorFixture fx;
+    fx.compactor.setRemoveThinkingFromContext(true);
+    fx.compactor.setReasoningEnabled(true);
+    fx.compactor.setNeedsRecurrentSnapshot(true);
+    ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
+    fx.compactor.setOpenSpan(/*start=*/15);
+    fx.compactor.requestCloseCapture();
+    fx.compactor.onCloseCommitted(/*pos=*/20);
+
+    const auto outcome =
+        fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+    EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+    EXPECT_EQ(fx.compactor.compactionFailed(), 0);
+  }
 }

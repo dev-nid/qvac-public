@@ -129,6 +129,14 @@ struct RuntimeStatsSnapshot {
   /// Prompt-processing throughput (tok/s) from pure-prefill-step timing, 0 if
   /// none. Batch analogue of `ppTPS`.
   [[nodiscard]] double prefillTokensPerSecond() const;
+  /// Wall-clock time (ms) spent in pure-prefill batch steps in the current
+  /// idle epoch. Batch analogue of single-prompt `TTFT`: it excludes decode
+  /// steps AND any compactor replay decode that runs in
+  /// `onGenerationFinished`, so internal recurrent / hybrid cache maintenance
+  /// does not inflate user-visible TTFT — unlike a read from
+  /// `llama_perf_context().t_p_eval_ms`, which counts every `llama_decode`
+  /// call against the shared context.
+  [[nodiscard]] double prefillTimeMs() const noexcept { return prefillTimeMs_; }
 
 private:
   uint64_t decodeStepCount_ = 0;
