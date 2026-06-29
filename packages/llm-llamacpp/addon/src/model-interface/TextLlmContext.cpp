@@ -440,13 +440,8 @@ bool TextLlmContext::evalMessageWithTools(
   // or a live `llama_perf_context()` value — never a stale one.
   userVisiblePerf_.reset();
 
-  // Pre-request checkpoint. Captured BEFORE prefill so a cancel at any
-  // stage (mid-prefill OR mid-generation) can roll the cache back to
-  // exactly the cursor that existed when this request entered. See
-  // `onCancel` for the corresponding restore. `firstMsgTokens_` is
-  // captured too because the prefill path may overwrite it (line that
-  // sets `firstMsgTokens_ = nPast_` post-prefill); on cancel we need
-  // to undo that write.
+  // Pre-request checkpoint for `onCancel`. `firstMsgTokens_` is
+  // captured too because prefill may overwrite it.
   preRequestNPast_ = nPast_;
   preRequestFirstMsgTokens_ = firstMsgTokens_;
 
@@ -798,11 +793,8 @@ bool TextLlmContext::generateResponse(
 
     common_batch_clear(*batch);
     if (stopGeneration_.load()) {
-      // Skip EOT injection on BOTH hybrid/recurrent and pure-attention
-      // paths and route through the post-loop cancel branch below,
-      // which restores the pre-request cursor via `onCancel`. Injecting
-      // EOT here would advance `nPast_` past the rollback target on
-      // pure-attention and corrupt the recurrent state on hybrid.
+      // Route through the post-loop `onCancel` instead of injecting
+      // EOT — EOT would advance `nPast_` past the rollback target.
       break;
     }
     common_batch_add(*batch, step.token, nPast_, {seqId_}, true);
@@ -816,14 +808,8 @@ bool TextLlmContext::generateResponse(
     ++nPast_;
   }
 
-  // Unified post-loop cancel cleanup for BOTH hybrid/recurrent and
-  // pure-attention. Every mid-loop cancel exit (post-sampling check
-  // above or the cancel exit inside `onLogitsReady`) now leaves
-  // `stopGeneration_` set and skips EOT injection, so the rollback
-  // bookkeeping in `onCancel` (snapshot restore on hybrid, `seq_rm`
-  // tail trim on pure-attention) runs exactly once and rolls the
-  // cache back to the pre-request cursor — matching the prefill-stage
-  // cancel semantics.
+  // Unified post-loop cancel for both hybrid/recurrent and pure-attention.
+  // Mid-loop cancel exits leave `stopGeneration_` set and skip EOT.
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
     onCancel(outputCallback);
@@ -842,13 +828,8 @@ SequenceStepResult TextLlmContext::onLogitsReady(
   capturePendingThinkClose();
 
   if (stopGeneration_.load()) {
-    // Both hybrid/recurrent and pure-attention: leave `stopGeneration_`
-    // set so `generateResponse`'s post-loop cleanup routes through
-    // `onCancel` and rolls the cache back to the pre-request cursor.
-    // Do NOT emit the EOT sentinel — the rollback drops every token
-    // sampled since prefill (and on pure-attention also drops the
-    // prompt itself), so a synthetic EOT in the visible stream would
-    // mislead the caller about how the turn ended.
+    // Leave `stopGeneration_` set so the post-loop `onCancel` runs;
+    // do NOT emit EOT since the rollback drops all sampled tokens.
     return {.finished = true};
   }
   generationStarted_ = true;
@@ -1001,60 +982,40 @@ void TextLlmContext::onGenerationFinished(
   // pre-compaction `nPast_` (its offsets are computed against
   // `assistantOutput_`).
   compactThinkSpan();
+  // Generation completed; cancel cannot fire anymore so the
+  // prefill-entry rollback checkpoint is no longer reachable. Drop
+  // its temp file now instead of waiting for the next inference.
+  rollbackState_.clearPrefillEntry();
 }
 
 void TextLlmContext::onCancel(
     const std::function<void(const std::string&)>& outputCallback) {
-  // Cancel semantics: "this request never happened". The cache is
-  // rolled back to the cursor that existed BEFORE this request's
-  // prompt was submitted — not to end-of-prefill — so cancel is
-  // symmetric whether it fires during prefill or during generation.
-  //
-  // We deliberately do NOT use the `reasoningBoundary` (end-of-prefill)
-  // snapshot here. That snapshot is reserved for normal thinking-block
-  // compaction in `compactThinkSpan` and includes the submitted prompt
-  // + forced `<think>\n` opener; restoring it on cancel would leak the
-  // cancelled prompt and an orphaned opener into the next turn's cache.
+  // Cancel = "request never happened": roll back to the pre-request
+  // cursor for both prefill- and decode-stage cancels.
+  // `reasoningBoundary` is compaction-only and not used here — restoring
+  // it would leak the cancelled prompt + forced opener into the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
   if (needsRecurrentSnapshot_) {
-    // Recurrent / hybrid path: the only way to drop partially decoded
-    // prompt + generation tokens is a full-state restore (partial
-    // `seq_rm` is a no-op on recurrent memory). `prefillEntry` was
-    // captured at the pre-request `nPast_` value, so restoring it
-    // brings the SSM + attention KV back to the exact pre-request
-    // state.
+    // Recurrent / hybrid: partial `seq_rm` is rejected by recurrent
+    // memory, so the only rollback option is a full-state restore.
     if (rollbackState_.hasPrefillEntry()) {
       const llama_pos restoredNPast = rollbackState_.prefillEntryNPast();
       if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
         nPast_ = restoredNPast;
       } else {
-        // Restore underflowed: the recurrent half is in an undefined
-        // state. The next inference's `rollbackState_.reset()` at the
-        // top of `evalMessageWithTools` will clear bookkeeping, but
-        // the cache itself may stay inconsistent until a full reset.
         QLOG_IF(
             Priority::WARNING,
             string_format(
-                "[TextLlm] prefill-entry recurrent snapshot restore "
-                "failed on cancel (snapshotNPast=%d, nPast=%d, seqId=%d); "
-                "recurrent state may be inconsistent until the next "
-                "full reset\n",
+                "[TextLlm] prefillEntry restore failed on cancel "
+                "(snapshotNPast=%d, nPast=%d, seqId=%d)\n",
                 restoredNPast,
                 nPast_,
                 seqId_));
         compactor_.incrementCompactionFailed();
       }
     }
-    // If `prefillEntry` was not captured (snapshot failure at
-    // `capturePrefillEntry`), we cannot safely roll the recurrent half
-    // back. Bookkeeping below still fires so the contexts of the
-    // failure counter, span, and post-reasoning buffers are clean for
-    // the next inference.
   } else {
-    // Pure-attention path: `llama_memory_seq_rm` over the partial tail
-    // is supported, so we just drop everything decoded since the
-    // pre-request cursor.
     const llama_pos delta = nPast_ - preRequestNPast_;
     if (delta > 0) {
       removeLastNTokens(delta);
@@ -1062,12 +1023,6 @@ void TextLlmContext::onCancel(
     }
   }
 
-  // Common cleanup. Restore the pre-request `firstMsgTokens_` so that
-  // tools-compact bookkeeping (which may have overwritten it during
-  // this request's prefill) is also rolled back. Clear every
-  // per-inference rollback buffer; the next inference's
-  // `rollbackState_.reset()` would do this anyway, but doing it here
-  // keeps the post-cancel `runtimeStats()` snapshot honest.
   firstMsgTokens_ = preRequestFirstMsgTokens_;
   rollbackState_.clearPrefillEntry();
   rollbackState_.clearReasoningBoundary();
@@ -1202,21 +1157,9 @@ void TextLlmContext::compactThinkSpan() {
   // Freeze the user-visible perf counters before the compactor's
   // recurrent path runs `restore + llama_decode` to replay the post-
   // reasoning tail. Those replay decodes accumulate into `n_p_eval` /
-  // `t_p_eval_ms`, which would otherwise inflate prompt / TTFT / ppTPS
-  // in `runtimeStats()` even though the tokens were already delivered
-  // to the caller.
-  //
-  // Only capture for the recurrent / hybrid path that actually replays
-  // — pure-attention compaction is a single `seq_rm + seq_add` with no
-  // extra `llama_decode`, so reading the live counters at
-  // `runtimeStats()` time already produces the correct user-visible
-  // numbers. Capturing for pure-attention also opens a race on
-  // backends where decode telemetry is finalised lazily (e.g. Metal),
-  // because the snapshot is taken before the final
-  // `llama_synchronize()` in `resetState` and can lag the live counters
-  // by a token. Gated on the same `needsRecurrentSnapshot_` predicate
-  // the compactor itself uses, with the captured-span guard on top so
-  // we only freeze when the recurrent path can actually fire.
+  // `t_p_eval_ms` and would otherwise inflate prompt / TTFT / ppTPS.
+  // Capture only when the recurrent replay path can actually fire;
+  // pure-attention compaction has no extra `llama_decode`.
   if (needsRecurrentSnapshot_ && compactor_.hasOpenSpan() &&
       !userVisiblePerf_.has_value()) {
     userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
@@ -1483,15 +1426,8 @@ void TextLlmContext::resetState(bool resetStats) {
   thinkingForcedOpenText_.clear();
   compactor_.reset();
   rollbackState_.reset();
-  // `userVisiblePerf_` belongs to the per-inference perf-stat surface
-  // (same family as block discards / compaction failures above): it is
-  // populated by `compactThinkSpan` and consumed by `runtimeStats()`.
-  // The post-inference cleanup in `processPromptImpl` calls us with
-  // `resetStats=false` AFTER generation but BEFORE the caller reads
-  // `runtimeStats()`, so wiping the snapshot here would silently
-  // re-promote the inflated live `n_p_eval` (which now includes the
-  // recurrent replay decode) into the user-visible counters. Tie the
-  // reset to the same flag as the other per-inference perf state.
+  // Gated on `resetStats` — the partial reset between generation and
+  // `runtimeStats()` must preserve the compactor's perf snapshot.
   if (resetStats) {
     userVisiblePerf_.reset();
   }

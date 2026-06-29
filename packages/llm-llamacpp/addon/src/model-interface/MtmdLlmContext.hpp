@@ -375,15 +375,9 @@ private:
   double visionEncodeMs_ = 0.0;
   int32_t visionEncodeTiles_ = 0;
   bool pendingBatchFirstMsg_ = false;
-  // Pre-request checkpoint: `current_` and `protectedPrefix_` as they
-  // were when `evalMessageWithTools` started. Used by
-  // `cancelGenerationCleanup` so a cancel at any stage (mid-prefill or
-  // mid-generation) rolls the cache back to the cursor that existed
-  // BEFORE this request's prompt was submitted — i.e. cancel means
-  // "this request never happened", matching the prefill-stage cancel
-  // semantics. The `reasoningBoundary` snapshot (post-prefill) is
-  // reserved for normal thinking-block compaction in
-  // `compactThinkSpan`; it is no longer used for cancel.
+  // Snapshot of `current_` / `protectedPrefix_` at `evalMessageWithTools`
+  // entry. Restored by `cancelGenerationCleanup` to roll back to the
+  // pre-request cursor.
   ContextUsage preRequestUsage_;
   ContextUsage preRequestProtectedPrefix_;
 

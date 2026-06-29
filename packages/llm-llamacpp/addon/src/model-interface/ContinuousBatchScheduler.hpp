@@ -129,13 +129,9 @@ struct RuntimeStatsSnapshot {
   /// Prompt-processing throughput (tok/s) from pure-prefill-step timing, 0 if
   /// none. Batch analogue of `ppTPS`.
   [[nodiscard]] double prefillTokensPerSecond() const;
-  /// Wall-clock time (ms) spent in pure-prefill batch steps in the current
-  /// idle epoch. Batch analogue of single-prompt `TTFT`: it excludes decode
-  /// steps AND any compactor replay decode that runs in
-  /// `onGenerationFinished`, so internal recurrent / hybrid cache maintenance
-  /// does not inflate user-visible TTFT — unlike a read from
-  /// `llama_perf_context().t_p_eval_ms`, which counts every `llama_decode`
-  /// call against the shared context.
+  /// Wall-clock time (ms) spent in pure-prefill batch steps. Batch
+  /// analogue of single-prompt `TTFT`; excludes decode and compactor
+  /// replay decode so internal cache maintenance does not inflate it.
   [[nodiscard]] double prefillTimeMs() const noexcept { return prefillTimeMs_; }
 
 private:
@@ -326,11 +322,8 @@ private:
     size_t outputIndex = 0;
     bool saveCacheToDisk = false;
     bool prefillOnly = false;
-    // Driver `nPast` captured just before `finalizeTerminalDriver`
-    // (which may run `onCancel` and roll the driver back to the
-    // pre-request cursor). Set to `nullopt` for non-cancelled paths;
-    // `accumulateSlotRuntimeStats` falls back to the live
-    // `driver->getNPast()` in that case.
+    // Driver `nPast` captured before `onCancel` rewinds it so cancelled
+    // requests still report the work performed in `CacheTokens`.
     std::optional<int64_t> peakNPastAtFinalize;
   };
 

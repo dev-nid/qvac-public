@@ -1121,12 +1121,8 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t thinkingDiscards = 0;
   int64_t compactionFailed = 0;
   if (slot.driver) {
-    // For cancelled requests `onCancel` rewinds the driver's `nPast`
-    // to the pre-request cursor (cancel = "request never happened").
-    // We prefer the slot's pre-cancel cursor snapshot (`peakNPastAtFinalize`)
-    // so user-visible `CacheTokens` reflects the work actually performed
-    // by this request — internal rollback maintenance must not deflate
-    // it, mirroring the `prefillTimeMs` cutoff applied to `TTFT`.
+    // Prefer the pre-rollback snapshot for cancelled requests so
+    // `CacheTokens` reflects work performed, not the post-rollback cursor.
     nPast = slot.peakNPastAtFinalize.has_value()
                 ? *slot.peakNPastAtFinalize
                 : static_cast<int64_t>(slot.driver->getNPast());

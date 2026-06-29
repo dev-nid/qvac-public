@@ -311,14 +311,8 @@ private:
   llama_pos nPast_ = 0;
   llama_pos firstMsgTokens_ = 0;
   llama_pos perSeqCtxCeiling_ = -1;
-  // Pre-request checkpoint: `nPast_` and `firstMsgTokens_` as they were
-  // when `evalMessageWithTools` started. Used by `onCancel` so a cancel
-  // at any stage (mid-prefill or mid-generation) rolls the cache back
-  // to the cursor that existed BEFORE this request's prompt was
-  // submitted — i.e. cancel means "this request never happened",
-  // matching the prefill-stage cancel semantics. The `reasoningBoundary`
-  // snapshot (post-prefill) is reserved for normal thinking-block
-  // compaction in `compactThinkSpan`; it is no longer used for cancel.
+  // Snapshot of `nPast_` / `firstMsgTokens_` at `evalMessageWithTools`
+  // entry. Restored by `onCancel` to roll back to the pre-request cursor.
   llama_pos preRequestNPast_ = 0;
   llama_pos preRequestFirstMsgTokens_ = 0;
   bool pendingBatchFirstMsg_ = false;

@@ -257,15 +257,20 @@ function assertCachedStats (t, stats, label) {
   t.ok(cacheTokens <= CTX_SIZE, `${label}: CacheTokens should stay within ctx (${cacheTokens} <= ${CTX_SIZE})`)
 }
 
-function assertCanceledPrefillKeptTokens (t, beforeStats, afterStats) {
+function assertCanceledPrefillRolledBack (t, beforeStats, afterStats) {
+  // Cancel = "request never happened": prefill cancel must roll the
+  // cache back to the pre-request cursor, modulo any context slides
+  // that fired before cancel landed. We therefore expect the cache
+  // size to match the pre-cancel baseline (minus slide discards) and
+  // never to exceed it.
   const beforeCacheTokens = toNumber(beforeStats.CacheTokens)
   const afterCacheTokens = toNumber(afterStats.CacheTokens)
   const slideDiscard = toNumber(afterStats.contextSlides) * N_DISCARDED
-  const baselineAfterSlides = beforeCacheTokens - slideDiscard
+  const baselineAfterSlides = Math.max(beforeCacheTokens - slideDiscard, 0)
 
   t.ok(
-    afterCacheTokens > baselineAfterSlides,
-    'cancel during prefill keeps evaluated tokens in cache after slide adjustment ' +
+    afterCacheTokens <= baselineAfterSlides + 1,
+    'cancel during prefill rolls cache back to pre-request cursor ' +
     `(${beforeCacheTokens} - ${slideDiscard} -> ${afterCacheTokens}, slides=${afterStats.contextSlides || 0})`
   )
 }
@@ -361,7 +366,7 @@ safeTest('Qwen3.5-VL cached chat stresses sliding and cancel recovery', {
       prefill: true
     }
   )
-  assertCanceledPrefillKeptTokens(t, prefillSlide.stats, canceledPrefillStats)
+  assertCanceledPrefillRolledBack(t, prefillSlide.stats, canceledPrefillStats)
   await runNoCacheSeparator(t, addon, 'after canceled prefill')
 
   const afterPrefillCancel = await runAndCollect(
