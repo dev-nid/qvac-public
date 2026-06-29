@@ -91,10 +91,7 @@ bool CacheManager::handleCache(
               "%s: No cacheKey provided, clearing existing cache '%s'\n",
               __func__,
               sessionPath_.c_str()));
-      const bool stateReset = saveActiveCacheForTransition();
-      if (!stateReset) {
-        resetStateCallback_(true);
-      }
+      saveActiveCacheForTransition();
       sessionPath_.clear();
       cacheDisabled_ = true;
     }
@@ -115,10 +112,7 @@ bool CacheManager::handleCache(
             __func__,
             sessionPath_.c_str(),
             cacheKey.c_str()));
-    const bool stateReset = saveActiveCacheForTransition();
-    if (!stateReset) {
-      resetStateCallback_(true);
-    }
+    saveActiveCacheForTransition();
   } else {
     resetStateCallback_(true);
   }
@@ -277,17 +271,17 @@ void CacheManager::saveCache() {
   writeCacheFile(sessionPath_);
 }
 
-bool CacheManager::saveActiveCacheForTransition() {
+void CacheManager::saveActiveCacheForTransition() {
   if (discardActiveCacheIfParentMissing()) {
-    return true;
+    return;
   }
 
   try {
     saveCache();
-    return false;
+    resetStateCallback_(true);
   } catch (...) {
     if (discardActiveCacheIfParentMissing()) {
-      return true;
+      return;
     }
     resetStateCallback_(true);
     invalidate();

@@ -788,6 +788,44 @@ TEST_F(CacheManagementTest, SwitchAfterCacheDirectoryDeletedUsesNewKey) {
   EXPECT_FALSE(fs::exists(deleted_cache_dir));
 }
 
+TEST_F(CacheManagementTest, ClearAfterCacheDirectoryDeletedDisablesCache) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  const fs::path deleted_cache_dir = "deleted_cache_dir";
+  const std::string deleted_cache_path =
+      (deleted_cache_dir / "session.bin").string();
+
+  fs::remove_all(deleted_cache_dir);
+  fs::create_directories(deleted_cache_dir);
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
+        deleted_cache_path,
+        true);
+  });
+  EXPECT_TRUE(fs::exists(deleted_cache_path));
+
+  fs::remove_all(deleted_cache_dir);
+
+  EXPECT_NO_THROW({
+    processPromptString(
+        model,
+        R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])");
+  });
+
+  EXPECT_FALSE(fs::exists(deleted_cache_dir));
+  EXPECT_FALSE(fs::exists(session2_path));
+}
+
 TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
   if (!hasValidModel()) {
     FAIL() << "Test model not found";

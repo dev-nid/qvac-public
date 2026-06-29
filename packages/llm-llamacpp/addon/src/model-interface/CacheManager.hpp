@@ -36,7 +36,7 @@ public:
   bool wasCacheUsedInLastPrompt() const;
 
 private:
-  bool saveActiveCacheForTransition();
+  void saveActiveCacheForTransition();
   bool discardActiveCacheIfParentMissing();
   void writeCacheFile(const std::string& path);
   static void atomicPromoteFile(const std::string& from, const std::string& to);
