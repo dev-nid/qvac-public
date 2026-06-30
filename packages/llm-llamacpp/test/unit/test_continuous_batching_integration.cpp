@@ -772,9 +772,25 @@ TEST_F(
 /// prompts in parallel with `remove_thinking_from_context = true` and
 /// asserting that at least one slot reports a thinking discard with zero
 /// compaction failures.
+///
+/// Platform gate: mirrors `test/integration/reasoning.test.js` which
+/// gates every Qwen3.5 reasoning assertion to Apple Silicon Metal
+/// (`skip: isDarwinX64 || isWindowsX64`, plus runtime CPU detection
+/// elsewhere). The Qwen3.5-0.8B Q8 checkpoint produces a closed
+/// `<think>...</think>` reliably only on Metal under greedy decoding;
+/// on CPU runners the model drifts into self-referential loops, never
+/// emits `</think>`, and `compactThinkSpan` correctly stays a no-op —
+/// which is the right product behavior but turns this regression check
+/// into a flake. The snapshot path itself is covered cross-platform by
+/// the `ReasoningSnapshotPolicy` and `ReasoningBlockCompactor*` unit
+/// tests in `test_reasoning_block_compactor.cpp`.
 TEST_F(
     ContinuousBatchingIntegrationTest,
     TwoPromptBatchQwen35HybridDropsThinkBlocks) {
+#if !(defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)))
+  GTEST_SKIP() << "Qwen3.5-0.8B reasoning is only deterministic on Apple "
+                  "Silicon Metal; mirrors reasoning.test.js platform gate.";
+#endif
   REQUIRE_MODEL(qwen35HybridModel_);
   // Qwen3.5 thinking traces are long; give each slot enough cache and
   // generation budget to actually close `</think>` so the compactor fires.
