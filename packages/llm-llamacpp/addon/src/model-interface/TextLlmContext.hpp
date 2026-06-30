@@ -285,8 +285,8 @@ private:
   // (boundary == `prefillLen`) only when the forced opener is already
   // in the cache, so the restored recurrent state stays structurally
   // balanced after replay.
-  [[nodiscard]] llama_pos computeRecurrentSnapshotBoundary(
-      llama_pos prefillLen) const;
+  [[nodiscard]] llama_pos
+  computeRecurrentSnapshotBoundary(llama_pos prefillLen) const;
 
   // Takes a full-state snapshot of `seqId_` at the current `nPast_`
   // and stores it in `rollbackState_`. No-op unless the template

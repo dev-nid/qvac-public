@@ -55,8 +55,7 @@ MtmdLlmContext::MtmdLlmContext(
     llama_seq_id seqId, llama_pos perSeqCtxCeiling)
     : tools_(tools), sharedVision_(sharedVision), modelCtx_(shared),
       params_(commonParams), perSeqCtxCeiling_(perSeqCtxCeiling),
-      compactor_(rollbackState_, tools_),
-      shifter_(compactor_, rollbackState_) {
+      compactor_(rollbackState_, tools_), shifter_(compactor_, rollbackState_) {
   seqId_ = seqId;
   if (sharedVision_ == nullptr) {
     throw qvac_errors::StatusError(

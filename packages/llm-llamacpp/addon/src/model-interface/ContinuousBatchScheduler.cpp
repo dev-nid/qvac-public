@@ -639,8 +639,7 @@ void ContinuousBatchScheduler::drainFinishedLocked() {
     // accumulate the live driver position as before.
     if (req.stopReason == StopReason::Cancelled ||
         req.stopReason == StopReason::DecodeError) {
-      slot.peakNPastAtFinalize =
-          static_cast<int64_t>(slot.driver->getNPast());
+      slot.peakNPastAtFinalize = static_cast<int64_t>(slot.driver->getNPast());
     }
     finalizeTerminalDriver(
         *slot.driver, req.stopReason, slot.prefillOnly, outputCallback);

@@ -131,14 +131,23 @@ TEST(RuntimeStatsAccumulate, AccumulateSlotSumsThinkingDiscards) {
 
   // (nPast, nSlides, thinkingDiscards, compactionFailed, req)
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/1,
-      /*compactionFailed=*/0, reqA);
+      /*nPast=*/0,
+      /*nSlides=*/0,
+      /*thinkingDiscards=*/1,
+      /*compactionFailed=*/0,
+      reqA);
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0,
-      /*compactionFailed=*/0, reqB);
+      /*nPast=*/0,
+      /*nSlides=*/0,
+      /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0,
+      reqB);
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/2,
-      /*compactionFailed=*/0, reqC);
+      /*nPast=*/0,
+      /*nSlides=*/0,
+      /*thinkingDiscards=*/2,
+      /*compactionFailed=*/0,
+      reqC);
 
   EXPECT_EQ(stats.thinkingBlockDiscards, 3);
 }
@@ -173,8 +182,11 @@ TEST(RuntimeStatsAccumulate, CancelBeforePrefillCountsZeroPromptTokens) {
   // Same call the cancel path makes via accumulateSlotRuntimeStats: nothing
   // was processed, so nPast and the generated vector are empty.
   stats.accumulateSlot(
-      /*nPast=*/0, /*nSlides=*/0, /*thinkingDiscards=*/0,
-      /*compactionFailed=*/0, req);
+      /*nPast=*/0,
+      /*nSlides=*/0,
+      /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0,
+      req);
 
   EXPECT_EQ(stats.promptTokens, 0);
 }
@@ -195,8 +207,11 @@ TEST(RuntimeStatsAccumulate, CompletedPrefillCountsFullPrompt) {
 
   RuntimeStatsSnapshot stats;
   stats.accumulateSlot(
-      /*nPast=*/42, /*nSlides=*/0, /*thinkingDiscards=*/0,
-      /*compactionFailed=*/0, req);
+      /*nPast=*/42,
+      /*nSlides=*/0,
+      /*thinkingDiscards=*/0,
+      /*compactionFailed=*/0,
+      req);
 
   EXPECT_EQ(stats.promptTokens, 42);
 }

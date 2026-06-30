@@ -21,8 +21,8 @@
 #include "model-interface/MtmdLlmContext.hpp"
 #include "model-interface/TextLlmContext.hpp"
 #include "model-interface/ToolsCompactController.hpp"
-#include "utils/RecurrentStateSnapshot.hpp"
 #include "test_common.hpp"
+#include "utils/RecurrentStateSnapshot.hpp"
 
 // Tests for the cancel-rollback paths introduced alongside
 // `remove_thinking_from_context` for hybrid SSM models. Two layers of
@@ -220,7 +220,8 @@ TEST_F(CancelRollbackPrimitiveTest, SnapshotRestoreRoundtripQwen35Hybrid) {
 
 // Same roundtrip for a pure-attention model. The snapshot+restore primitive
 // is architecture-agnostic — it works for attention-only memories too.
-TEST_F(CancelRollbackPrimitiveTest, SnapshotRestoreRoundtripQwen3PureAttention) {
+TEST_F(
+    CancelRollbackPrimitiveTest, SnapshotRestoreRoundtripQwen3PureAttention) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -308,8 +309,7 @@ class TextLlmContextCancelTest : public ::testing::Test {};
 //   * leave nPast at 0 (the snapshot at function entry is restored on the
 //     hybrid path; on the pure-attention path `removeLastNTokens(0)` is a
 //     no-op).
-TEST_F(
-    TextLlmContextCancelTest, PrefillCancelAtEntryReturnsFalseOnHybrid) {
+TEST_F(TextLlmContextCancelTest, PrefillCancelAtEntryReturnsFalseOnHybrid) {
   auto model = loadTextModel(qwen35HybridModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3.5 hybrid model not found";
@@ -332,8 +332,7 @@ TEST_F(
 }
 
 TEST_F(
-    TextLlmContextCancelTest,
-    PrefillCancelAtEntryReturnsFalseOnPureAttention) {
+    TextLlmContextCancelTest, PrefillCancelAtEntryReturnsFalseOnPureAttention) {
   auto model = loadTextModel(qwen3PureAttentionModelPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
@@ -579,11 +578,8 @@ class MtmdLlmContextCancelTest : public ::testing::Test {};
 // AFTER at least one chunk has decoded) is exercised by the sibling
 // `CancelDuringImageChunkRollsBackHybridMtmdCache` test below, which
 // guarantees multiple chunks by attaching an image.
-TEST_F(
-    MtmdLlmContextCancelTest,
-    CancelDuringPrefillLeavesHybridMtmdUsable) {
-  auto model =
-      loadMtmdModel(qwen35HybridModelPath(), qwen35MmprojPath());
+TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
+  auto model = loadMtmdModel(qwen35HybridModelPath(), qwen35MmprojPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3.5 hybrid multimodal model not found";
   }
@@ -610,13 +606,11 @@ TEST_F(
   EXPECT_NO_THROW(model->cancel());
 
   // Wait for the worker to unwind.
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (!done.load() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  ASSERT_TRUE(done.load())
-      << "worker did not unwind within 10s of cancel";
+  ASSERT_TRUE(done.load()) << "worker did not unwind within 10s of cancel";
   worker.join();
 
   // `thinkingCompactionFailed` is bumped only by snapshot-capture or
@@ -649,10 +643,8 @@ TEST_F(
 // Asserts the rollback brings the cache back to empty and a follow-up
 // inference works.
 TEST_F(
-    MtmdLlmContextCancelTest,
-    CancelDuringImageChunkRollsBackHybridMtmdCache) {
-  auto model =
-      loadMtmdModel(qwen35HybridModelPath(), qwen35MmprojPath());
+    MtmdLlmContextCancelTest, CancelDuringImageChunkRollsBackHybridMtmdCache) {
+  auto model = loadMtmdModel(qwen35HybridModelPath(), qwen35MmprojPath());
   if (!model) {
     GTEST_SKIP() << "Qwen3.5 hybrid multimodal model not found";
   }
@@ -688,13 +680,11 @@ TEST_F(
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   EXPECT_NO_THROW(model->cancel());
 
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (!done.load() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  ASSERT_TRUE(done.load())
-      << "worker did not unwind within 15s of cancel";
+  ASSERT_TRUE(done.load()) << "worker did not unwind within 15s of cancel";
   worker.join();
 
   // Strong assertion: the snapshot must have rolled the cache back to
@@ -728,7 +718,8 @@ TEST_F(
 // `MtmdLlmContext::evalMessageWithTools` must not change the existing
 // pure-attention cancel behaviour.
 TEST_F(
-    MtmdLlmContextCancelTest, CancelDuringPrefillLeavesPureAttentionMtmdUsable) {
+    MtmdLlmContextCancelTest,
+    CancelDuringPrefillLeavesPureAttentionMtmdUsable) {
   const std::string smolvlmPath = test_common::BaseTestModelPath::get(
       "SmolVLM-500M-Instruct-Q8_0.gguf", "SmolVLM-500M-Instruct.gguf");
   const std::string smolvlmMmproj = test_common::BaseTestModelPath::get(
@@ -758,8 +749,7 @@ TEST_F(
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   EXPECT_NO_THROW(model->cancel());
 
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (!done.load() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -789,8 +779,8 @@ TEST_F(
 // inside the generation loop on slow machines.
 TEST(
     TextLlmContextCancelDuringGenerationTest, HybridModelSurvivesMidGenCancel) {
-  const std::string modelPath = test_common::BaseTestModelPath::get(
-      "Qwen3.5-0.8B-Q8_0.gguf");
+  const std::string modelPath =
+      test_common::BaseTestModelPath::get("Qwen3.5-0.8B-Q8_0.gguf");
   if (!fs::exists(modelPath)) {
     GTEST_SKIP() << "Qwen3.5 hybrid model not found";
   }
@@ -838,8 +828,7 @@ TEST(
   EXPECT_NO_THROW(model->cancel());
 
   // Wait for the worker to observe the cancel and unwind.
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (!generationDone.load() &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -940,13 +929,11 @@ TEST(
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   EXPECT_NO_THROW(model->cancel());
 
-  auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
   while (!done.load() && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  ASSERT_TRUE(done.load())
-      << "worker did not unwind within 10s of cancel";
+  ASSERT_TRUE(done.load()) << "worker did not unwind within 10s of cancel";
   worker.join();
 
   // Core assertion: the recurrent rollback must have fully rewound the

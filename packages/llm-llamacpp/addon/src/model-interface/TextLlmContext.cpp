@@ -1084,8 +1084,8 @@ void TextLlmContext::configureReasoningTags(
           reasoningTags->open.c_str()));
 }
 
-llama_pos TextLlmContext::computeRecurrentSnapshotBoundary(
-    llama_pos prefillLen) const {
+llama_pos
+TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
   if (!shouldCaptureRecurrentReasoningBoundary(
           needsRecurrentSnapshot_,
           removeThinkingFromContext_,
