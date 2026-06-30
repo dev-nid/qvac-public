@@ -773,23 +773,24 @@ TEST_F(
 /// asserting that at least one slot reports a thinking discard with zero
 /// compaction failures.
 ///
-/// Platform gate: mirrors `test/integration/reasoning.test.js` which
-/// gates every Qwen3.5 reasoning assertion to Apple Silicon Metal
-/// (`skip: isDarwinX64 || isWindowsX64`, plus runtime CPU detection
-/// elsewhere). The Qwen3.5-0.8B Q8 checkpoint produces a closed
-/// `<think>...</think>` reliably only on Metal under greedy decoding;
-/// on CPU runners the model drifts into self-referential loops, never
-/// emits `</think>`, and `compactThinkSpan` correctly stays a no-op —
-/// which is the right product behavior but turns this regression check
-/// into a flake. The snapshot path itself is covered cross-platform by
-/// the `ReasoningSnapshotPolicy` and `ReasoningBlockCompactor*` unit
-/// tests in `test_reasoning_block_compactor.cpp`.
+/// Platform gate: follows the same intent as the JS Qwen3.5 guards in
+/// `test/integration/reasoning.test.js` (which skip darwin-x64 and
+/// win32-x64), but is stricter for this C++ test because Linux and
+/// Windows CI runners hit the CPU backend for this addon and the
+/// Qwen3.5-0.8B Q8 checkpoint does not produce a closed
+/// `<think>...</think>` reliably on CPU under greedy decoding: it
+/// drifts into self-referential loops, never emits `</think>`, and
+/// `compactThinkSpan` correctly stays a no-op — which is the right
+/// product behavior but turns this regression check into a flake. The
+/// snapshot path itself is covered cross-platform by the
+/// `ReasoningSnapshotPolicy` and `ReasoningBlockCompactor*` unit tests
+/// in `test_reasoning_block_compactor.cpp`.
 TEST_F(
     ContinuousBatchingIntegrationTest,
     TwoPromptBatchQwen35HybridDropsThinkBlocks) {
 #if !(defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)))
-  GTEST_SKIP() << "Qwen3.5-0.8B reasoning is only deterministic on Apple "
-                  "Silicon Metal; mirrors reasoning.test.js platform gate.";
+  GTEST_SKIP() << "Qwen3.5-0.8B closed `</think>` is not deterministic on "
+                  "non-Apple-Silicon CI runners (CPU backend); see comment.";
 #endif
   REQUIRE_MODEL(qwen35HybridModel_);
   // Qwen3.5 thinking traces are long; give each slot enough cache and

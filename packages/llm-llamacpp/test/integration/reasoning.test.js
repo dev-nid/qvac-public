@@ -801,20 +801,23 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
     'compaction-on batch must actually drop a reasoning block (otherwise no replay decode ran)')
 
   // Tolerance: TTFT is wall-clock and noisy across runs, so we don't
-  // pin equality. We pin the regression shape — without the fix the
-  // on-run TTFT is strictly larger by the entire replay-decode time
-  // (often a meaningful fraction of prefill time). 1.5x slack is well
-  // above run-to-run noise on shared hardware but well below the
-  // unfixed inflation magnitude observed in CI runs.
+  // pin equality. We pin the regression shape: without the fix the
+  // on-run TTFT is inflated by the entire replay-decode time. Use a
+  // 1.5x ratio when the baseline is large enough for the ratio to be
+  // meaningful, and fall back to a 5 ms absolute floor on hosts where
+  // prefill itself is in the low-ms range (e.g. iOS Metal with a short
+  // prompt) so sub-ms GPU-dispatch variance is not read as a signal.
+  // The replay-inflation bug is far above either bound in practice.
   const ttftOff = toNumber(off.stats.TTFT)
   const ttftOn = toNumber(on.stats.TTFT)
   t.ok(ttftOff > 0,
     `batch off-run must report a non-zero TTFT (got ${ttftOff})`)
   t.ok(ttftOn > 0,
     `batch on-run must report a non-zero TTFT (got ${ttftOn})`)
-  t.ok(ttftOn <= ttftOff * 1.5,
-    `batch TTFT on=${ttftOn}ms must be within 1.5x of off=${ttftOff}ms — ` +
-    'a larger on-value means the recurrent replay decode was counted as user-visible TTFT')
+  const ttftSlack = Math.max(ttftOff * 0.5, 5)
+  t.ok(ttftOn <= ttftOff + ttftSlack,
+    `batch TTFT on=${ttftOn}ms must not exceed off=${ttftOff}ms by more than ${ttftSlack}ms — ` +
+    'a larger delta means the recurrent replay decode was counted as user-visible TTFT')
 
   // promptTokens is scheduler-owned (populated by `accumulateSlot` from
   // `prefillTokenCount`, not from `llama_perf_context`), so this should
