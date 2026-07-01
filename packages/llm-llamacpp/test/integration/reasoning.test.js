@@ -852,15 +852,30 @@ safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
       // Tight ctx so the cumulative cache from multi-turn overflows
       // ctx_size and ContextShifter is forced to run. 512 rounds up to
       // the next 256 multiple, matching the budget used by
-      // sliding-context.test.js. n_predict is large enough that a
-      // single turn alone can fill the budget if the model decides to
-      // generate verbosely. `n_discarded > 0` is required to enable
-      // sliding (the default of 0 turns overflow into a hard error).
+      // sliding-context.test.js. `n_discarded > 0` is required to
+      // enable sliding (the default of 0 turns overflow into a hard
+      // error).
       ctx_size: '512',
       n_predict: '512',
       n_discarded: '64'
     }
   })
+
+  // Per-turn output cap. Each `inference.run` starts with a fresh KV
+  // cache, so every turn re-tokenizes the full conversation and
+  // prefills it as a single delta. With the default `n_predict=512`,
+  // a single verbose turn (observed >300 tokens on Android
+  // Qwen3-0.6B) pushes turn 2's tokenized prompt past ctx_size and
+  // trips the prefill-time hard-overflow guard before any slide can
+  // fire. Capping per-turn output keeps every turn's tokenized prompt
+  // under ctx_size (so the hard guard never fires) while letting
+  // cumulative cache growth during decode cross the ceiling — which
+  // is where the slide is expected to fire on this test.
+  //
+  // Sizing: initial ~40 + 4 x (PER_TURN_PREDICT + 25) + 25 must stay
+  // safely below 512 on turn 5's prefill, and turn-5 nPast + predict
+  // must exceed 512 so decode triggers the slide.
+  const PER_TURN_PREDICT = 80
 
   // Drive turns sequentially, accumulating the full conversation in
   // `messages`. Each turn issues a fresh `inference.run`, so the cache
@@ -883,7 +898,12 @@ safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
       const result = await runCompletionWithStats(
         inference,
         messages,
-        { generationParams: { remove_thinking_from_context: true } }
+        {
+          generationParams: {
+            remove_thinking_from_context: true,
+            predict: PER_TURN_PREDICT
+          }
+        }
       )
       turnStats = result.stats
       turnResponse = result.response
