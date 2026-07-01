@@ -178,18 +178,48 @@ async function runAndCancelAfterFirstToken (model, prompt, runOptions) {
 async function runWithTimeoutCancellation (model, prompt, runOptions) {
   cleanupRunOptionsCache(runOptions)
   const response = await model.run(prompt, runOptions)
+  let chunkCount = 0
+  let chain = response.onUpdate(() => {
+    chunkCount++
+  })
+  if (typeof response.onError === 'function') {
+    chain = chain.onError(err => {
+      if (isCancellationError(err)) return
+      throw err
+    })
+  }
   await model.cancel()
-  return normalizeStats(response.stats, { _chunkCount: 0 })
+  try {
+    await chain.await()
+  } catch (err) {
+    if (!isCancellationError(err)) throw err
+  }
+  return normalizeStats(response.stats, { _chunkCount: chunkCount })
 }
 
 /** Cancels via QvacResponse (one test keeps coverage of response.cancel()). */
 async function runWithTimeoutCancellationViaResponse (model, prompt, runOptions) {
   cleanupRunOptionsCache(runOptions)
   const response = await model.run(prompt, runOptions)
+  let chunkCount = 0
+  let chain = response.onUpdate(() => {
+    chunkCount++
+  })
+  if (typeof response.onError === 'function') {
+    chain = chain.onError(err => {
+      if (isCancellationError(err)) return
+      throw err
+    })
+  }
   if (typeof response.cancel === 'function') {
     await response.cancel()
   }
-  return normalizeStats(response.stats, { _chunkCount: 0 })
+  try {
+    await chain.await()
+  } catch (err) {
+    if (!isCancellationError(err)) throw err
+  }
+  return normalizeStats(response.stats, { _chunkCount: chunkCount })
 }
 
 safeTest('CacheTokens remain zero without cacheKey', { timeout: 600_000 }, async t => {
@@ -256,17 +286,16 @@ safeTest('Cancelling after first token only stores one generation chunk', { time
   )
 })
 
-safeTest('Timeout cancellation before first token keeps cache/timing stats at zero (via model.cancel())', { timeout: 600_000 }, async t => {
+safeTest('Timeout cancellation before first token rolls cache back without chunks (via model.cancel())', { timeout: 600_000 }, async t => {
   const { model, dirPath } = await setupModel(t, { n_predict: '1024', ctx_size: '4096' })
   const sessionName = path.join(dirPath, 'cache-preempt.bin')
   const stats = await runWithTimeoutCancellation(model, buildStoppingPrompt(), cacheOpts(sessionName))
-  // Small delay between cancel request and actually stopped
-  const threshold = 45
   t.is(stats._chunkCount, 0, 'timeout prevented any chunk emission')
-  t.ok(stats.promptTokens < threshold)
+  t.is(stats.generatedTokens, 0, 'timeout prevented generation before cancellation')
+  t.is(stats.CacheTokens, 0, 'timeout cancellation rolled cache back before saving')
 })
 
-safeTest('Timeout cancellation before first token keeps cache/timing stats at zero (via QvacResponse.cancel)', { timeout: 600_000 }, async t => {
+safeTest('Timeout cancellation before first token rolls cache back without chunks (via QvacResponse.cancel)', { timeout: 600_000 }, async t => {
   const { model, dirPath } = await setupModel(t, { n_predict: '1024', ctx_size: '4096' })
   const sessionName = path.join(dirPath, 'cache-preempt-qvacresponse.bin')
   const stats = await runWithTimeoutCancellationViaResponse(
@@ -274,10 +303,9 @@ safeTest('Timeout cancellation before first token keeps cache/timing stats at ze
     buildStoppingPrompt(),
     cacheOpts(sessionName)
   )
-  // Small delay between cancel request and actually stopped
-  const threshold = 45
   t.is(stats._chunkCount, 0, 'timeout prevented any chunk emission')
-  t.ok(stats.promptTokens < threshold)
+  t.is(stats.generatedTokens, 0, 'timeout prevented generation before cancellation')
+  t.is(stats.CacheTokens, 0, 'timeout cancellation rolled cache back before saving')
 })
 
 safeTest('Cache cleared when prompt without cacheKey follows cached inference', { timeout: 600_000 }, async t => {
