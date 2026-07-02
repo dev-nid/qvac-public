@@ -101,9 +101,10 @@ struct PrefillPlan {
 /// `TextLlmContext` implements both interfaces.
 ///
 /// Method ordering below mirrors a sequence's lifecycle:
-///   `validatePromptPolicy` -> `loadCache` -> `preparePrefill`
-///   -> `onPrefillComplete` -> N x `onLogitsReady` ->
-///   (`onGenerationFinished` | `onCancel`) -> `onSequenceEnd` ->
+///   `validatePromptPolicy` -> `loadCache` -> `snapshotPreRequestCursor`
+///   -> `snapshotPreRequestRollbackAnchor` -> `preparePrefill`
+///   -> `onPrefillComplete` -> N x `onLogitsReady`
+///   -> (`onGenerationFinished` | `onCancel`) -> `onSequenceEnd` ->
 ///   `saveCache`
 class SequenceDriver {
 public:
@@ -235,4 +236,22 @@ public:
   loadCache(const std::string& cacheKey, llama_pos configuredNDiscarded) = 0;
 
   virtual void saveCache(const std::string& cacheKey) const = 0;
+
+  /// Capture the admission cursor for `onCancel` rollback. The scheduler
+  /// calls this right after `loadCache` so batch drivers land on the
+  /// same pre-request state that single-prompt drivers snapshot at their
+  /// own entry. Cheap: bookkeeping only, no I/O. Default no-op for
+  /// drivers whose cancel does not need it.
+  virtual void snapshotPreRequestCursor() {}
+
+  /// Capture the batch-path rollback anchor used by `onCancel` on
+  /// drivers whose memory rejects partial `seq_rm` (hybrid / recurrent).
+  /// Writes a full sequence-state snapshot to disk, so it is expensive
+  /// and gated: pure-attention drivers no-op, and single-prompt drivers
+  /// keep their own capture site rather than paying this cost twice.
+  /// Overrides that fail the capture must surface the failure via their
+  /// existing compaction-failed counter and a warning log, otherwise a
+  /// silent-no-op cancel rollback would leak the peak `nPast` back into
+  /// user-visible `CacheTokens`.
+  virtual void snapshotPreRequestRollbackAnchor() {}
 };

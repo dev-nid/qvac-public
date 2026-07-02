@@ -322,9 +322,6 @@ private:
     size_t outputIndex = 0;
     bool saveCacheToDisk = false;
     bool prefillOnly = false;
-    // Driver `nPast` captured before `onCancel` rewinds it so cancelled
-    // requests still report the work performed in `CacheTokens`.
-    std::optional<int64_t> peakNPastAtFinalize;
   };
 
   void ensureWorkerStartedLocked();

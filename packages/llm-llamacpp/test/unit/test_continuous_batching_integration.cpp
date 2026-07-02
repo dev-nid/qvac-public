@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -1459,7 +1460,6 @@ TEST_F(
 /// A batched sequence that outgrows its per-slot window (ctx / n_parallel)
 /// must slide (`contextSlides > 0`) and keep generating, like the
 /// single-prompt path does, instead of being hard-truncated at the window.
-/// `CacheTokens` must reflect the generated tokens, not just the prompt.
 ///
 /// The slide machinery reads the driver's `nPast_`, but during batched
 /// generation only the batcher's `Request::currentPos` advances; `nPast_`
@@ -1473,7 +1473,11 @@ TEST_F(
 /// the decode stub (`llama_n_ctx / parallel`). The prompt elicits an
 /// output long enough to cross the window; once enough pieces stream
 /// out to prove generation survived past it, the test cancels to bound
-/// the run.
+/// the run. The cancel rolls the driver's cache back to the pre-request
+/// cursor (this PR's cancel contract), so post-cancel `CacheTokens` is
+/// not a witness of "generation happened" any more; `contextSlides > 0`
+/// carries that invariant on its own — slides only fire when the
+/// sequence has advanced past the per-slot window.
 TEST_F(
     ContinuousBatchingIntegrationTest, BatchGenerationSlidesPastPerSlotWindow) {
   REQUIRE_MODEL(model_);
@@ -1517,8 +1521,6 @@ TEST_F(
   const auto stats = model->runtimeStats();
   const double contextSlides =
       test_common::getStatValue(stats, "contextSlides");
-  const double cacheTokens = test_common::getStatValue(stats, "CacheTokens");
-  const double promptTokens = test_common::getStatValue(stats, "promptTokens");
 
   ASSERT_EQ(outputs.size(), 1u);
   EXPECT_FALSE(outputs[0].empty());
@@ -1526,9 +1528,85 @@ TEST_F(
       << "SLIDE NEVER FIRED: the sequence was truncated at the per-slot "
          "window instead of sliding; pieces emitted: "
       << pieces.load() << ", per-slot window: " << perSlotWindow.load();
-  EXPECT_GT(cacheTokens, promptTokens)
-      << "CacheTokens only counted the prompt (driver position frozen at "
-         "prefill); generated tokens are missing from the stat";
+}
+
+/// Cancel = "request never happened": `onCancel` rolls the driver's
+/// `nPast` back to the admission cursor (the warm baseline loaded from
+/// `cacheKey`), and `saveCacheForSlot` persists that rolled-back state.
+/// `CacheTokens` in the batch runtime stats must equal the warm baseline
+/// — not the transient peak reached mid-generation, and not zero from
+/// an over-rollback that wiped the baseline.
+///
+/// The scheduler resets its stats snapshot at admission whenever the
+/// queue is idle, so each `processPromptBatch` call reports CacheTokens
+/// for that batch alone. Prime a `cacheKey` with a short prefill, then
+/// run a baseline batch (finishes naturally) and a cancel batch on the
+/// same key. The cancel batch's `CacheTokens` must (a) be much smaller
+/// than the baseline (no peak leak) and (b) match the primer's value
+/// within a tiny tolerance (rollback lands exactly on the warm baseline).
+TEST_F(
+    ContinuousBatchingIntegrationTest, BatchCancelRestoresCacheToWarmBaseline) {
+  REQUIRE_MODEL(model_);
+  config_["n_predict"] = "32";
+  auto model = loadModel();
+
+  const fs::path cachePath = fs::temp_directory_path() /
+                             ("batch-cancel-warm-" + uniqueTestId() + ".bin");
+
+  auto primer = makePrompt("Remember these facts: the sky is blue.");
+  primer.prefill = true;
+  primer.cacheKey = cachePath.string();
+  primer.saveCacheToDisk = true;
+  std::vector<LlamaModel::Prompt> primeBatch{std::move(primer)};
+  model->processPromptBatch(primeBatch);
+  ASSERT_TRUE(fs::exists(cachePath));
+  const double primeCacheTokens =
+      test_common::getStatValue(model->runtimeStats(), "CacheTokens");
+  ASSERT_GT(primeCacheTokens, 0.0) << "prefill did not populate CacheTokens";
+
+  auto baseline = makePrompt("Say two short sentences about the sky.");
+  baseline.cacheKey = cachePath.string();
+  std::vector<LlamaModel::Prompt> baselineBatch{std::move(baseline)};
+  auto baselineOutputs = model->processPromptBatch(baselineBatch);
+  ASSERT_EQ(baselineOutputs.size(), 1u);
+  EXPECT_FALSE(baselineOutputs[0].empty());
+  const double baselineCacheTokens =
+      test_common::getStatValue(model->runtimeStats(), "CacheTokens");
+  ASSERT_GT(baselineCacheTokens, primeCacheTokens)
+      << "baseline batch did not grow past the warm baseline; test setup is "
+         "not exercising the peak-vs-rollback distinction";
+
+  std::atomic<bool> cancelIssued = false;
+  auto cancelPrompt = makePrompt("Say two short sentences about the sky.");
+  cancelPrompt.cacheKey = cachePath.string();
+  cancelPrompt.outputCallback =
+      [&model, &cancelIssued](const std::string&) {
+        bool expected = false;
+        if (cancelIssued.compare_exchange_strong(expected, true)) {
+          model->cancel();
+        }
+      };
+  std::vector<LlamaModel::Prompt> cancelBatch{std::move(cancelPrompt)};
+  model->processPromptBatch(cancelBatch);
+  ASSERT_TRUE(cancelIssued.load())
+      << "test setup: cancel was never issued, the run finished naturally";
+  const double cancelledCacheTokens =
+      test_common::getStatValue(model->runtimeStats(), "CacheTokens");
+
+  EXPECT_LT(cancelledCacheTokens, baselineCacheTokens)
+      << "cancelled batch reported CacheTokens=" << cancelledCacheTokens
+      << " >= baseline " << baselineCacheTokens
+      << "; pre-rollback peak is leaking into stats";
+  // Rollback must land exactly on the admission cursor. A tolerance of
+  // 1 absorbs any single-token accounting drift; anything larger points
+  // at either a stale peak (>> primeCacheTokens) or an over-rollback
+  // that wiped the warm baseline (== 0).
+  EXPECT_LE(std::abs(cancelledCacheTokens - primeCacheTokens), 1.0)
+      << "cancelled batch CacheTokens=" << cancelledCacheTokens
+      << " but warm baseline was " << primeCacheTokens
+      << "; rollback did not restore the admission cursor";
+
+  fs::remove(cachePath);
 }
 
 namespace {
@@ -1932,6 +2010,133 @@ TEST_F(ContinuousBatchingIntegrationTest, BatchMtmdMRopeCacheRoundTrip) {
 
   std::error_code ec;
   fs::remove(cachePath, ec);
+}
+
+/// MTMD + hybrid (Qwen3.5 M-RoPE + recurrent memory) is the hardest cancel
+/// path: partial `seq_rm` is rejected by recurrent memory, so
+/// `cancelGenerationCleanup` restores a full sequence-state snapshot instead
+/// of tail-removing tokens. The single-prompt path captures that snapshot
+/// mid-`evalMessageWithTools`; the batch path never runs that site, so
+/// `snapshotPreRequestRollbackAnchor` (called by the scheduler at admission
+/// right after `snapshotPreRequestCursor`) must take it. If it doesn't,
+/// `hasPrefillEntry()` returns false at cancel time,
+/// `cancelGenerationCleanup` silently does nothing, and `CacheTokens` still
+/// reports the transient peak — same failure mode as the text case, just
+/// wearing a different mask.
+///
+/// Structure mirrors `BatchCancelRestoresCacheToWarmBaseline` but with an
+/// image primer (the only way to exercise M-RoPE per-cell KV in the cache
+/// snapshot). Each phase runs on a fresh model to isolate per-batch stats.
+TEST_F(
+    ContinuousBatchingIntegrationTest,
+    BatchMtmdHybridCancelRestoresCacheToWarmBaseline) {
+  const std::string vlmPath =
+      test_common::BaseTestModelPath::get("Qwen3.5-0.8B-Q8_0.gguf");
+  const std::string mmprojPath =
+      test_common::BaseTestModelPath::get("mmproj-Qwen3.5-0.8B-F16.gguf");
+  if (!fs::exists(vlmPath) || !fs::exists(mmprojPath)) {
+    GTEST_SKIP() << "Qwen3.5 M-RoPE fixture not found";
+  }
+  const std::vector<uint8_t> image = readElephantImage();
+  ASSERT_FALSE(image.empty()) << "elephant.jpg media fixture not found";
+
+  const fs::path cachePath =
+      fs::temp_directory_path() /
+      ("mtmd-hybrid-cancel-" + uniqueTestId() + ".bin");
+
+  auto makeModel = [&] {
+    std::string path = vlmPath;
+    std::string projection = mmprojPath;
+    auto cfg = config_;
+    // Qwen3.5 image prefill commits ~2899 KV cells (M-RoPE cells >>
+    // positions); 4096 is the minimum the Qwen3.5 mtmd unit tests use.
+    cfg["ctx_size"] = "4096";
+    // Reasoning model; disable thinking so generation reaches user-visible
+    // tokens fast enough for the outputCallback cancel to fire.
+    cfg["reasoning-budget"] = "0";
+    cfg["n_predict"] = "32";
+    auto m = std::make_unique<LlamaModel>(
+        std::move(path), std::move(projection), std::move(cfg));
+    m->waitForLoadInitialization();
+    return m;
+  };
+
+  auto primer = [&] {
+    LlamaModel::Prompt p;
+    p.input = R"([{"role":"user","type":"media","content":""},)"
+              R"({"role":"user","content":"Describe this image."}])";
+    p.media.push_back(image);
+    p.prefill = true;
+    p.cacheKey = cachePath.string();
+    p.saveCacheToDisk = true;
+    return p;
+  }();
+
+  auto primeModel = makeModel();
+  ASSERT_TRUE(primeModel->isLoaded());
+  std::vector<LlamaModel::Prompt> primeBatch;
+  primeBatch.push_back(std::move(primer));
+  primeModel->processPromptBatch(primeBatch);
+  ASSERT_TRUE(fs::exists(cachePath));
+  const double primeCacheTokens =
+      test_common::getStatValue(primeModel->runtimeStats(), "CacheTokens");
+  ASSERT_GT(primeCacheTokens, 0.0)
+      << "image prefill did not populate CacheTokens";
+
+  auto baselineModel = makeModel();
+  ASSERT_TRUE(baselineModel->isLoaded());
+  auto baseline =
+      makePrompt("Continue the description with a short sentence.");
+  baseline.cacheKey = cachePath.string();
+  std::vector<LlamaModel::Prompt> baselineBatch;
+  baselineBatch.push_back(std::move(baseline));
+  auto baselineOutputs = baselineModel->processPromptBatch(baselineBatch);
+  ASSERT_EQ(baselineOutputs.size(), 1u);
+  EXPECT_FALSE(baselineOutputs[0].empty());
+  const double baselineCacheTokens =
+      test_common::getStatValue(baselineModel->runtimeStats(), "CacheTokens");
+  ASSERT_GT(baselineCacheTokens, primeCacheTokens)
+      << "baseline batch did not grow past the warm baseline; test setup "
+         "is not exercising the peak-vs-rollback distinction";
+
+  auto cancelModel = makeModel();
+  ASSERT_TRUE(cancelModel->isLoaded());
+  std::atomic<bool> cancelIssued = false;
+  auto cancelPrompt =
+      makePrompt("Continue the description with a short sentence.");
+  cancelPrompt.cacheKey = cachePath.string();
+  cancelPrompt.outputCallback =
+      [&cancelModel, &cancelIssued](const std::string&) {
+        bool expected = false;
+        if (cancelIssued.compare_exchange_strong(expected, true)) {
+          cancelModel->cancel();
+        }
+      };
+  std::vector<LlamaModel::Prompt> cancelBatch;
+  cancelBatch.push_back(std::move(cancelPrompt));
+  cancelModel->processPromptBatch(cancelBatch);
+  ASSERT_TRUE(cancelIssued.load())
+      << "test setup: cancel was never issued, the run finished naturally";
+  const double cancelledCacheTokens =
+      test_common::getStatValue(cancelModel->runtimeStats(), "CacheTokens");
+
+  EXPECT_LT(cancelledCacheTokens, baselineCacheTokens)
+      << "cancelled batch reported CacheTokens=" << cancelledCacheTokens
+      << " >= baseline " << baselineCacheTokens
+      << "; pre-rollback peak is leaking into stats";
+  // Rollback must land on the admission cursor. If the batch-path
+  // prefill-entry snapshot is missing (the bug this test guards),
+  // `cancelGenerationCleanup` is a silent no-op on hybrid and CacheTokens
+  // stays at peak, blowing this assertion.
+  EXPECT_LE(std::abs(cancelledCacheTokens - primeCacheTokens), 1.0)
+      << "cancelled batch CacheTokens=" << cancelledCacheTokens
+      << " but warm baseline was " << primeCacheTokens
+      << "; hybrid batch rollback did not restore the admission cursor "
+         "(the prefill-entry snapshot at admission is missing or its "
+         "restore short-read)";
+
+  std::error_code ec2;
+  fs::remove(cachePath, ec2);
 }
 
 // GGSQ unification (sub-task 3): four metadata fields everywhere. The

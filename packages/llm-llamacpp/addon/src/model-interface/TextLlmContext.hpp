@@ -215,6 +215,9 @@ public:
       const std::string& cacheKey, llama_pos configuredNDiscarded) override;
   void saveCache(const std::string& cacheKey) const override;
 
+  void snapshotPreRequestCursor() override;
+  void snapshotPreRequestRollbackAnchor() override;
+
 private:
   /// Hook fired exactly once per slot, immediately before the policy
   /// flushes its UTF-8 buffer at end-of-generation. Internal helper for

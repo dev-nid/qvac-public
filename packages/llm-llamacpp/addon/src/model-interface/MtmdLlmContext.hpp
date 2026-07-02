@@ -278,6 +278,9 @@ public:
       const std::string& cacheKey, llama_pos configuredNDiscarded) override;
   void saveCache(const std::string& cacheKey) const override;
 
+  void snapshotPreRequestCursor() override;
+  void snapshotPreRequestRollbackAnchor() override;
+
 private:
   /**
    * The check antiprompt method. It checks the antiprompt.

@@ -353,6 +353,17 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
   const bool isCacheLoaded =
       driver->loadCache(request.cacheKey, configuredNDiscarded_);
 
+  // Snapshot the admission cursor (post-`loadCache`) so `onCancel` rolls
+  // back to the warm baseline, not past it. Single-prompt drivers take
+  // the same snapshot at their own entry.
+  driver->snapshotPreRequestCursor();
+  // Hybrid / recurrent drivers additionally need a full-state disk
+  // snapshot to roll back on cancel, because their memory rejects
+  // partial `seq_rm`. The batch path never runs the mid-
+  // `evalMessageWithTools` capture site, so we anchor here. No-op for
+  // pure-attention drivers.
+  driver->snapshotPreRequestRollbackAnchor();
+
   ScopeGuard cacheGuard([this, seqId] { clearSeqKv(seqId); });
 
   PrefillPlan plan = driver->preparePrefill(
@@ -632,15 +643,6 @@ void ContinuousBatchScheduler::drainFinishedLocked() {
   for (const auto& req : finished | std::views::filter(hasValidDriverF())) {
     auto& slot = *slots_[req.seqId];
     auto outputCallback = getOutputCallback(slot, req.seqId);
-    // Capture the pre-finalize cursor for cancelled requests so the
-    // cancel-rollback in `onCancel` (which rewinds `nPast` to the
-    // pre-request cursor) cannot deflate `CacheTokens` in the
-    // user-visible stats. Non-cancelled paths leave it `nullopt` and
-    // accumulate the live driver position as before.
-    if (req.stopReason == StopReason::Cancelled ||
-        req.stopReason == StopReason::DecodeError) {
-      slot.peakNPastAtFinalize = static_cast<int64_t>(slot.driver->getNPast());
-    }
     finalizeTerminalDriver(
         *slot.driver, req.stopReason, slot.prefillOnly, outputCallback);
     accumulateSlotRuntimeStats(slot, req);
@@ -907,12 +909,6 @@ void ContinuousBatchScheduler::cancelSlotLocked(uint32_t seqId) noexcept {
     // drainFinishedLocked() is left throwing so live requests still surface the
     // error.
     try {
-      // See the equivalent capture in `drainFinishedLocked`. Record the
-      // driver's `nPast` BEFORE `onCancel` rewinds it so `CacheTokens`
-      // in the user-visible stats reflects the work actually performed,
-      // not the post-rollback cursor.
-      slots_[seqId]->peakNPastAtFinalize =
-          static_cast<int64_t>(slots_[seqId]->driver->getNPast());
       slots_[seqId]->driver->onCancel({});
       if (req != nullptr) {
         accumulateSlotRuntimeStats(*slots_[seqId], *req);
@@ -1120,11 +1116,11 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t thinkingDiscards = 0;
   int64_t compactionFailed = 0;
   if (slot.driver) {
-    // Prefer the pre-rollback snapshot for cancelled requests so
-    // `CacheTokens` reflects work performed, not the post-rollback cursor.
-    nPast = slot.peakNPastAtFinalize.has_value()
-                ? *slot.peakNPastAtFinalize
-                : static_cast<int64_t>(slot.driver->getNPast());
+    // `onCancel` has already rolled `nPast` back to the admission cursor
+    // and `saveCacheForSlot` persists that state, so `CacheTokens` here
+    // matches the live driver cursor and what was written to disk.
+    // Work performed is reported via `promptTokens` / `generatedTokens`.
+    nPast = static_cast<int64_t>(slot.driver->getNPast());
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =
         static_cast<int64_t>(slot.driver->getThinkingBlockDiscards());

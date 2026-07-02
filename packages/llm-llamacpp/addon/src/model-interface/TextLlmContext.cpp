@@ -440,10 +440,11 @@ bool TextLlmContext::evalMessageWithTools(
   // or a live `llama_perf_context()` value — never a stale one.
   userVisiblePerf_.reset();
 
-  // Pre-request checkpoint for `onCancel`. `firstMsgTokens_` is
-  // captured too because prefill may overwrite it.
-  preRequestNPast_ = nPast_;
-  preRequestFirstMsgTokens_ = firstMsgTokens_;
+  // Pre-request checkpoint for `onCancel` on the single-prompt path.
+  // The batch path captures this via `snapshotPreRequestCursor` from
+  // the scheduler right after `loadCache`, so both entry points end up
+  // with `preRequestNPast_` pointing at the same admission cursor.
+  snapshotPreRequestCursor();
 
   const std::vector<llama_token> inputTokens =
       preparePrefill(chatMsgs, tools, {}, {}, isCacheLoaded, prefill).tokens;
@@ -1363,6 +1364,35 @@ void TextLlmContext::saveCache(const std::string& cacheKey) const {
         ADDON_ID,
         toString(InvalidInputFormat),
         "TextLlmContext::saveCache: failed to save cache '" + cacheKey + "'");
+  }
+}
+
+void TextLlmContext::snapshotPreRequestCursor() {
+  preRequestNPast_ = nPast_;
+  preRequestFirstMsgTokens_ = firstMsgTokens_;
+}
+
+void TextLlmContext::snapshotPreRequestRollbackAnchor() {
+  // Pure-attention drivers rely on `removeLastNTokens` in `onCancel`;
+  // no snapshot needed. The single-prompt path takes its own capture
+  // after `preparePrefill` (see the mid-`evalMessageWithTools` site) —
+  // this hook exists specifically so the batch path, which never runs
+  // that site, has an equivalent rollback anchor.
+  if (!needsRecurrentSnapshot_) {
+    return;
+  }
+  if (!rollbackState_.capturePrefillEntry(modelCtx_.lctx, seqId_, nPast_)) {
+    // Silent failure would make `hasPrefillEntry()` false at cancel
+    // time, turn `onCancel`'s rollback into a no-op, and let peak
+    // `nPast` leak back into `CacheTokens`. Surface via the shared
+    // failure counter + a warning so operators can spot it in JS
+    // runtime stats and logs.
+    compactor_.incrementCompactionFailed();
+    QLOG_IF(
+        Priority::WARNING,
+        "[TextLlm] failed to capture prefill-entry recurrent snapshot at "
+        "batch admission; cancel rollback will be a no-op and CacheTokens "
+        "may report the transient peak\n");
   }
 }
 

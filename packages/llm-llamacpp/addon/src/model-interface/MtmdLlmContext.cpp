@@ -464,11 +464,11 @@ bool MtmdLlmContext::evalMessageWithTools(
   // or a live `llama_perf_context()` value — never a stale one.
   userVisiblePerf_.reset();
 
-  // Pre-request checkpoint for `cancelGenerationCleanup`.
-  // `protectedPrefix_` is captured too because first-message prefill
-  // may overwrite it.
-  preRequestUsage_ = current_;
-  preRequestProtectedPrefix_ = protectedPrefix_;
+  // Pre-request checkpoint for `cancelGenerationCleanup` on the
+  // single-prompt path. The batch path captures this via
+  // `snapshotPreRequestCursor` from the scheduler right after
+  // `loadCache`, so both entry points land on the same admission cursor.
+  snapshotPreRequestCursor();
 
   mtmd::input_chunks chunks(mtmd_input_chunks_init());
 
@@ -1656,7 +1656,11 @@ void MtmdLlmContext::onGenerationFinished(
 
 void MtmdLlmContext::onCancel(
     const std::function<void(const std::string&)>& outputCallback) {
-  onGenerationFinished(outputCallback);
+  // Batch cancel = "request never happened": roll back to the
+  // pre-request cursor captured at admission by `snapshotPreRequestCursor`.
+  // The single-prompt path invokes `cancelGenerationCleanup` directly
+  // from its own generation loop.
+  cancelGenerationCleanup(outputCallback);
 }
 
 void MtmdLlmContext::validatePromptPolicy(
@@ -1795,5 +1799,34 @@ void MtmdLlmContext::saveCache(const std::string& cacheKey) const {
         ADDON_ID,
         toString(InvalidInputFormat),
         "MtmdLlmContext::saveCache: failed to save cache '" + cacheKey + "'");
+  }
+}
+
+void MtmdLlmContext::snapshotPreRequestCursor() {
+  preRequestUsage_ = current_;
+  preRequestProtectedPrefix_ = protectedPrefix_;
+}
+
+void MtmdLlmContext::snapshotPreRequestRollbackAnchor() {
+  // Pure-attention MTMD drivers roll back via `removeLastNTokens` in
+  // `cancelGenerationCleanup`; no snapshot needed. The single-prompt
+  // path takes its own capture after tokenize/slide in
+  // `evalMessageWithTools` — this hook exists so the batch path, which
+  // never runs that site, has an equivalent rollback anchor.
+  if (!needsRecurrentSnapshot_) {
+    return;
+  }
+  if (!rollbackState_.capturePrefillEntry(
+          modelCtx_.lctx, seqId_, current_.pos)) {
+    // Silent failure would make `hasPrefillEntry()` false at cancel
+    // time, turn `cancelGenerationCleanup`'s rollback into a no-op,
+    // and let peak positions leak back into `CacheTokens`. Surface via
+    // the shared failure counter + a warning.
+    compactor_.incrementCompactionFailed();
+    QLOG_IF(
+        Priority::WARNING,
+        "[MtmdLlm] failed to capture prefill-entry recurrent snapshot at "
+        "batch admission; cancel rollback will be a no-op and CacheTokens "
+        "may report the transient peak\n");
   }
 }
