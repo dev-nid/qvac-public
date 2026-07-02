@@ -1579,13 +1579,12 @@ TEST_F(
   std::atomic<bool> cancelIssued = false;
   auto cancelPrompt = makePrompt("Say two short sentences about the sky.");
   cancelPrompt.cacheKey = cachePath.string();
-  cancelPrompt.outputCallback =
-      [&model, &cancelIssued](const std::string&) {
-        bool expected = false;
-        if (cancelIssued.compare_exchange_strong(expected, true)) {
-          model->cancel();
-        }
-      };
+  cancelPrompt.outputCallback = [&model, &cancelIssued](const std::string&) {
+    bool expected = false;
+    if (cancelIssued.compare_exchange_strong(expected, true)) {
+      model->cancel();
+    }
+  };
   std::vector<LlamaModel::Prompt> cancelBatch{std::move(cancelPrompt)};
   model->processPromptBatch(cancelBatch);
   ASSERT_TRUE(cancelIssued.load())
@@ -1675,8 +1674,7 @@ TEST_F(
   ASSERT_TRUE(fs::exists(cachePath))
       << "test setup: primer did not write the cache file";
   const auto primedBytes = readFileBytes(cachePath);
-  ASSERT_FALSE(primedBytes.empty())
-      << "test setup: primed cache file is empty";
+  ASSERT_FALSE(primedBytes.empty()) << "test setup: primed cache file is empty";
   const auto primedMtime = fs::last_write_time(cachePath);
 
   // Sleep just past the filesystem mtime resolution so any subsequent
@@ -2167,9 +2165,8 @@ TEST_F(
   const std::vector<uint8_t> image = readElephantImage();
   ASSERT_FALSE(image.empty()) << "elephant.jpg media fixture not found";
 
-  const fs::path cachePath =
-      fs::temp_directory_path() /
-      ("mtmd-hybrid-cancel-" + uniqueTestId() + ".bin");
+  const fs::path cachePath = fs::temp_directory_path() /
+                             ("mtmd-hybrid-cancel-" + uniqueTestId() + ".bin");
 
   auto makeModel = [&] {
     std::string path = vlmPath;
@@ -2212,8 +2209,7 @@ TEST_F(
 
   auto baselineModel = makeModel();
   ASSERT_TRUE(baselineModel->isLoaded());
-  auto baseline =
-      makePrompt("Continue the description with a short sentence.");
+  auto baseline = makePrompt("Continue the description with a short sentence.");
   baseline.cacheKey = cachePath.string();
   std::vector<LlamaModel::Prompt> baselineBatch;
   baselineBatch.push_back(std::move(baseline));
@@ -2232,13 +2228,13 @@ TEST_F(
   auto cancelPrompt =
       makePrompt("Continue the description with a short sentence.");
   cancelPrompt.cacheKey = cachePath.string();
-  cancelPrompt.outputCallback =
-      [&cancelModel, &cancelIssued](const std::string&) {
-        bool expected = false;
-        if (cancelIssued.compare_exchange_strong(expected, true)) {
-          cancelModel->cancel();
-        }
-      };
+  cancelPrompt.outputCallback = [&cancelModel,
+                                 &cancelIssued](const std::string&) {
+    bool expected = false;
+    if (cancelIssued.compare_exchange_strong(expected, true)) {
+      cancelModel->cancel();
+    }
+  };
   std::vector<LlamaModel::Prompt> cancelBatch;
   cancelBatch.push_back(std::move(cancelPrompt));
   cancelModel->processPromptBatch(cancelBatch);
