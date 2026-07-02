@@ -177,8 +177,14 @@ export interface GenerationParams {
    * end-of-generation so subsequent turns do not accumulate reasoning
    * history.
    *
-   * Defaults to `false`. Set to `true` to drop reasoning tokens from
-   * the cache at end-of-generation. Supported on both text and
+   * Defaults to `true`: for reasoning-capable models the safer
+   * default is to drop hidden reasoning blocks so that later turns
+   * are not steered by internal reasoning that the user never sees.
+   * Set to `false` to preserve reasoning tokens in the KV / SSM
+   * cache across turns (e.g. chain-of-thought agents that want the
+   * next turn to attend to prior reasoning, interpretability
+   * tooling, or cache-reuse patterns that depend on the
+   * reasoning-inclusive state). Supported on both text and
    * multimodal contexts. No-op for models without a recognised
    * reasoning channel.
    *
@@ -186,10 +192,45 @@ export interface GenerationParams {
    * Granite-Hybrid, ...) are supported: the recurrent half of the
    * memory module is snapshotted at the open marker, restored at end-
    * of-generation, and the post-reasoning tail is replayed through the
-   * decoder so both KV halves stay consistent. If the restore or
-   * replay step fails, the answer is still delivered for the current
-   * turn but the SSM may carry the reasoning influence into the next
-   * turn; this is surfaced via `RuntimeStats.thinkingCompactionFailed`.
+   * decoder so both KV halves stay consistent.
+   *
+   * Hard-failure contract on recurrent / hybrid-SSM models: if the
+   * restore or replay step fails, the request is failed with a
+   * `StatusError` rather than returning a partial answer that would
+   * silently carry the reasoning span into subsequent turns.
+   * Before throwing, the affected sequence's KV / SSM memory is
+   * cleared and the driver's positional accounting is reset to a
+   * clean, empty state, so the next request on the same context
+   * starts from an empty sequence rather than contaminated SSM
+   * hidden state. On the continuous-batch path this failure is
+   * routed through the scheduler's error-recovery leg, which
+   * deliberately does NOT persist the failed slot's cache: when the
+   * request was configured with `cacheKey` + `saveCacheToDisk`, the
+   * last known-good on-disk cache is preserved rather than being
+   * overwritten with the post-failure state.
+   *
+   * Pure-attention models never take the restore/replay path, so
+   * this hard-fail case does not apply to them; a rejected
+   * attention `seq_rm` leaves the KV untouched and the request
+   * simply completes without the compaction.
+   *
+   * Soft failures (snapshot capture on a recurrent / hybrid-SSM
+   * model) do NOT fail the request. There are two sub-cases and
+   * they surface through the same `RuntimeStats.thinkingCompactionFailed`
+   * counter:
+   *
+   *   * Open-marker snapshot failed: end-of-generation compaction
+   *     is skipped for this turn. Live cache is untouched, so the
+   *     turn's answer is delivered normally, but the reasoning
+   *     span remains in the KV / SSM cache. If the caller has
+   *     `saveCacheToDisk` on the request, that un-compacted state
+   *     is persisted to disk — the "remove" side of
+   *     `remove_thinking_from_context` did not run for this turn.
+   *   * Batch admission rollback-anchor snapshot failed: only
+   *     cancel rollback for that turn degrades to a no-op — a
+   *     subsequent cancel cannot roll the recurrent half back to
+   *     the pre-request cursor. If the turn is not cancelled,
+   *     live memory and any subsequent save are unaffected.
    */
   remove_thinking_from_context?: boolean
 }
@@ -244,13 +285,33 @@ export interface RuntimeStats {
    */
   thinkingBlockDiscards: number
   /**
-   * Number of times recurrent-state restore or replay failed during
-   * thinking-block compaction in the most recent generation. Always 0
-   * for pure-attention models (where the snapshot + replay step never
-   * runs). Non-zero indicates one or more turns delivered an answer
-   * but left the SSM hidden state carrying the dropped reasoning span;
-   * subsequent turns may reflect that contamination. Per-inference for
-   * single requests; summed across slots for batch requests.
+   * Number of thinking-block compaction failures on recurrent /
+   * hybrid-SSM models in the most recent generation. Always 0 for
+   * pure-attention models (where the snapshot + replay step never
+   * runs). Per-inference for single requests; summed across slots
+   * for batch requests.
+   *
+   * Covers two distinct failure classes; check the request outcome
+   * to disambiguate:
+   *
+   *   1. Hard failure: the end-of-generation restore or replay step
+   *      failed. The request itself was failed with a `StatusError`
+   *      (see `remove_thinking_from_context` for the reset/preserve
+   *      contract). If the caller catches that error and reads
+   *      `runtimeStats`, this counter reflects the failed turn.
+   *   2. Soft failure — the request still completes and delivers an
+   *      answer. Two sub-cases with different downstream effects:
+   *      * Open-marker snapshot failed. End-of-generation
+   *        thinking-block compaction is skipped for this turn, so
+   *        the reasoning span remains in the live KV / SSM cache
+   *        and, if the request has `saveCacheToDisk`, it is
+   *        persisted to disk. Callers that rely on
+   *        `remove_thinking_from_context` should treat a bump
+   *        here as "the remove did not run this turn".
+   *      * Batch admission rollback-anchor snapshot failed. Only
+   *        cancel rollback for that turn degrades to a no-op; if
+   *        the turn is not cancelled, live memory and any
+   *        subsequent save are unaffected.
    */
   thinkingCompactionFailed: number
   /**

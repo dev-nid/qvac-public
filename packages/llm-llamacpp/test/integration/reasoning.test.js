@@ -266,11 +266,12 @@ safeTest('Qwen3 reasoning-budget=0 disables thinking', {
     `disabled (${disabled.length}) should be substantially shorter than baseline (${baseline.length})`)
 })
 
-// Default behaviour: without opting in, a Qwen3 turn that emits
-// <think>...</think> should leave the thinking block in the cache and
-// report 0 thinking-block discards. The opt-in path is covered by the
-// next test, and the cross-turn effect by the multi-turn test below.
-safeTest('remove_thinking_from_context defaults off for Qwen3', {
+// Default behaviour: without any override, a Qwen3 turn that emits
+// <think>...</think> should drop the thinking block from the KV cache
+// at end-of-generation and report at least one thinking-block
+// discard. The explicit opt-out path is covered by the "keeps
+// thinking in cache" test below.
+safeTest('remove_thinking_from_context defaults on for Qwen3', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
 }, async t => {
@@ -281,16 +282,18 @@ safeTest('remove_thinking_from_context defaults off for Qwen3', {
   t.comment(`response (len=${response.length}): ${response.slice(0, 200)}...`)
   t.comment(`stats: ${JSON.stringify(stats)}`)
 
-  verifyReasoningTags(t, response, 'default (no compaction)')
+  verifyReasoningTags(t, response, 'default (compaction on)')
 
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
-  t.is(thinkingDiscards, 0,
-    `default run should report 0 discards (got ${thinkingDiscards})`)
+  t.ok(thinkingDiscards >= 1,
+    `default run should report at least one compaction (got ${thinkingDiscards})`)
 })
 
-// Opt-in path: explicitly enabling the toggle drops the reasoning span
-// from the KV cache. Mirrors the "defaults off" test but flips the flag.
-safeTest('remove_thinking_from_context=true opts into compaction for Qwen3', {
+// Explicit-true path: passing `remove_thinking_from_context: true`
+// reaffirms the default and pins the compaction plumbing regardless
+// of any future default change. Complements the "defaults on" test
+// above by exercising the override path rather than the default.
+safeTest('remove_thinking_from_context=true compacts reasoning span for Qwen3', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
 }, async t => {
@@ -387,10 +390,13 @@ safeTest('remove_thinking_from_context=false is honoured in batch path', {
 })
 
 // Mixed-slot batch path: per-slot drivers honour their own
-// `remove_thinking_from_context` overrides independently. Slot A opts in
-// (1 discard), slot B leaves the toggle at its default-off (0 discards);
-// the scheduler's `accumulateSlotRuntimeStats` sums per-slot
+// `remove_thinking_from_context` overrides independently. Slot A
+// re-affirms the default-on (1 discard), slot B explicitly opts out
+// with `remove_thinking_from_context: false` (0 discards); the
+// scheduler's `accumulateSlotRuntimeStats` sums per-slot
 // `getThinkingBlockDiscards()` so the aggregate must be exactly 1.
+// Both overrides are set explicitly so the test remains valid
+// regardless of any future default change.
 safeTest('batch path aggregates per-slot remove_thinking_from_context independently', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 600_000
@@ -408,8 +414,10 @@ safeTest('batch path aggregates per-slot remove_thinking_from_context independen
       prompt: [
         { role: 'system', content: 'You are an AI assistant. Always provide a clear answer after thinking' },
         { role: 'user', content: 'What is the capital of Spain?' }
-      ]
-      // No runOptions → compaction stays at its default-off for this slot.
+      ],
+      // Explicit opt-out: pins slot B at 0 discards so the aggregate
+      // assertion below stays anchored to slot A's single discard.
+      runOptions: { generationParams: { remove_thinking_from_context: false } }
     }
   ]
 
@@ -430,7 +438,7 @@ safeTest('batch path aggregates per-slot remove_thinking_from_context independen
       `mixed-slot ${item.id} output should contain <think>...</think>`)
   }
 
-  // Slot A (opt-in) contributes 1; slot B (default-off) contributes 0.
+  // Slot A (explicit-on) contributes 1; slot B (explicit-off) contributes 0.
   // Sum across slots must equal 1 — proves per-slot independence AND
   // that `accumulateSlot` actually sums the per-slot value (not max / overwrite).
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)

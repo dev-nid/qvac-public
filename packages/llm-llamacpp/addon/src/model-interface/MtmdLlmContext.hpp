@@ -418,9 +418,13 @@ private:
   bool needsRecurrentSnapshot_ = false;
 
   // Per-request toggle for the post-generation thinking-block KV
-  // cache compaction. Default-off (opt-in via `generationParams`); set
-  // by `applyGenerationParams`.
-  bool removeThinkingFromContext_ = false;
+  // cache compaction. Default-on (opt-out via `generationParams` with
+  // `remove_thinking_from_context: false`); set by
+  // `applyGenerationParams`. Applies uniformly to pure-attention and
+  // recurrent / hybrid-SSM models — the model-type distinction is
+  // enforced downstream via `needsRecurrentSnapshot_`, not by varying
+  // this default per model.
+  bool removeThinkingFromContext_ = true;
 
   // Shared rollback state for recurrent / hybrid SSM models. Owns the
   // prefill-entry snapshot (cancel during prefill), the end-of-prefill

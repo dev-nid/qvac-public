@@ -43,11 +43,13 @@ struct GenerationParams {
   // restored on completion.
   std::optional<int> reasoning_budget;
   // Per-request override for the post-generation thinking-block KV
-  // cache compaction. Default-off at the context level; passing `true`
-  // here opts in for this request, `false` leaves the reasoning block
-  // in the cache. Throws `StatusError(InvalidArgument)` when set to
-  // `true` on a model with recurrent memory (SSM / hybrid SSM such as
-  // Qwen3.5). Restored at end-of-request.
+  // cache compaction. Default-on at the context level; passing
+  // `false` here opts out for this request (keeps the reasoning block
+  // in the cache), `true` re-affirms the default. Supported on both
+  // pure-attention and recurrent / hybrid-SSM models — recurrent /
+  // hybrid takes the snapshot + restore + replay path documented on
+  // `TextLlmContext::needsRecurrentSnapshot_`; pure-attention takes
+  // the `seq_rm + seq_add` path. Restored at end-of-request.
   std::optional<bool> remove_thinking_from_context;
 
   // Reports overrides that need `applyGenerationParamsToContext` (sampler /
@@ -334,12 +336,34 @@ public:
   virtual void resetThinkingBlockDiscards() {}
 
   /**
-   * Number of times recurrent-state restore or replay failed during
-   * thinking-block compaction in the most recent generation. Non-zero
-   * indicates the SSM hidden state was left contaminated for those
-   * turns; the answer was still delivered, but next-turn output may
-   * still reflect the dropped reasoning span. Always 0 for pure-
-   * attention models (where the restore + replay step never runs).
+   * Number of thinking-block compaction failures on recurrent /
+   * hybrid-SSM models in the most recent generation. Always 0 for
+   * pure-attention models (where the snapshot + replay step never
+   * runs).
+   *
+   * Covers two distinct failure classes; disambiguate from the
+   * request outcome:
+   *   * Hard failure: the end-of-generation restore or replay step
+   *     failed. The compactor cleared the sequence's KV / SSM
+   *     memory, the driver reset its positional accounting to a
+   *     clean state, and the request itself was failed with a
+   *     `StatusError` (batch error recovery additionally skips the
+   *     cache save so the last known-good on-disk cache is
+   *     preserved). The counter is bumped before the throw, so
+   *     callers who catch the error and read runtime stats see it.
+   *   * Soft failure: a recurrent-state snapshot could not be
+   *     captured. Two sub-cases with different downstream effects,
+   *     both non-fatal to the request:
+   *       - Open-marker snapshot failed. End-of-generation
+   *         compaction is skipped for this turn, so the reasoning
+   *         span stays in the live KV / SSM cache; if the request
+   *         has `saveCacheToDisk`, that un-compacted state is
+   *         persisted to disk. From the caller's point of view
+   *         `remove_thinking_from_context` did not run this turn.
+   *       - Batch admission rollback-anchor snapshot failed. Only
+   *         cancel rollback for that turn degrades to a no-op; if
+   *         the turn is not cancelled, live memory and any
+   *         subsequent save are unaffected.
    */
   [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
     return 0;

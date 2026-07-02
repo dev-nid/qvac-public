@@ -214,7 +214,11 @@ private:
   std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
   bool pendingThinkCloseCapture_ = false;
 
-  bool removeThinkingFromContext_ = false;
+  // Default-on: mirrors the owning LlmContext's default. The owner
+  // syncs this via `setRemoveThinkingFromContext` whenever a request
+  // explicitly opts out (or opts back in), so the class-member value
+  // only matters at construction time before the first request.
+  bool removeThinkingFromContext_ = true;
   bool reasoningEnabled_ = false;
   bool needsRecurrentSnapshot_ = false;
 
