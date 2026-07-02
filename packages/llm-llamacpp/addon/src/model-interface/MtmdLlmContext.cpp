@@ -1197,8 +1197,27 @@ void MtmdLlmContext::compactThinkSpan() {
       !userVisiblePerf_.has_value()) {
     userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
   }
-  const auto outcome =
-      compactor_.compact(modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
+  ReasoningBlockCompactor::Outcome outcome;
+  try {
+    outcome =
+        compactor_.compact(modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
+  } catch (const qvac_errors::StatusError&) {
+    // Hybrid restore/replay failure. The compactor best-effort-wiped
+    // the sequence memory before throwing, so live KV/SSM is empty for
+    // this seqId. Sync positional + protected-prefix bookkeeping to
+    // match (empty sequence, no committed positions) so a subsequent
+    // turn on this driver cannot decode into contaminated positions
+    // and any late saveCache path cannot write a header whose metadata
+    // no longer matches memory. Re-throw so the caller (single-prompt
+    // JS wrapper, or batch scheduler workerLoop's global catch)
+    // surfaces the failure instead of continuing on stale state.
+    current_ = {};
+    protectedPrefix_ = {};
+    pendingBatchFirstMsg_ = false;
+    rollbackState_.reset();
+    compactor_.reset();
+    throw;
+  }
   using OutcomeKind = ReasoningBlockCompactor::Outcome::Kind;
 
   // Multimodal `cacheTokens` math diverges from text because image
@@ -1215,15 +1234,11 @@ void MtmdLlmContext::compactThinkSpan() {
     current_.pos = outcome.newPos;
     current_.cacheTokens -= outcome.discarded;
     break;
-  case OutcomeKind::FailedRecurrentRestore:
-  case OutcomeKind::FailedRecurrentReplay:
-    // Recurrent rollback left the cache in an undefined state; sync
-    // both halves down to the snapshot anchor.
-    current_.cacheTokens -= (current_.pos - outcome.newPos);
-    current_.pos = outcome.newPos;
-    break;
   case OutcomeKind::NoOp:
   case OutcomeKind::FailedAttention:
+    // Either nothing to do (NoOp) or the attention `seq_rm` was
+    // rejected without touching the KV range; live memory still
+    // matches `current_`, so leave it alone.
     break;
   }
 

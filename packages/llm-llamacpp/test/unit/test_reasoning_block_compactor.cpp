@@ -1,6 +1,7 @@
 #include <optional>
 
 #include <gtest/gtest.h>
+#include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
 
 #include "model-interface/ReasoningBlockCompactor.hpp"
@@ -327,39 +328,41 @@ TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
 }
 
 // ============================================================================
-// Failure stats — `Outcome::Kind::FailedRecurrentRestore` path
+// Failure contract — hybrid restore/replay
 // ============================================================================
 //
-// The recurrent compaction path increments `thinkingCompactionFailed_` and
-// returns a retained-state `Outcome` (rather than throwing or silently
-// dropping state) when the boundary restore underflows. Callers in
-// `TextLlmContext` / `MtmdLlmContext` use the returned `newPos` /
-// `keptPrefixEnd` / `discarded` fields to keep the cache cursor in a
-// defined position even though the underlying llama state is undefined —
-// this is the documented "best-effort" recovery contract.
+// A `state_seq_load_file` short-read on the boundary restore, or a
+// `llama_decode` failure during the post-reasoning replay, leaves live
+// KV/SSM memory in a state that no longer matches any cursor the caller
+// might synthesise. The compactor no longer papers over this with a
+// "best-effort" retained-state Outcome (that path silently corrupted
+// the next turn's decode and any concurrent saveCache). Instead:
 //
-// These tests pin three things:
 //   1. `thinkingCompactionFailed_` increments by exactly 1 per failure.
 //   2. `thinkingBlockDiscards_` does NOT increment (no successful drop).
-//   3. The retained-state fields snap to the snapshot anchor
-//      (`snapshotPos`), so the caller can resume from a known prefix.
+//   3. The affected sequence is best-effort wiped via
+//      `llama_memory_seq_rm` (skipped when `ctx == nullptr` in unit
+//      tests; verified end-to-end by the driver-level tests that
+//      assert next-request-starts-clean).
+//   4. `compact()` throws `qvac_errors::StatusError`, so callers must
+//      catch, reset their positional accounting to zero (matching the
+//      wiped sequence), and re-throw. No saveCache path can serialize
+//      a header whose metadata contradicts memory, because the throw
+//      unwinds past every save site.
 //
-// We force the failure via `ctx == nullptr`: `restoreRecurrentState` is
-// the first call inside the recurrent branch and short-returns false on
-// null `lctx`, producing `FailedRecurrentRestore`.
-//
-// Note on the symmetric `FailedRecurrentReplay` branch (see lines 242-259
-// of `ReasoningBlockCompactor.cpp`): it shares the same
-// `++thinkingCompactionFailed_` and retained-state shape, but reaching it
-// from a unit test requires either a test seam on `replayPostReasoning`
-// or a real `llama_context` — `ctx == nullptr` trips restore failure
-// first, so the replay branch is unreachable from this fixture. We
-// deliberately leave it as a code-reading equivalence rather than
-// introducing a new production test seam for parity.
+// We force the failure via `ctx == nullptr`: `restoreRecurrentState`
+// is the first call inside the recurrent branch and short-returns
+// false on null `lctx`. The symmetric replay branch shares the exact
+// same throw + wipe shape (see the replay `throw` site in
+// `ReasoningBlockCompactor.cpp`) but is unreachable from this fixture
+// without either a test seam on `replayPostReasoning` or a real
+// `llama_context` — restore trips first. We pin the shape here and
+// leave replay as a code-reading equivalence rather than introducing
+// a production seam solely for parity coverage.
 
 TEST(
     ReasoningBlockCompactorFailureStats,
-    RestoreFailureIncrementsCompactionFailedAndRetainsSnapshotAnchor) {
+    RestoreFailureThrowsIncrementsCompactionFailedAndClearsInternalState) {
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -370,9 +373,9 @@ TEST(
   constexpr llama_pos kSpanEnd = 20;
   constexpr llama_pos kLivePos = 25;
 
-  // Seed a captured boundary so the recurrent branch is actually entered
-  // (the "no boundary captured" early-return is its own outcome — see
-  // `NoOpWhenBoundaryNotCaptured` above).
+  // Seed a captured boundary so the recurrent branch is actually
+  // entered (the "no boundary captured" early-return is its own
+  // outcome — see `NoOpWhenBoundaryNotCaptured` above).
   fx.rollback.seedReasoningBoundaryForTesting(kSnapshotPos);
   ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
 
@@ -386,29 +389,60 @@ TEST(
   ASSERT_EQ(fx.compactor.blockDiscards(), 0);
 
   // `ctx == nullptr` -> `restoreRecurrentState` returns false ->
-  // `restoreReasoningBoundary` returns false -> `FailedRecurrentRestore`.
-  const auto outcome =
-      fx.compactor.compact(/*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
-
-  EXPECT_EQ(
-      outcome.kind,
-      ReasoningBlockCompactor::Outcome::Kind::FailedRecurrentRestore);
-
-  // Retained-state contract: snap to the snapshot anchor so the caller
-  // can resume from a known prefix even though the underlying state is
-  // undefined. `newPos == keptPrefixEnd == snapshotPos`, and
-  // `discarded == livePos - snapshotPos`.
-  EXPECT_EQ(outcome.newPos, kSnapshotPos);
-  EXPECT_EQ(outcome.keptPrefixEnd, kSnapshotPos);
-  EXPECT_EQ(outcome.discarded, kLivePos - kSnapshotPos);
-  // `spanStart` / `spanEnd` are populated unconditionally in the
-  // prologue of `compact()` (before any branch); pinning them here
-  // catches a regression that would clear them on the failure path.
-  EXPECT_EQ(outcome.spanStart, kSpanStart);
-  EXPECT_EQ(outcome.spanEnd, kSpanEnd);
-  EXPECT_EQ(outcome.replayedTokens, 0u);
+  // `restoreReasoningBoundary` returns false -> `compact()` throws.
+  EXPECT_THROW(
+      {
+        (void)fx.compactor.compact(
+            /*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
+      },
+      qvac_errors::StatusError);
 
   // Stats: exactly one failure recorded, no success counted.
+  EXPECT_EQ(fx.compactor.compactionFailed(), 1);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+
+  // The `ResetGuard` in `compact()` runs on the exception path too,
+  // so per-inference state (span, boundary snapshot, replay buffer)
+  // must be fully cleared. Without this the next inference's
+  // `snapshotAtPrefillBoundary` no-ops on the stale boundary and the
+  // driver would replay stale post-reasoning tokens.
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+  EXPECT_FALSE(fx.rollback.hasReasoningBoundary());
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    NextCompactAfterRestoreFailureIsCleanNoOp) {
+  // The reviewer's "next request starts from a clean/reset state"
+  // invariant, exercised at the compactor level: after a throw, a
+  // fresh compact() on the same instance MUST not carry over the
+  // failed inference's span or boundary. If the ResetGuard ever
+  // regressed and left `thinkSpan_` behind, this compact would take
+  // the pure-attention path with a stale `spanStart`/`spanEnd` and
+  // either bump `thinkingBlockDiscards_` for a phantom drop or
+  // re-throw against the same null ctx.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/20);
+  EXPECT_THROW(
+      {
+        (void)fx.compactor.compact(
+            /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+      },
+      qvac_errors::StatusError);
+  ASSERT_EQ(fx.compactor.compactionFailed(), 1);
+
+  // Simulating "next turn": no new span, no seeded boundary.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/0, "[Test]");
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
   EXPECT_EQ(fx.compactor.compactionFailed(), 1);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
@@ -416,13 +450,14 @@ TEST(
 TEST(
     ReasoningBlockCompactorFailureStats,
     NoOpOutcomesDoNotIncrementCompactionFailed) {
-  // The "intentional retained state" half of the reviewer's concern:
-  // non-failure no-op paths (degenerate span where close never landed,
+  // Non-failure no-op paths (degenerate span where close never landed,
   // and recurrent runs with no boundary captured) leave the cache
-  // untouched and MUST NOT bump the failure counter. Without this guard,
-  // any caller skipping `compactThinkSpan` (e.g. a turn where reasoning
-  // never closed) would silently inflate `thinkingCompactionFailed` and
-  // look like a real failure to dashboards.
+  // untouched and MUST NOT bump the failure counter. Without this
+  // guard, any caller skipping `compactThinkSpan` (e.g. a turn where
+  // reasoning never closed) would silently inflate
+  // `thinkingCompactionFailed` and look like a real failure to
+  // dashboards. Distinct from the throw-and-clear contract in the
+  // hybrid restore/replay failure tests above.
   //
   // We deliberately do NOT cover the `end <= start` and `end > pos`
   // sub-cases here because the public API does not expose a way to

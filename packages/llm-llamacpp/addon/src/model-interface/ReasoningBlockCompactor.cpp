@@ -4,8 +4,10 @@
 #include <utility>
 
 #include <common/common.h>
+#include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
 
+#include "../addon/LlmErrors.hpp"
 #include "../utils/LoggingMacros.hpp"
 #include "../utils/ReasoningRollbackState.hpp"
 #include "ContextSlider.hpp"
@@ -15,6 +17,41 @@
 using namespace qvac_lib_inference_addon_cpp::logger;
 
 namespace qvac_lib_inference_addon_llama {
+
+namespace {
+
+// Best-effort sequence wipe used before throwing on the hybrid
+// restore/replay failure path. On success live memory is empty for
+// `seqId`, matching the caller's post-catch reset onto pos=0. Silent
+// no-op when `ctx` is null (unit-test seam) or `llama_get_memory`
+// returns null — the throw still fires below so the caller reacts
+// appropriately, but we can't reason further about live state.
+//
+// `llama_memory_seq_rm(-1, -1)` is documented never to fail for a
+// full-range delete (only partial ranges over recurrent memory can
+// reject), but log a warning if it ever does so operators see the
+// stale state rather than debugging silent cache-key drift later.
+void clearSeqOnFailure(::llama_context* ctx, llama_seq_id seqId) noexcept {
+  if (ctx == nullptr) {
+    return;
+  }
+  auto* mem = llama_get_memory(ctx);
+  if (mem == nullptr) {
+    return;
+  }
+  const bool cleared = llama_memory_seq_rm(mem, seqId, -1, -1);
+  if (!cleared) {
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[ReasoningBlockCompactor] llama_memory_seq_rm(-1,-1) refused "
+            "full-range wipe on seqId=%d before hard-fail throw; caller's "
+            "post-catch reset may not match live memory\n",
+            static_cast<int>(seqId)));
+  }
+}
+
+} // namespace
 
 ReasoningBlockCompactor::ReasoningBlockCompactor(
     utils::ReasoningRollbackState& rollback, ToolsCompactController& tools)
@@ -228,14 +265,29 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
             snapshotPos,
             seqId));
     ++thinkingCompactionFailed_;
-    out.kind = Outcome::Kind::FailedRecurrentRestore;
-    // Attention tail and SSM are now in an undefined state — best-
-    // effort sync `newPos` so the caller can resume from a known
-    // prefix. They may need to clear and re-prefill.
-    out.newPos = snapshotPos;
-    out.discarded = pos - snapshotPos;
-    out.keptPrefixEnd = snapshotPos;
-    return out;
+    // llama.cpp reports the load short-read but does not tell us
+    // whether it left the sequence untouched or in a partially loaded
+    // state. Either way it is unsafe to keep decoding into it: the
+    // recurrent hidden state is not positionally indexed and cannot
+    // be reasoned about after an aborted `state_seq_load_file`. Wipe
+    // the sequence (attention KV cells + recurrent state) so the
+    // caller's post-catch reset onto pos=0 matches live memory, then
+    // fail hard so callers cannot save a cache whose header no longer
+    // matches what is serialized.
+    clearSeqOnFailure(ctx, seqId);
+    throw qvac_errors::StatusError(
+        errors::ADDON_ID,
+        errors::toString(errors::FailedToDecode),
+        string_format(
+            "%s ReasoningBlockCompactor::compact: full-state restore "
+            "underflowed on hybrid/recurrent compaction; sequence "
+            "cleared (snapshotPos=%d, spanStart=%d, spanEnd=%d, "
+            "seqId=%d)",
+            labelTag,
+            snapshotPos,
+            start,
+            end,
+            seqId));
   }
 
   const size_t replayCount = rollback_.postReasoningTokenCount();
@@ -251,11 +303,23 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
             replayCount,
             seqId));
     ++thinkingCompactionFailed_;
-    out.kind = Outcome::Kind::FailedRecurrentReplay;
-    out.newPos = snapshotPos;
-    out.discarded = pos - snapshotPos;
-    out.keptPrefixEnd = snapshotPos;
-    return out;
+    // Restore succeeded, so live memory currently sits at
+    // `snapshotPos`, but the replay decoded an unknown prefix of the
+    // post-reasoning tokens before failing — the recurrent state has
+    // partially advanced past `snapshotPos` with no way to observe
+    // how far. Same coherence problem as restore failure; same fix.
+    clearSeqOnFailure(ctx, seqId);
+    throw qvac_errors::StatusError(
+        errors::ADDON_ID,
+        errors::toString(errors::FailedToDecode),
+        string_format(
+            "%s ReasoningBlockCompactor::compact: post-reasoning "
+            "replay rejected on hybrid/recurrent compaction; sequence "
+            "cleared (snapshotPos=%d, replayCount=%zu, seqId=%d)",
+            labelTag,
+            snapshotPos,
+            replayCount,
+            seqId));
   }
 
   const llama_pos newPos = snapshotPos + static_cast<llama_pos>(replayCount);

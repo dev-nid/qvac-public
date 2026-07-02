@@ -348,12 +348,29 @@ private:
       std::exception_ptr error) noexcept;
   void cancelPendingLocked();
   void clearLocked() noexcept;
+  /// Persistence policy for `cancelSlotLocked`. `Save` is the default and
+  /// matches the graceful-cancel semantics that the drain path already
+  /// runs: on cancel, `onCancel` rolls the driver back to its admission
+  /// cursor and `saveCacheForSlot` persists that rolled-back state so
+  /// the caller's `cacheKey` reflects the pre-request warm baseline.
+  ///
+  /// `Skip` is the error-recovery variant: after an unexpected driver
+  /// throw the slot's live memory and logical accounting are already
+  /// unhealthy (see e.g. `ReasoningBlockCompactor::compact()`'s hybrid
+  /// restore/replay failure path, which wipes the sequence and throws).
+  /// Saving in that state would silently overwrite the user's previous
+  /// on-disk cache with an inconsistent/empty state, so error-recovery
+  /// callers pass `Skip` to preserve the last known-good file.
+  enum class SaveCachePolicy { Save, Skip };
+
   /// Tear down a single slot (cancel path). `noexcept`: callers run it from
   /// the StepUnlockGuard destructor and the worker loop, so the teardown itself
   /// must never throw. Every throwing step (driver finalize + cache save, and
   /// the onDone callback inside notifyDone) is contained; the cleanup tail
   /// (notifyDone/batcher cancel/freeSlot) always runs.
-  void cancelSlotLocked(uint32_t seqId) noexcept;
+  void cancelSlotLocked(
+      uint32_t seqId,
+      SaveCachePolicy savePolicy = SaveCachePolicy::Save) noexcept;
   /// Apply teardown requests recorded by cancel()/clear() while the
   /// worker was mid-step. Must run before admitting pending requests so
   /// a deferred cancel can never hit a freed-and-reused slot. `noexcept` so the

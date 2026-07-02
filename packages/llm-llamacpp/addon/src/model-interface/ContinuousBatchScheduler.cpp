@@ -892,7 +892,8 @@ bool ContinuousBatchScheduler::cancel(uint32_t seqId) {
   return occupied;
 }
 
-void ContinuousBatchScheduler::cancelSlotLocked(uint32_t seqId) noexcept {
+void ContinuousBatchScheduler::cancelSlotLocked(
+    uint32_t seqId, SaveCachePolicy savePolicy) noexcept {
   const bool occupied = seqId < slots_.size() && slots_[seqId].has_value();
   if (!occupied) {
     return;
@@ -908,12 +909,20 @@ void ContinuousBatchScheduler::cancelSlotLocked(uint32_t seqId) noexcept {
     // regardless, so the slot is always freed. The normal-completion save in
     // drainFinishedLocked() is left throwing so live requests still surface the
     // error.
+    //
+    // `savePolicy == Skip` short-circuits the save leg: error-recovery callers
+    // (see `failGroupLocked`) arrive here after the driver has already thrown
+    // from a state-mutating hook, so live memory and driver accounting are
+    // unhealthy and a save would silently corrupt the user's on-disk cache.
+    // See `SaveCachePolicy` in the header for the full rationale.
     try {
       slots_[seqId]->driver->onCancel({});
       if (req != nullptr) {
         accumulateSlotRuntimeStats(*slots_[seqId], *req);
       }
-      saveCacheForSlot(seqId, *slots_[seqId]);
+      if (savePolicy == SaveCachePolicy::Save) {
+        saveCacheForSlot(seqId, *slots_[seqId]);
+      }
     } catch (const std::exception& e) {
       logTeardownFailureNoexcept("cancel teardown failed", seqId, e.what());
     } catch (...) {
@@ -1025,9 +1034,15 @@ void ContinuousBatchScheduler::failGroupLocked(
   // thread and std::terminate). The group is marked done above, so the
   // completeGroupRequestLocked inside notifyDone no-ops rather than
   // double-counting.
+  //
+  // Pass `SaveCachePolicy::Skip`: this is the error-recovery path, so the
+  // driver's live state may be inconsistent (e.g. a hybrid-recurrent
+  // compaction failure clears the sequence and throws), and persisting that
+  // state would silently overwrite the user's previous on-disk cache with an
+  // empty/broken one. Graceful-cancel callers keep the default `Save`.
   for (uint32_t seqId = 0; seqId < slots_.size(); seqId++) {
     if (slots_[seqId].has_value() && slots_[seqId]->group == group) {
-      cancelSlotLocked(seqId);
+      cancelSlotLocked(seqId, SaveCachePolicy::Skip);
     }
   }
   workCv_.notify_all();
@@ -1117,9 +1132,14 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t compactionFailed = 0;
   if (slot.driver) {
     // `onCancel` has already rolled `nPast` back to the admission cursor
-    // and `saveCacheForSlot` persists that state, so `CacheTokens` here
-    // matches the live driver cursor and what was written to disk.
-    // Work performed is reported via `promptTokens` / `generatedTokens`.
+    // and, on the graceful-cancel leg, `saveCacheForSlot` persists that
+    // state — so `CacheTokens` matches the live driver cursor and what
+    // is on disk. On the error-recovery leg (`SaveCachePolicy::Skip`,
+    // driven from `failGroupLocked`) the save is intentionally skipped
+    // to preserve the last known-good cache, but the live driver cursor
+    // is still the honest report for that batch: the request is
+    // logically rolled back to the admission cursor. Work performed is
+    // reported via `promptTokens` / `generatedTokens`.
     nPast = static_cast<int64_t>(slot.driver->getNPast());
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =

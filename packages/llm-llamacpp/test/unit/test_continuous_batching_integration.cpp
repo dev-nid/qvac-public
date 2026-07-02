@@ -1611,6 +1611,133 @@ TEST_F(
 
 namespace {
 
+/// Read a file into a byte buffer for byte-for-byte comparison.
+/// Used by the "cache preserved on hard failure" test to prove the
+/// scheduler's error-recovery path does not overwrite the primed cache
+/// with an inconsistent post-throw state.
+std::vector<uint8_t> readFileBytes(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), {}};
+}
+
+} // namespace
+
+/// Error-recovery cancel must not save a cache from an unhealthy driver
+/// state. When a decode fails mid-batch, `failGroupLocked` tears each
+/// affected slot down through `cancelSlotLocked(SaveCachePolicy::Skip)`;
+/// the graceful-cancel path (user-issued `cancel()`) still passes the
+/// default `Save`. This test forces the decode-error path by injecting a
+/// failing `decodeFunc_` while a batch is in flight against a primed
+/// `cacheKey`, then asserts the on-disk cache is preserved.
+///
+/// The strong invariant is "saveCache did not run", not "bytes are
+/// equal": for the plain decode-error path, `onCancel` rolls state
+/// cleanly back to `preRequestNPast_` / `preRequestFirstMsgTokens_`
+/// captured at admission, and `llama_state_seq_save_file` writes
+/// deterministic metadata + a truncated KV tail, so a fresh save from
+/// the rolled-back state would very likely produce byte-identical
+/// output on this path. What that would still change is the file's
+/// `last_write_time`, so mtime is the discriminating assertion here:
+/// under the old always-save code `cancelSlotLocked` would touch the
+/// file (identical bytes, fresh mtime); under the fix it never opens
+/// it. Byte equality is kept as a secondary regression guard for the
+/// class of bugs where a driver whose accounting was reset to zero
+/// (e.g. hybrid-recurrent compaction throw path) is subsequently
+/// serialized on top of the warm baseline.
+///
+/// The `cancelSlotLocked(SaveCachePolicy::Save)` graceful contract is
+/// already covered by `BatchCancelRestoresCacheToWarmBaseline`: it
+/// primes a cache, cancels via `model->cancel()`, and asserts the
+/// rolled-back state was persisted.
+TEST_F(
+    ContinuousBatchingIntegrationTest,
+    BatchDecodeErrorDoesNotOverwritePrimedCache) {
+  REQUIRE_MODEL(model_);
+  config_["n_predict"] = "32";
+  auto model = loadModel();
+
+  auto* scheduler = LlamaModelTestPeer::scheduler(*model);
+  ASSERT_NE(scheduler, nullptr)
+      << "LlamaModelTestPeer::scheduler returned null -- is parallel >= 2?";
+
+  const fs::path cachePath =
+      fs::temp_directory_path() /
+      ("batch-decode-err-preserve-" + uniqueTestId() + ".bin");
+
+  // Prime the cache with a valid warm baseline (runs against the real
+  // decode; the failure injection happens only for the follow-up batch).
+  auto primer = makePrompt("Remember these facts: the ocean is deep.");
+  primer.prefill = true;
+  primer.cacheKey = cachePath.string();
+  primer.saveCacheToDisk = true;
+  std::vector<LlamaModel::Prompt> primeBatch{std::move(primer)};
+  model->processPromptBatch(primeBatch);
+  ASSERT_TRUE(fs::exists(cachePath))
+      << "test setup: primer did not write the cache file";
+  const auto primedBytes = readFileBytes(cachePath);
+  ASSERT_FALSE(primedBytes.empty())
+      << "test setup: primed cache file is empty";
+  const auto primedMtime = fs::last_write_time(cachePath);
+
+  // Sleep just past the filesystem mtime resolution so any subsequent
+  // rewrite of the cache is guaranteed to bump `last_write_time`
+  // (POSIX allows 1s granularity on some filesystems; a generous
+  // margin here keeps the assertion reliable across platforms without
+  // being long enough to affect test wall time meaningfully).
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+
+  // Any decode returning non-zero drives the scheduler through
+  // stepLocked -> markAllFinished(DecodeError) -> failGroupLocked ->
+  // cancelSlotLocked(..., Skip). That is the exact error-recovery leg
+  // the SaveCachePolicy::Skip fix protects.
+  ContinuousBatchSchedulerTestPeer::setDecodeFunc(
+      *scheduler,
+      [](llama_context* /*ctx*/, llama_batch& /*b*/) { return -1; });
+
+  auto failing = makePrompt("Say two short sentences about the ocean.");
+  failing.cacheKey = cachePath.string();
+  failing.saveCacheToDisk = true;
+  std::vector<LlamaModel::Prompt> failingBatch{std::move(failing)};
+
+  // The batch must surface the decode error rather than complete
+  // silently: if it does complete, `saveCacheForSlot` would fire on the
+  // graceful path and this test would degrade into checking rollback
+  // fidelity rather than the "no save on error" invariant.
+  EXPECT_ANY_THROW({ (void)model->processPromptBatch(failingBatch); })
+      << "decode-error batch must propagate the failure; without the throw "
+         "the error-recovery leg is not exercised";
+
+  // Primary invariant: `saveCacheForSlot` never ran on the error
+  // recovery leg. `llama_state_seq_save_file` truncates + rewrites,
+  // so a call — even one that writes the same bytes — bumps mtime.
+  // GTest cannot stream `file_time_type` on the target SDK, so wrap
+  // the comparison in `EXPECT_TRUE` and surface the mtime deltas
+  // explicitly in the failure message.
+  const auto postFailMtime = fs::last_write_time(cachePath);
+  EXPECT_TRUE(postFailMtime == primedMtime)
+      << "CACHE FILE mtime CHANGED on error recovery: saveCacheForSlot ran "
+         "and rewrote the primed cache during a failed batch. mtime delta="
+      << std::chrono::duration_cast<std::chrono::nanoseconds>(
+             postFailMtime - primedMtime)
+             .count()
+      << "ns. cancelSlotLocked must pass SaveCachePolicy::Skip on the "
+         "error-recovery leg so the last known-good cache is preserved.";
+
+  // Secondary regression guard: even if a future save ever became a
+  // no-op-when-bytes-match, this still catches the class of bugs
+  // where a driver reset (e.g. hybrid-recurrent compaction throw
+  // zeroing nPast_) leaks into an on-disk overwrite of the warm
+  // baseline.
+  const auto postFailBytes = readFileBytes(cachePath);
+  EXPECT_EQ(postFailBytes, primedBytes)
+      << "PRIMED CACHE BYTES DIVERGED after error recovery: the failing "
+         "batch's post-throw state overwrote the warm baseline on disk.";
+
+  fs::remove(cachePath);
+}
+
+namespace {
+
 /// Drives one batch on a background thread and blocks the first
 /// llama_decode (after it actually ran) so the test can observe how
 /// scheduler APIs behave while a decode is in flight. The scheduler's

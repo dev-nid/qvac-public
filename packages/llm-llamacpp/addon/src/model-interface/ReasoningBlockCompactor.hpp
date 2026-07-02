@@ -131,16 +131,31 @@ public:
   //
   // RAII cleanup: per-inference state (`thinkSpan_`, reasoning boundary
   // snapshot, post-reasoning buffer, capture flag) is cleared on every
-  // exit so a no-op or failure can't leave stale state behind.
+  // exit — including when `compact()` throws — so a no-op or failure
+  // can't leave stale state behind.
+  //
+  // Failure contract:
+  //   * `FailedAttention` (returned): pure-attention `seq_rm` was
+  //     rejected. The KV range was not modified, so live memory still
+  //     matches the caller's cursor and no rollback is needed.
+  //   * hybrid `restoreReasoningBoundary` / `replayPostReasoning`
+  //     failures do NOT return an outcome. `compact()` best-effort
+  //     clears the sequence memory (attention KV cells + recurrent
+  //     state) and throws `qvac_errors::StatusError`. Callers must
+  //     catch, reset their positional accounting to zero to match the
+  //     cleared sequence, and re-throw so no saveCache path can write
+  //     a header that misrepresents live memory.
   struct Outcome {
     enum class Kind {
       // Feature off, no span captured, degenerate or overshooting span.
       NoOp,
       CompactedAttention,
       CompactedRecurrent,
+      // Pure-attention `seq_rm` was rejected: KV range untouched, so
+      // the caller keeps its cursor. Hybrid restore/replay failures
+      // throw instead of returning here — see the "Failure contract"
+      // comment above.
       FailedAttention,
-      FailedRecurrentRestore,
-      FailedRecurrentReplay,
     };
     Kind kind = Kind::NoOp;
     // New cache position the caller should adopt. Unset for `NoOp`.

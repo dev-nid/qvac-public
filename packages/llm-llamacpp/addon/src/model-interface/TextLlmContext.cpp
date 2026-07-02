@@ -1165,8 +1165,27 @@ void TextLlmContext::compactThinkSpan() {
       !userVisiblePerf_.has_value()) {
     userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
   }
-  const auto outcome =
-      compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
+  ReasoningBlockCompactor::Outcome outcome;
+  try {
+    outcome = compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
+  } catch (const qvac_errors::StatusError&) {
+    // Hybrid restore/replay failure. The compactor best-effort-wiped
+    // the sequence memory before throwing, so live KV/SSM is empty for
+    // this seqId. Sync our positional accounting to match (pos=0) and
+    // drop per-inference reasoning bookkeeping so a subsequent turn on
+    // this driver cannot decode into contaminated positions and any
+    // late saveCache path cannot write a header whose metadata no
+    // longer matches memory. Re-throw so the caller (single-prompt JS
+    // wrapper, or batch scheduler workerLoop's global catch) surfaces
+    // the failure instead of continuing on stale state.
+    nPast_ = 0;
+    firstMsgTokens_ = 0;
+    generationStarted_ = false;
+    assistantOutput_.clear();
+    rollbackState_.reset();
+    compactor_.reset();
+    throw;
+  }
   using OutcomeKind = ReasoningBlockCompactor::Outcome::Kind;
   switch (outcome.kind) {
   case OutcomeKind::CompactedAttention:
@@ -1176,17 +1195,11 @@ void TextLlmContext::compactThinkSpan() {
       firstMsgTokens_ = outcome.keptPrefixEnd;
     }
     break;
-  case OutcomeKind::FailedRecurrentRestore:
-  case OutcomeKind::FailedRecurrentReplay:
-    // Recurrent rollback left the cache in an undefined state; sync
-    // `nPast_` to the snapshot anchor so subsequent decodes resume
-    // from a known prefix.
-    nPast_ = outcome.newPos;
-    break;
   case OutcomeKind::NoOp:
   case OutcomeKind::FailedAttention:
     // Either nothing to do (NoOp) or the attention `seq_rm` was
-    // rejected; leave `nPast_` untouched.
+    // rejected without touching the KV range; live memory still
+    // matches `nPast_`, so leave it alone.
     break;
   }
 }
