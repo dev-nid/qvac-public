@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.32.0] - 2026-07-03
+
+Extends `remove_thinking_from_context` to hybrid SSM models (Qwen3.5, Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear) via a full-state snapshot at end-of-prefill and post-reasoning token replay, flips the default to `true` so reasoning-capable models drop hidden reasoning blocks by default, and tightens failure semantics on the recurrent path. Also cleans up the recurrent-cancel rollback TODOs left behind by [#2808](https://github.com/tetherto/qvac/pull/2808).
+
+### Added
+
+- `remove_thinking_from_context: true` is now supported on recurrent and hybrid-SSM model families (Qwen3.5, Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, Kimi-Linear). The recurrent half of the memory module is snapshotted at end-of-prefill via `llama_state_seq_get_data_ext`, restored via `llama_state_seq_set_data_ext` at end-of-generation, and the post-reasoning tail (close marker + injected newlines + visible answer tokens) is replayed through `llama_decode`. The reasoning body is removed from both halves of the cache; the chat-template-forced opener is retained in the recurrent hidden state so the next turn is not out-of-distribution.
+- `RuntimeStats.thinkingCompactionFailed`: integer count of recurrent-path compaction failures for the request. Always `0` on pure-attention models. Increments on either a hard failure (restore or replay step failed — the request itself is failed with a `StatusError`) or a soft failure (a snapshot could not be captured — the request still delivers an answer).
+
+### Changed
+
+- **Default flipped: `generationParams.remove_thinking_from_context` now defaults to `true`.** For reasoning-capable models the safer default is to drop hidden reasoning blocks so later turns are not steered by internal reasoning the user never sees. Callers that want to preserve reasoning tokens in the KV / SSM cache across turns can opt out with `remove_thinking_from_context: false`. This is a behavior change for existing callers that relied on the previous default-off: multi-turn output, `cacheKey` on-disk contents, and (on hybrid models) failure surface all differ after upgrade. Supersedes the "default `false`, throws on recurrent memory" contract documented in [0.29.2](#0292---2026-06-23).
+- Recurrent / hybrid restore or replay failures during thinking-block compaction now fail the request with `StatusError` and reset the affected sequence's KV / SSM memory + driver positional accounting to a clean, empty state, rather than delivering a partial answer with contaminated hidden state. On the continuous-batch path the error-recovery leg additionally skips the per-slot cache save, so a caller with `cacheKey` + `saveCacheToDisk` keeps its last known-good on-disk cache rather than overwriting it with the post-failure state.
+- `CacheTokens` on a cancelled batch request now reflects the rolled-back logical state consistent with "request never happened," rather than the mid-request peak.
+
+### Fixed
+
+- **Mtmd prefill cancel rollback** (TODO 1 from [#2808](https://github.com/tetherto/qvac/pull/2808)): replaced the hybrid-broken `removeLastNTokens` rollback with a prefill-entry full-state snapshot restore, so a cancelled multimodal prefill returns to the exact pre-prefill cache state.
+- **Mtmd metadata resync workaround** (TODO 2 from [#2808](https://github.com/tetherto/qvac/pull/2808)): removed the `llama_memory_seq_pos_max` fallback; snapshot restore now preserves and rolls back the extended image-chunk metadata that `seq_pos_max` cannot report.
+- **Text prefill cancel rollback** (TODO 3 from [#2808](https://github.com/tetherto/qvac/pull/2808)): replaced the text path's recurrent no-op tail removal with the same prefill-entry snapshot restore used for hybrid / recurrent memory.
+
+### Pull Requests
+
+- [#2813](https://github.com/tetherto/qvac/pull/2813) - feat[api]: support `remove_thinking_from_context` on hybrid SSM models (Qwen3.5)
+
 ## [0.31.1] - 2026-07-01
 
 ### Changed
