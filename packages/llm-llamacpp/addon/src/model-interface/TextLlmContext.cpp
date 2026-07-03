@@ -1233,9 +1233,20 @@ void TextLlmContext::setRemoveThinkingFromContext(bool value) {
   // a full-state snapshot is captured at end-of-prefill, restored at
   // end-of-generation, and the post-reasoning tail is replayed through
   // `llama_decode` so both KV halves stay consistent.
-  // Snapshot or replay failure does not throw — it logs and increments
-  // the `thinkingCompactionFailed` runtime stat, leaving the cache as-is
-  // so the answer for the current turn is still delivered.
+  // Failure semantics differ by model type:
+  //   - Pure-attention `seq_rm` failure: the compactor returns
+  //     `Outcome::FailedAttention`, live KV stays consistent with
+  //     `nPast_`, and the turn's answer is still delivered.
+  //   - Hybrid restore/replay failure: the compactor best-effort
+  //     wipes the sequence memory and throws `qvac_errors::StatusError`.
+  //     `compactThinkSpan` catches, resets local positional /
+  //     generation bookkeeping (`nPast_`, `firstMsgTokens_`,
+  //     `assistantOutput_`, rollback + compactor state) so no
+  //     subsequent turn or late cache save can write into contaminated
+  //     state, then rethrows. The current turn's answer is NOT
+  //     delivered; the caller (single-prompt JS wrapper or the batch
+  //     scheduler worker-loop global catch) surfaces the error.
+  // Both paths increment the `thinkingCompactionFailed` runtime stat.
   removeThinkingFromContext_ = value;
   compactor_.setRemoveThinkingFromContext(value);
 }

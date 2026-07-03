@@ -990,10 +990,15 @@ std::function<void()>
 MtmdLlmContext::applyGenerationParams(const GenerationParams& overrides) {
   // Hybrid / fully-recurrent models (Qwen3.5, Qwen3-Next, Jamba, ...)
   // are supported via the snapshot + replay path in `compactThinkSpan`;
-  // no pre-flight rejection is needed here. Snapshot or replay failure
-  // logs and increments the `thinkingCompactionFailed` runtime stat
-  // rather than throwing, so the answer for the current turn is still
-  // delivered.
+  // no pre-flight rejection is needed here. Failure semantics:
+  //   - Pure-attention `seq_rm` failure: cache is left as-is and the
+  //     turn's answer is still delivered.
+  //   - Hybrid restore/replay failure: the compactor best-effort wipes
+  //     the sequence memory and throws `qvac_errors::StatusError`;
+  //     `compactThinkSpan` resets local positional / generation
+  //     bookkeeping and rethrows, so the turn's answer is NOT
+  //     delivered.
+  // Both paths increment the `thinkingCompactionFailed` runtime stat.
   auto restoreSampler = applyGenerationParamsToContext(
       params_, smpl_, modelCtx_.model, overrides);
 
