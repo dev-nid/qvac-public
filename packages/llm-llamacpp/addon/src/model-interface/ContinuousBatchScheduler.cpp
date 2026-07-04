@@ -353,17 +353,6 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
   const bool isCacheLoaded =
       driver->loadCache(request.cacheKey, configuredNDiscarded_);
 
-  // Snapshot the admission cursor (post-`loadCache`) so `onCancel` rolls
-  // back to the warm baseline, not past it. Single-prompt drivers take
-  // the same snapshot at their own entry.
-  driver->snapshotPreRequestCursor();
-  // Hybrid / recurrent drivers additionally need a full-state disk
-  // snapshot to roll back on cancel, because their memory rejects
-  // partial `seq_rm`. The batch path never runs the mid-
-  // `evalMessageWithTools` capture site, so we anchor here. No-op for
-  // pure-attention drivers.
-  driver->snapshotPreRequestRollbackAnchor();
-
   ScopeGuard cacheGuard([this, seqId] { clearSeqKv(seqId); });
 
   PrefillPlan plan = driver->preparePrefill(
@@ -373,6 +362,15 @@ uint32_t ContinuousBatchScheduler::submitLocked(QueuedRequest&& queued) {
       request.mediaPlan,
       isCacheLoaded,
       request.prefill);
+
+  // Anchored post-`preparePrefill` so a pure-attention in-prefill slide
+  // is reflected here; see `TextLlmContext::evalMessageWithTools` for
+  // the full rationale. Recurrent throws on slide, so the ordering is
+  // equivalent for that path.
+  driver->snapshotPreRequestCursor();
+  // Hybrid / recurrent full-state disk snapshot for cancel rollback
+  // (their memory rejects partial `seq_rm`). No-op for pure-attention.
+  driver->snapshotPreRequestRollbackAnchor();
 
   const auto promptSize = static_cast<unsigned>(driver->getNPast()) +
                           static_cast<unsigned>(plan.totalPositions());

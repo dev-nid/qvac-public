@@ -362,6 +362,7 @@ private:
   common_params params_;
   common_chat_templates_ptr tmpls_;
   std::vector<llama_token> antipromptTokens_;
+  std::vector<llama_token> forcedTokens_;
 
   mtmd::bitmaps bitmaps_;
   /// Chunks staged by `preparePrefill` for the batch path; media barriers
@@ -369,9 +370,7 @@ private:
   mtmd::input_chunks stagedChunks_;
   ContextUsage current_;
   ContextUsage protectedPrefix_;
-  llama_pos nDiscarded_ = 0;
   llama_pos perSeqCtxCeiling_ = -1;
-  int32_t nSlides_ = 0;
   double visionEncodeMs_ = 0.0;
   int32_t visionEncodeTiles_ = 0;
   bool pendingBatchFirstMsg_ = false;

@@ -440,15 +440,19 @@ bool TextLlmContext::evalMessageWithTools(
   // or a live `llama_perf_context()` value — never a stale one.
   userVisiblePerf_.reset();
 
-  // Pre-request checkpoint for `onCancel` on the single-prompt path.
-  // The batch path captures this via `snapshotPreRequestCursor` from
-  // the scheduler right after `loadCache`, so both entry points end up
-  // with `preRequestNPast_` pointing at the same admission cursor.
-  snapshotPreRequestCursor();
-
   const std::vector<llama_token> inputTokens =
       preparePrefill(chatMsgs, tools, {}, {}, isCacheLoaded, prefill).tokens;
   const auto nTokens = static_cast<llama_pos>(inputTokens.size());
+
+  // Captured AFTER `preparePrefill` so a pure-attention in-prefill
+  // slide (which lowers `nPast_` via `trySlidePrefill`) is reflected
+  // in the anchor. Earlier capture would leave `preRequestNPast_` at
+  // the pre-slide cursor and `removeLastNTokens` under-trims on
+  // rollback, leaking cancelled prompt tokens into live KV. Recurrent
+  // preparePrefill throws instead of sliding, so the ordering matches
+  // for that path. The scheduler admission takes the same anchor
+  // after its own `preparePrefill`.
+  snapshotPreRequestCursor();
   LlamaBatch textBatch(params_.n_batch, 0, 1);
 
   // Snapshot the sequence state at prefill entry on recurrent / hybrid

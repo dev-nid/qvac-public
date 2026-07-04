@@ -64,6 +64,15 @@ void ReasoningBlockCompactor::setOpenSpan(llama_pos start) {
   if (!removeThinkingFromContext_ || !reasoningEnabled_ || start < 0) {
     return;
   }
+  // Recurrent / hybrid compaction requires an end-of-prefill boundary
+  // snapshot to restore against. `ReasoningSnapshotPolicy` skips that
+  // snapshot for generated-opener templates (PR #2813), so opening a
+  // span here on the recurrent+no-boundary path would drive `compact()`
+  // into its defensive `FailedKvWiped` branch. Skip the span instead,
+  // matching the "generated-opener recurrent = no-op" contract.
+  if (needsRecurrentSnapshot_ && !rollback_.hasReasoningBoundary()) {
+    return;
+  }
   if (thinkSpan_.has_value()) {
     return;
   }
@@ -180,16 +189,13 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     return out;
   }
 
-  // Recurrent / hybrid models without a boundary snapshot cannot be
-  // compacted safely: `seq_rm` over an interior range silently leaves
-  // the SSM hidden state inconsistent, and there is no full-state
-  // snapshot to roll back to. Under the hard-fail contract for
-  // `remove_thinking_from_context`, the missing snapshot is itself a
-  // failure at capture time and `snapshotAtPrefillBoundary` will have
-  // already thrown before we reach `compact()`. This branch is
-  // defensive: if a future caller ever routes past the capture site,
-  // fail hard here too rather than silently leaving the reasoning
-  // span in cache.
+  // Defence-in-depth: `setOpenSpan` already refuses the recurrent+
+  // no-boundary path, and `snapshotAtPrefillBoundary` throws on
+  // capture underflow, so `thinkSpan_.has_value()` implies a boundary
+  // exists. If a future caller ever seeds a span bypassing those
+  // sites, fail hard rather than leave the reasoning span in cache —
+  // interior `seq_rm` on recurrent memory leaves the SSM state
+  // inconsistent and there is no snapshot to roll back to.
   if (needsRecurrentSnapshot_ && !rollback_.hasReasoningBoundary()) {
     QLOG_IF(
         Priority::WARNING,

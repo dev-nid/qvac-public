@@ -475,6 +475,116 @@ TEST_F(
          "hybrid cancel semantics";
 }
 
+// PR #2813 fix regression: on a pure-attention driver, the pre-request
+// rollback anchor MUST be captured AFTER `preparePrefill`. If captured
+// before, an in-prefill `trySlidePrefill` lowers `nPast_` but leaves
+// `preRequestNPast_` at the stale pre-slide cursor; a subsequent cancel
+// then under-trims `removeLastNTokens` and leaves `discard` tokens of
+// the cancelled prompt live in KV under the previous turn's
+// `firstMsgTokens_` bookkeeping — silent contamination of the next turn.
+TEST_F(
+    TextLlmContextCancelTest,
+    OnCancelAfterPrefillSlideRollsBackToPostSlideCursor) {
+  // Small ctx_size so the slide trigger is reachable without decoding
+  // thousands of tokens per turn.
+  const std::string modelPath = qwen3PureAttentionModelPath();
+  if (!modelFileExists(modelPath)) {
+    GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
+  }
+  std::unordered_map<std::string, std::string> config;
+  config["device"] = test_common::getTestDevice();
+  config["ctx_size"] = "512";
+  config["gpu_layers"] = test_common::getTestGpuLayers();
+  config["n_predict"] = "8";
+  config["backendsDir"] = test_common::getTestBackendsDir().string();
+  std::string mp = modelPath;
+  std::string proj;
+  auto model = std::make_unique<LlamaModel>(
+      std::move(mp), std::move(proj), std::move(config));
+  model->waitForLoadInitialization();
+  ASSERT_TRUE(model->isLoaded());
+
+  LlmModelContext shared = makeShared(*model);
+  ToolsCompactController tools(std::nullopt);
+  common_params params = model->getCommonParams();
+  TextLlmContext driver(params, shared, tools, /*seqId=*/0);
+  // Non-zero discard budget so overflow slides instead of throwing.
+  driver.setNDiscarded(128);
+
+  auto repeat = [](const std::string& unit, size_t times) {
+    std::string out;
+    out.reserve(unit.size() * times);
+    for (size_t i = 0; i < times; ++i) {
+      out += unit;
+    }
+    return out;
+  };
+
+  // Turn 1 (small opener) keeps `firstMsgTokens_` modest so turn 3's
+  // slide budget is not dominated by the protected prefix.
+  ASSERT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", "Hi")},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true));
+
+  // Turn 2 fills context toward the ceiling (~350 tokens on Qwen3).
+  const std::string bulk = repeat("The quick brown fox jumps. ", /*times=*/65);
+  ASSERT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", bulk)},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true));
+  const llama_pos preRequestNPast = driver.getNPast();
+  const llama_pos preRequestFirstMsg = driver.getFirstMsgTokens();
+  ASSERT_GT(preRequestNPast, preRequestFirstMsg)
+      << "turn 2 must have advanced past the first-message prefix";
+  const int32_t preRequestSlides = driver.getNSlides();
+  const llama_pos ctxSize =
+      static_cast<llama_pos>(llama_n_ctx(model->getContext()));
+  ASSERT_GT(preRequestNPast, ctxSize / 2)
+      << "turn 2 did not consume enough context to force a slide on "
+         "turn 3; increase the bulk repeat count. nPast="
+      << preRequestNPast << " ctxSize=" << ctxSize;
+
+  // Turn 3 sized so `preRequestNPast + nTokens > ctx_size` forces
+  // `trySlidePrefill` to run before decode.
+  const std::string overflow = repeat("Please describe. ", /*times=*/50);
+  ASSERT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", overflow)},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true));
+  ASSERT_GT(driver.getNSlides(), preRequestSlides)
+      << "turn 3 must have triggered a context slide in preparePrefill "
+         "for the regression assertion to be meaningful. preRequestNPast="
+      << preRequestNPast << " ctxSize=" << ctxSize;
+
+  EXPECT_NO_THROW(driver.onCancel([](const std::string&) {}));
+
+  const llama_pos postCancelNPast = driver.getNPast();
+  EXPECT_LT(postCancelNPast, preRequestNPast)
+      << "onCancel after a prefill slide must restore to the POST-slide "
+         "cursor. With the pre-fix ordering (anchor captured before "
+         "`preparePrefill`) the anchor would still be `preRequestNPast` "
+         "and rollback would under-trim, leaving `discard` cancelled "
+         "prompt tokens live in KV.";
+  EXPECT_EQ(driver.getFirstMsgTokens(), preRequestFirstMsg)
+      << "the slide does not touch the first-message prefix; the "
+         "rollback must preserve `firstMsgTokens_`";
+  EXPECT_EQ(seqPosMax(*model), postCancelNPast - 1)
+      << "live KV must be trimmed to match the restored cursor after "
+         "cancel — any leftover cells past `postCancelNPast - 1` are "
+         "contamination of the next turn";
+
+  EXPECT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", "Recovery ping")},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true))
+      << "post-cancel prefill must succeed on the rolled-back cache";
+}
+
 // ============================================================================
 // User-visible perf snapshot lifecycle on `TextLlmContext`
 // ============================================================================
@@ -939,8 +1049,7 @@ public:
     return llama_get_memory(lctx);
   }
 
-  bool seqRm(
-      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+  bool seqRm(ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
       const override {
     ++seqRmCalls_;
     return false;
@@ -1016,7 +1125,9 @@ TEST_F(
   // pinned at the post-turn-1 cursor before the prefill advances
   // `nPast_` further.
   ASSERT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", "How are you?")}, {}, /*isCacheLoaded=*/false,
+      {makeMsg("user", "How are you?")},
+      {},
+      /*isCacheLoaded=*/false,
       /*prefill=*/true));
   const llama_pos postTurn2NPast = driver.getNPast();
   ASSERT_GT(postTurn2NPast, preRequestNPast)
@@ -1065,7 +1176,9 @@ TEST_F(
   // Recovery: the driver must remain usable for a follow-up prefill on
   // the pre-request baseline that we just rolled back to.
   EXPECT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", "Are you working?")}, {}, /*isCacheLoaded=*/false,
+      {makeMsg("user", "Are you working?")},
+      {},
+      /*isCacheLoaded=*/false,
       /*prefill=*/true))
       << "post-recovery prefill must succeed on the rolled-back cache";
   EXPECT_GT(driver.getNPast(), preRequestNPast);

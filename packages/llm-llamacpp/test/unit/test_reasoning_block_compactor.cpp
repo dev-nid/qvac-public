@@ -350,9 +350,9 @@ TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
 //     `captureReasoningBoundary`).
 //   * Hybrid restore failure (`compact()` on `ctx == nullptr` with a
 //     seeded boundary) reports `FailedKvWiped`.
-//   * Defensive no-boundary branch (`compact()` on the hybrid path
-//     with no boundary — hits the "should have been caught at
-//     capture" fallback) reports `FailedKvWiped`.
+//   * Generated-opener recurrent turn — hybrid model, no boundary
+//     snapshot captured — must cleanly no-op (span never opens on
+//     recurrent+no-boundary; `compact()` returns `NoOp`).
 //   * Non-failure no-op paths do NOT throw and do NOT bump discards.
 //
 // The symmetric replay throw shape is exercised end-to-end by the
@@ -447,8 +447,7 @@ TEST(
   fx.compactor.onCloseCommitted(/*pos=*/20);
   const auto failed = fx.compactor.compact(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-  ASSERT_EQ(
-      failed.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
+  ASSERT_EQ(failed.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
 
   // Simulating "next turn": no new span, no seeded boundary.
   const auto outcome = fx.compactor.compact(
@@ -457,34 +456,40 @@ TEST(
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
+// Generated-opener recurrent regression (PR #2813 review): a hybrid
+// model with no boundary snapshot (template does not force-open
+// `<think>`, so `ReasoningSnapshotPolicy` skipped the snapshot) whose
+// model then emits `<think>...</think>` during decode must not open a
+// span — otherwise `compact()` hits its defensive no-boundary branch
+// and wipes the sequence instead of cleanly no-oping.
 TEST(
     ReasoningBlockCompactorFailureStats,
-    HybridCompactWithoutBoundaryThrowsDefensively) {
-  // Defensive: `snapshotAtPrefillBoundary` is expected to have thrown
-  // at capture time if the boundary is missing, so `compact()` should
-  // never reach this state in production. But if a future caller
-  // routes past the capture site, hard-fail rather than leave the
-  // span in cache.
+    HybridGeneratedOpenerRecurrentSpanSkipsCompactionAsNoOp) {
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
   fx.compactor.setNeedsRecurrentSnapshot(true);
   ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
+
   fx.compactor.setOpenSpan(/*start=*/15);
+  EXPECT_FALSE(fx.compactor.hasOpenSpan())
+      << "recurrent + no boundary must not record a span — otherwise "
+         "compact() will hit its defensive branch and wipe the sequence";
+
   fx.compactor.requestCloseCapture();
   fx.compactor.onCloseCommitted(/*pos=*/20);
+  EXPECT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
 
   const auto outcome = fx.compactor.compact(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-  EXPECT_EQ(
-      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
-  EXPECT_FALSE(outcome.failureMessage.empty());
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp)
+      << "generated-opener recurrent compaction must be a clean no-op, "
+         "not FailedKvWiped";
+  EXPECT_TRUE(outcome.failureMessage.empty());
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
-TEST(
-    ReasoningBlockCompactorFailureStats,
-    NoOpOutcomesDoNotThrow) {
+TEST(ReasoningBlockCompactorFailureStats, NoOpOutcomesDoNotThrow) {
   // Non-failure no-op paths (degenerate span where close never landed)
   // leave the cache untouched and MUST NOT throw. Without this guard,
   // any caller invoking `compact()` on an incomplete span (e.g. a turn
@@ -537,8 +542,7 @@ public:
     return fakeMemory_;
   }
 
-  bool seqRm(
-      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+  bool seqRm(ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
       const override {
     ++seqRmCalls_;
     return true;
@@ -568,8 +572,7 @@ public:
     return fakeMemory_;
   }
 
-  bool seqRm(
-      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+  bool seqRm(ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
       const override {
     ++seqRmCalls_;
     return false;
@@ -750,8 +753,7 @@ TEST(
   compactor.setContextSliderOpsForTesting(nullptr);
 
   EXPECT_EQ(
-      outcome.kind,
-      ReasoningBlockCompactor::Outcome::Kind::CompactedAttention);
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::CompactedAttention);
   EXPECT_EQ(outcome.newPos, 20);
   EXPECT_EQ(outcome.discarded, 5);
   EXPECT_EQ(outcome.keptPrefixEnd, 15)
