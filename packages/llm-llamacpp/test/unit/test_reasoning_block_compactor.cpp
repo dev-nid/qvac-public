@@ -328,41 +328,59 @@ TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
 }
 
 // ============================================================================
-// Failure contract — hybrid restore/replay
+// Failure contract — uniform hard-fail
 // ============================================================================
 //
-// A `state_seq_load_file` short-read on the boundary restore, or a
-// `llama_decode` failure during the post-reasoning replay, leaves live
-// KV/SSM memory in a state that no longer matches any cursor the caller
-// might synthesise. The compactor no longer papers over this with a
-// "best-effort" retained-state Outcome (that path silently corrupted
-// the next turn's decode and any concurrent saveCache). Instead:
+// Any inability to remove the reasoning span from cache is a hard
+// failure under the default-on `remove_thinking_from_context` contract
+// (PR #2813). Both `snapshotAtPrefillBoundary` and `compact()` throw
+// `qvac_errors::StatusError` in every failure case; the caller must
+// catch, roll back to its pre-request cursor, and re-throw so no
+// saveCache path can serialize a header whose metadata contradicts
+// memory. `thinkingBlockDiscards` never bumps for a failed drop.
 //
-//   1. `thinkingCompactionFailed_` increments by exactly 1 per failure.
-//   2. `thinkingBlockDiscards_` does NOT increment (no successful drop).
-//   3. The affected sequence is best-effort wiped via
-//      `llama_memory_seq_rm` (skipped when `ctx == nullptr` in unit
-//      tests; verified end-to-end by the driver-level tests that
-//      assert next-request-starts-clean).
-//   4. `compact()` throws `qvac_errors::StatusError`, so callers must
-//      catch, reset their positional accounting to zero (matching the
-//      wiped sequence), and re-throw. No saveCache path can serialize
-//      a header whose metadata contradicts memory, because the throw
-//      unwinds past every save site.
+// Coverage:
+//   * Boundary-capture failure (`snapshotAtPrefillBoundary` on
+//     `ctx == nullptr`, which short-reads inside
+//     `captureReasoningBoundary`).
+//   * Hybrid restore failure (`compact()` on `ctx == nullptr` with a
+//     seeded boundary).
+//   * Defensive no-boundary branch (`compact()` on the hybrid path
+//     with no boundary — hits the "should have been caught at
+//     capture" fallback throw).
+//   * Non-failure no-op paths do NOT throw and do NOT bump discards.
 //
-// We force the failure via `ctx == nullptr`: `restoreRecurrentState`
-// is the first call inside the recurrent branch and short-returns
-// false on null `lctx`. The symmetric replay branch shares the exact
-// same throw + wipe shape (see the replay `throw` site in
-// `ReasoningBlockCompactor.cpp`) but is unreachable from this fixture
-// without either a test seam on `replayPostReasoning` or a real
-// `llama_context` — restore trips first. We pin the shape here and
-// leave replay as a code-reading equivalence rather than introducing
-// a production seam solely for parity coverage.
+// The symmetric replay throw shape is exercised end-to-end by the
+// driver-level integration tests; the compactor unit fixture cannot
+// reach it without either a test seam on `replayPostReasoning` or a
+// real `llama_context`.
 
 TEST(
     ReasoningBlockCompactorFailureStats,
-    RestoreFailureThrowsIncrementsCompactionFailedAndClearsInternalState) {
+    BoundaryCaptureFailureThrowsAndLeavesNoStaleState) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+
+  // `ctx == nullptr` short-circuits `captureReasoningBoundary` to
+  // return false, which now throws under the hard-fail contract.
+  ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
+  EXPECT_THROW(
+      {
+        fx.compactor.snapshotAtPrefillBoundary(
+            /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/10, "[Test]");
+      },
+      qvac_errors::StatusError);
+
+  // No spurious boundary or discard bookkeeping on failure.
+  EXPECT_FALSE(fx.rollback.hasReasoningBoundary());
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+}
+
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    RestoreFailureThrowsAndClearsInternalState) {
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -373,19 +391,14 @@ TEST(
   constexpr llama_pos kSpanEnd = 20;
   constexpr llama_pos kLivePos = 25;
 
-  // Seed a captured boundary so the recurrent branch is actually
-  // entered (the "no boundary captured" early-return is its own
-  // outcome — see `NoOpWhenBoundaryNotCaptured` above).
   fx.rollback.seedReasoningBoundaryForTesting(kSnapshotPos);
   ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
 
-  // A fully committed span — open + close + still inside the live cache.
   fx.compactor.setOpenSpan(kSpanStart);
   fx.compactor.requestCloseCapture();
   fx.compactor.onCloseCommitted(kSpanEnd);
   ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
 
-  ASSERT_EQ(fx.compactor.compactionFailed(), 0);
   ASSERT_EQ(fx.compactor.blockDiscards(), 0);
 
   // `ctx == nullptr` -> `restoreRecurrentState` returns false ->
@@ -397,8 +410,7 @@ TEST(
       },
       qvac_errors::StatusError);
 
-  // Stats: exactly one failure recorded, no success counted.
-  EXPECT_EQ(fx.compactor.compactionFailed(), 1);
+  // No successful drop counted.
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 
   // The `ResetGuard` in `compact()` runs on the exception path too,
@@ -417,11 +429,7 @@ TEST(
   // The reviewer's "next request starts from a clean/reset state"
   // invariant, exercised at the compactor level: after a throw, a
   // fresh compact() on the same instance MUST not carry over the
-  // failed inference's span or boundary. If the ResetGuard ever
-  // regressed and left `thinkSpan_` behind, this compact would take
-  // the pure-attention path with a stale `spanStart`/`spanEnd` and
-  // either bump `thinkingBlockDiscards_` for a phantom drop or
-  // re-throw against the same null ctx.
+  // failed inference's span or boundary.
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -437,27 +445,48 @@ TEST(
             /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
       },
       qvac_errors::StatusError);
-  ASSERT_EQ(fx.compactor.compactionFailed(), 1);
 
   // Simulating "next turn": no new span, no seeded boundary.
   const auto outcome = fx.compactor.compact(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/0, "[Test]");
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
-  EXPECT_EQ(fx.compactor.compactionFailed(), 1);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
 TEST(
     ReasoningBlockCompactorFailureStats,
-    NoOpOutcomesDoNotIncrementCompactionFailed) {
-  // Non-failure no-op paths (degenerate span where close never landed,
-  // and recurrent runs with no boundary captured) leave the cache
-  // untouched and MUST NOT bump the failure counter. Without this
-  // guard, any caller skipping `compactThinkSpan` (e.g. a turn where
-  // reasoning never closed) would silently inflate
-  // `thinkingCompactionFailed` and look like a real failure to
-  // dashboards. Distinct from the throw-and-clear contract in the
-  // hybrid restore/replay failure tests above.
+    HybridCompactWithoutBoundaryThrowsDefensively) {
+  // Defensive: `snapshotAtPrefillBoundary` is expected to have thrown
+  // at capture time if the boundary is missing, so `compact()` should
+  // never reach this state in production. But if a future caller
+  // routes past the capture site, hard-fail rather than leave the
+  // span in cache.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/20);
+
+  EXPECT_THROW(
+      {
+        (void)fx.compactor.compact(
+            /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+      },
+      qvac_errors::StatusError);
+
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+}
+
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    NoOpOutcomesDoNotThrow) {
+  // Non-failure no-op paths (degenerate span where close never landed)
+  // leave the cache untouched and MUST NOT throw. Without this guard,
+  // any caller invoking `compact()` on an incomplete span (e.g. a turn
+  // where reasoning never closed) would be spuriously failed.
   //
   // We deliberately do NOT cover the `end <= start` and `end > pos`
   // sub-cases here because the public API does not expose a way to
@@ -466,37 +495,17 @@ TEST(
   // bail-outs are defensive backstops that fire only if the compactor
   // is mis-used by an internal caller.
 
-  // 1. Degenerate span (close never committed -> end < 0).
-  {
-    CompactorFixture fx;
-    fx.compactor.setRemoveThinkingFromContext(true);
-    fx.compactor.setReasoningEnabled(true);
-    fx.compactor.setNeedsRecurrentSnapshot(true);
-    fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
-    fx.compactor.setOpenSpan(/*start=*/15);
-    // No requestCloseCapture / onCloseCommitted -> end stays -1.
-    ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+  fx.compactor.setOpenSpan(/*start=*/15);
+  // No requestCloseCapture / onCloseCommitted -> end stays -1.
+  ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
 
-    const auto outcome = fx.compactor.compact(
-        /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-    EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
-    EXPECT_EQ(fx.compactor.compactionFailed(), 0);
-  }
-
-  // 2. Recurrent path with no boundary captured -> NoOp, not a failure.
-  {
-    CompactorFixture fx;
-    fx.compactor.setRemoveThinkingFromContext(true);
-    fx.compactor.setReasoningEnabled(true);
-    fx.compactor.setNeedsRecurrentSnapshot(true);
-    ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
-    fx.compactor.setOpenSpan(/*start=*/15);
-    fx.compactor.requestCloseCapture();
-    fx.compactor.onCloseCommitted(/*pos=*/20);
-
-    const auto outcome = fx.compactor.compact(
-        /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-    EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
-    EXPECT_EQ(fx.compactor.compactionFailed(), 0);
-  }
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }

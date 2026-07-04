@@ -7,8 +7,11 @@
 // snapshot + restore + replay path succeeded.
 //
 // Pass criteria:
+//   - the `run()` call resolves without throwing (under the uniform
+//     hard-fail contract in PR #2813, any compaction failure —
+//     snapshot capture, restore underflow, or replay rejection —
+//     throws `StatusError` from `run()`)
 //   - response is non-empty
-//   - stats.thinkingCompactionFailed === 0
 //   - stats.thinkingBlockDiscards >= 1   (the model actually emitted
 //     a `<think>` block AND we dropped it)
 //
@@ -110,15 +113,10 @@ async function main () {
 
   const toNum = v => typeof v === 'number' ? v : Number(v || 0)
   const discards = toNum(stats.thinkingBlockDiscards)
-  const failed = toNum(stats.thinkingCompactionFailed)
 
   let exitCode = 0
   if (response.length === 0) {
     console.error('[FAIL] response is empty')
-    exitCode = 1
-  }
-  if (failed !== 0) {
-    console.error(`[FAIL] thinkingCompactionFailed=${failed} (expected 0)`)
     exitCode = 1
   }
   if (discards < 1) {
@@ -127,16 +125,13 @@ async function main () {
     exitCode = 1
   }
 
-  // Turn-2 coherence checks: the cache must be in a usable state after
-  // turn-1's compaction, so turn-2 produces non-empty output and does
-  // not itself fail compaction.
-  const t2Failed = toNum(turn2.stats.thinkingCompactionFailed)
+  // Turn-2 coherence check: the cache must be in a usable state after
+  // turn-1's compaction, so turn-2 produces non-empty output. Under
+  // the uniform hard-fail contract, any compaction failure on turn 2
+  // would have thrown from `runOne` above, so reaching this point
+  // means turn 2's compaction (if any) also succeeded.
   if (turn2.response.length === 0) {
     console.error('[FAIL] turn 2 response is empty — compacted cache may be corrupt')
-    exitCode = 1
-  }
-  if (t2Failed !== 0) {
-    console.error(`[FAIL] turn 2 thinkingCompactionFailed=${t2Failed} (expected 0)`)
     exitCode = 1
   }
   console.log(`turn 2 (len=${turn2.response.length}, ${turn2.elapsedMs} ms) head: ${turn2.response.slice(0, 200)}`)
@@ -144,8 +139,8 @@ async function main () {
 
   if (exitCode === 0) {
     console.log('\n[PASS] Qwen3.5 recurrent-state snapshot + replay path is working.')
-    console.log(`       turn1: discards=${discards}, failed=${failed}`)
-    console.log(`       turn2: discards=${toNum(turn2.stats.thinkingBlockDiscards)}, failed=${t2Failed}`)
+    console.log(`       turn1: discards=${discards}`)
+    console.log(`       turn2: discards=${toNum(turn2.stats.thinkingBlockDiscards)}`)
   }
 
   await inference.unload()

@@ -394,8 +394,7 @@ TEST_F(
 // existed BEFORE this request's prompt was submitted, matching the
 // "request never happened" cancel semantics. The end-of-prefill
 // snapshot is reserved for normal thinking-block compaction and must
-// NOT be used for cancel. Successful restore must keep
-// `thinkingCompactionFailed` at zero.
+// NOT be used for cancel.
 TEST_F(TextLlmContextCancelTest, OnCancelRestoresPreRequestSnapshotOnHybrid) {
   auto model = loadTextModel(qwen35HybridModelPath());
   if (!model) {
@@ -437,8 +436,6 @@ TEST_F(TextLlmContextCancelTest, OnCancelRestoresPreRequestSnapshotOnHybrid) {
     EXPECT_EQ(seqPosMax(*model), static_cast<llama_pos>(-1))
         << "pre-request restore on a fresh driver must clear the sequence";
   }
-  EXPECT_EQ(driver.getThinkingCompactionFailed(), 0)
-      << "successful snapshot restore must not bump the failure counter";
 }
 
 // Pure-attention `onCancel` must now also roll back to the pre-request
@@ -474,10 +471,6 @@ TEST_F(
       << "onCancel on pure-attention must roll the cache back to the "
          "PRE-REQUEST cursor via `removeLastNTokens`, matching the "
          "hybrid cancel semantics";
-  EXPECT_EQ(driver.getThinkingCompactionFailed(), 0)
-      << "pure-attention cancel must not bump the failure counter "
-         "(the seq_rm rollback path cannot fail like the snapshot "
-         "restore path can)";
 }
 
 // ============================================================================
@@ -613,17 +606,6 @@ TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
   ASSERT_TRUE(done.load()) << "worker did not unwind within 10s of cancel";
   worker.join();
 
-  // `thinkingCompactionFailed` is bumped only by snapshot-capture or
-  // snapshot-restore failure. A non-zero value here means the
-  // recurrent-rollback code path encountered a failure mode (capture
-  // underflow or restore underflow); zero confirms the snapshot
-  // infrastructure executed cleanly whether or not cancel landed.
-  const auto compactionFailed = statInt(*model, "thinkingCompactionFailed");
-  if (compactionFailed.has_value()) {
-    EXPECT_EQ(*compactionFailed, 0)
-        << "hybrid mtmd cancel path must not trigger the failure counter";
-  }
-
   // Recovery: the model must accept another inference cleanly.
   LlamaModel::Prompt recovery;
   recovery.input = R"([{"role":"user","content":"Hi"}])";
@@ -696,12 +678,6 @@ TEST_F(
       << "cancelled hybrid mtmd prefill with image chunk must restore "
          "the pre-prefill cursor; non-empty cache means image-chunk "
          "cells leaked past cancel";
-
-  const auto compactionFailed = statInt(*model, "thinkingCompactionFailed");
-  if (compactionFailed.has_value()) {
-    EXPECT_EQ(*compactionFailed, 0)
-        << "image-chunk cancel rollback must succeed via snapshot restore";
-  }
 
   // Recovery: the model must accept another inference (with or without
   // an image) cleanly on the rolled-back cache.
@@ -837,21 +813,6 @@ TEST(
       << "model did not unwind within 10s of cancel";
   gen.join();
 
-  // Stronger than "no throw": the unified post-loop cancel route in
-  // generateResponse promises that mid-generation cancel on hybrid runs
-  // through `onCancel` (snapshot restore to the PRE-REQUEST cursor) and
-  // never through the EOT fallback. A successful restore leaves
-  // `thinkingCompactionFailed` at zero — the only path that bumps that
-  // counter for cancel is a failed `restorePrefillEntry`. We allow
-  // `nullopt` in case the runtime stats vector omits the key on this
-  // build, but if it's present it must be zero.
-  const auto compactionFailed = statInt(*model, "thinkingCompactionFailed");
-  if (compactionFailed.has_value()) {
-    EXPECT_EQ(*compactionFailed, 0)
-        << "hybrid generation cancel must succeed via snapshot restore "
-           "(non-zero thinkingCompactionFailed indicates the fallback ran)";
-  }
-
   // Recovery: subsequent inference must succeed on the cancelled context.
   LlamaModel::Prompt shortPrompt;
   shortPrompt.input = R"([{"role":"user","content":"Hi"}])";
@@ -943,15 +904,6 @@ TEST(
       << "cancelled hybrid prefill must restore the pre-prefill cache "
          "cursor; residual cells indicate the snapshot rollback did not "
          "run or was bypassed";
-
-  // The snapshot-capture and snapshot-restore both write to
-  // `thinkingCompactionFailed` on failure. Any non-zero value means
-  // we fell back to the no-op `removeLastNTokens` path.
-  const auto compactionFailed = statInt(*model, "thinkingCompactionFailed");
-  if (compactionFailed.has_value()) {
-    EXPECT_EQ(*compactionFailed, 0)
-        << "hybrid mid-prefill cancel must succeed via snapshot restore";
-  }
 
   // Recovery: a fresh prefill must succeed on the rolled-back cache.
   LlamaModel::Prompt recovery;

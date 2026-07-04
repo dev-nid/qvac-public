@@ -11,8 +11,13 @@
 // For each turn we record:
 //   - whether the answer contains the expected number
 //   - thinkingBlockDiscards (proves compaction fired)
-//   - thinkingCompactionFailed (must stay 0)
 //   - response length / latency
+//
+// Under the uniform hard-fail contract (PR #2813), any compaction
+// failure — snapshot capture, restore underflow, or replay rejection
+// — throws `StatusError` from `run()`. So there is no soft failure
+// counter to report; a failed compaction shows up as an uncaught
+// exception instead.
 //
 // We run the same flow twice for an apples-to-apples baseline:
 //   ON  : remove_thinking_from_context: true  (rollback active)
@@ -134,7 +139,7 @@ async function runChain (label, removeThinking) {
 
     console.log(`[${label}] turn ${i + 1}: expected="${expected}" got_visible="${visible.slice(0, 80)}" ` +
       `correct=${containsExpected} discards=${stats.thinkingBlockDiscards || 0} ` +
-      `failed=${stats.thinkingCompactionFailed || 0} (${elapsedMs}ms)`)
+      `(${elapsedMs}ms)`)
   }
 
   await inference.unload()
@@ -145,20 +150,17 @@ async function runChain (label, removeThinking) {
 function summarise (label, turns) {
   console.log(`\n=== ${label} ===`)
   let allCorrect = true
-  let anyFailed = false
   for (const t of turns) {
-    const failed = Number(t.stats.thinkingCompactionFailed || 0)
     const discards = Number(t.stats.thinkingBlockDiscards || 0)
     const tps = t.stats.TPS || 0
     console.log(`  turn ${t.idx}: correct=${t.containsExpected} ` +
-      `discards=${discards} failed=${failed} ` +
+      `discards=${discards} ` +
       `tokens=${t.stats.generatedTokens || '?'} tps=${tps.toFixed?.(1) || tps} ` +
       `(${t.elapsedMs}ms)`)
     console.log(`           visible: "${t.visible.slice(0, 120)}"`)
     if (!t.containsExpected) allCorrect = false
-    if (failed > 0) anyFailed = true
   }
-  return { allCorrect, anyFailed }
+  return { allCorrect }
 }
 
 async function main () {
@@ -176,10 +178,6 @@ async function main () {
   let exitCode = 0
   console.log('\n=== Verdict ===')
 
-  if (onSummary.anyFailed) {
-    console.error('[FAIL] ON path reported thinkingCompactionFailed > 0 on at least one turn')
-    exitCode = 1
-  }
   if (!onSummary.allCorrect) {
     console.error('[FAIL] ON path got at least one turn wrong')
     exitCode = 1

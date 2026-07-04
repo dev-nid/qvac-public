@@ -188,9 +188,6 @@ public:
 
   [[nodiscard]] bool supportsSliding() const override { return false; }
 
-  [[nodiscard]] int32_t getThinkingCompactionFailed() const override;
-  void resetThinkingCompactionFailed() override;
-
   [[nodiscard]] std::optional<llama_perf_context_data>
   takeUserVisiblePerfSnapshot() override;
 

@@ -128,15 +128,6 @@ public:
 
   [[nodiscard]] virtual int32_t getThinkingBlockDiscards() const { return 0; }
 
-  // Number of times the recurrent-state restore or replay step failed
-  // during thinking-block compaction in the most recent generation.
-  // Surfaces SSM contamination on hybrid / recurrent models. Always 0
-  // for pure-attention models. Default 0 for drivers that don't
-  // implement compaction.
-  [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
-    return 0;
-  }
-
   // Apply the per-request `remove_thinking_from_context` toggle to the
   // driver. The single-prompt path goes through `applyGenerationParams`
   // (which restores on scope exit); the batch path uses this setter
@@ -249,9 +240,10 @@ public:
   /// Writes a full sequence-state snapshot to disk, so it is expensive
   /// and gated: pure-attention drivers no-op, and single-prompt drivers
   /// keep their own capture site rather than paying this cost twice.
-  /// Overrides that fail the capture must surface the failure via their
-  /// existing compaction-failed counter and a warning log, otherwise a
-  /// silent-no-op cancel rollback would leak the peak `nPast` back into
-  /// user-visible `CacheTokens`.
+  /// This is cancel-path bookkeeping, unrelated to the
+  /// `remove_thinking_from_context` hard-fail contract, so overrides
+  /// that fail the capture must log a warning and continue rather than
+  /// throwing (a silent no-op would leak the peak `nPast` back into
+  /// user-visible `CacheTokens` on a subsequent cancel).
   virtual void snapshotPreRequestRollbackAnchor() {}
 };

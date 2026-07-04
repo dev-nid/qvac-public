@@ -23,8 +23,13 @@ namespace utils {
 //
 // Failure handling stays in the caller: `capture*` and `restore*`
 // return false when the underlying llama.cpp call short-reads, and the
-// caller decides how to surface that (typically `++thinkingCompactionFailed_`
-// plus a warning log).
+// caller decides how to surface that. Under the uniform
+// `remove_thinking_from_context` hard-fail contract (PR #2813), the
+// end-of-prefill reasoning-boundary capture site
+// (`ReasoningBlockCompactor::snapshotAtPrefillBoundary`) throws
+// `qvac_errors::StatusError` on underflow, and hybrid restore/replay
+// failures inside `compact()` also throw. Auxiliary cancel-path
+// captures (`capturePrefillEntry`) log a warning and continue.
 //
 // Lifetime: per-inference. `reset()` MUST be called at the start of
 // each `evalMessageWithTools` so leftover state from a cancelled prior

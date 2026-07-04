@@ -67,21 +67,15 @@ async function main () {
 
   const toNum = v => typeof v === 'number' ? v : Number(v || 0)
   const t1Discards = toNum(t1.stats.thinkingBlockDiscards)
-  const t1Failed = toNum(t1.stats.thinkingCompactionFailed)
-  const t2Failed = toNum(t2.stats.thinkingCompactionFailed)
 
   let exitCode = 0
-  // Pure-attention must NEVER hit the recurrent-snapshot path, so
-  // `thinkingCompactionFailed` must stay zero. The snapshot/replay
-  // gate is `!llama_memory_can_shift` which returns false for plain
-  // attention KV — this would catch a regression where the gate
-  // accidentally fires on attention models.
-  if (t1Failed !== 0 || t2Failed !== 0) {
-    console.error('[FAIL] pure-attention path hit the recurrent rollback ' +
-      `(t1Failed=${t1Failed}, t2Failed=${t2Failed})`)
-    exitCode = 1
-  }
-  // And the compaction itself must still fire as before.
+  // Under the uniform hard-fail contract (PR #2813), any compaction
+  // failure — including a pure-attention `seq_rm + seq_add` rejection
+  // — throws `StatusError` from `run()`. Reaching this point means
+  // both turns' compaction succeeded (or was a no-op because the
+  // model never emitted a reasoning block).
+  //
+  // The compaction itself must still fire as before.
   if (t1Discards < 1) {
     console.error('[FAIL] turn 1 should drop at least one reasoning block ' +
       `(got ${t1Discards})`)
@@ -90,8 +84,7 @@ async function main () {
 
   if (exitCode === 0) {
     console.log('\n[PASS] Qwen3 pure-attention compaction unchanged.')
-    console.log(`       turn1: discards=${t1Discards}, failed=${t1Failed}`)
-    console.log(`       turn2: failed=${t2Failed}`)
+    console.log(`       turn1: discards=${t1Discards}`)
   }
 
   await inference.unload()

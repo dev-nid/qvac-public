@@ -586,9 +586,10 @@ safeTest('Qwen3.5 honours remove_thinking_from_context opt-in', {
   verifyReasoningTags(t, response, 'Qwen3.5 opt-in')
 
   const thinkingDiscards = toNumber(stats.thinkingBlockDiscards)
-  const compactionFailed = toNumber(stats.thinkingCompactionFailed)
-  t.is(compactionFailed, 0,
-    `recurrent restore + replay should succeed (got ${compactionFailed} failures)`)
+  // Under the uniform hard-fail contract (PR #2813), any compaction
+  // failure would have thrown `StatusError` from the `run()` call
+  // above; reaching this point means recurrent restore + replay
+  // succeeded.
   t.ok(thinkingDiscards >= 1,
     `opt-in run should report at least one discard (got ${thinkingDiscards})`)
 })
@@ -618,8 +619,6 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
     { generationParams: { remove_thinking_from_context: true } }
   )
   t.comment(`turn 1 stats: ${JSON.stringify(t1.stats)}`)
-  t.is(toNumber(t1.stats.thinkingCompactionFailed), 0,
-    'turn 1 compaction should not fail')
   t.ok(toNumber(t1.stats.thinkingBlockDiscards) >= 1,
     'turn 1 should drop at least one reasoning block')
 
@@ -636,8 +635,6 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
   )
   t.comment(`turn 2 stats: ${JSON.stringify(t2.stats)}`)
   t.comment(`turn 2 response (len=${t2.response.length}): ${t2.response.slice(0, 300)}`)
-  t.is(toNumber(t2.stats.thinkingCompactionFailed), 0,
-    'turn 2 compaction should not fail')
   t.ok(t2.response.length > 0,
     'turn 2 should still produce a response (generation succeeds after rollback)')
 
@@ -718,8 +715,9 @@ safeTest('Qwen3.5 remove_thinking_from_context does not inflate runtime perf sta
   const on = await runOnce(true)
   t.comment(`compaction=on  stats: ${JSON.stringify(on)}`)
 
-  t.is(toNumber(on.thinkingCompactionFailed), 0,
-    'compaction-on run must not fail (otherwise the snapshot-and-replay path was not exercised)')
+  // Under the uniform hard-fail contract (PR #2813), a compaction
+  // failure would have thrown from the `run()` call above; reaching
+  // this point means the snapshot-and-replay path succeeded.
   t.ok(toNumber(on.thinkingBlockDiscards) >= 1,
     'compaction-on run must actually drop a reasoning block (otherwise no replay decode ran)')
 
@@ -803,8 +801,9 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
   const on = await runBatchOnce(true)
   t.comment(`batch compaction=on  stats: ${JSON.stringify(on.stats)}`)
 
-  t.is(toNumber(on.stats.thinkingCompactionFailed), 0,
-    'compaction-on batch must not fail (otherwise the replay path was not exercised)')
+  // Under the uniform hard-fail contract (PR #2813), a compaction
+  // failure would have thrown from the batch `run()` call above;
+  // reaching this point means the replay path succeeded on the slot.
   t.ok(toNumber(on.stats.thinkingBlockDiscards) >= 1,
     'compaction-on batch must actually drop a reasoning block (otherwise no replay decode ran)')
 
@@ -838,11 +837,14 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
 // hybrid models) whenever a slide drops cache tokens. This test pins the
 // safety contract: a slide that fires while `remove_thinking_from_context`
 // is enabled must NOT leave the compactor in a state where it asserts,
-// crashes, or records a failure. After a slide the compactor's span
+// crashes, or hard-fails the request. After a slide the compactor's span
 // bookkeeping is reset; subsequent reasoning either re-opens a fresh
 // span (compacts cleanly) or the recurrent path no-ops because the
-// boundary snapshot is gone. Either outcome must keep
-// `thinkingCompactionFailed == 0`.
+// boundary snapshot is gone. Under the uniform hard-fail contract
+// (PR #2813), a broken slide-clears-reasoning-state wiring would
+// surface as a thrown `StatusError` on the affected turn — the
+// per-turn `runCompletionWithStats` call would throw and the test
+// would exit early via `firstError`.
 //
 // We force the slide by squeezing `ctx_size` down to 512 (and setting
 // `n_discarded=64` so overflow triggers a slide instead of a hard
@@ -924,13 +926,11 @@ safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
     t.comment(`turn ${turn} stats: ${JSON.stringify(turnStats)}`)
     t.comment(`turn ${turn} response (len=${turnResponse.length}): ${turnResponse.slice(0, 120)}`)
 
-    // Pin per-turn invariants: every turn must succeed without
-    // incrementing the failure counter. A regression in the
-    // slide-clears-reasoning-state wiring would surface as a non-zero
-    // counter on the turn whose prefill triggered the slide.
-    t.is(toNumber(turnStats.thinkingCompactionFailed), 0,
-      `turn ${turn}: compaction must not record any failures ` +
-      `(got thinkingCompactionFailed=${turnStats.thinkingCompactionFailed})`)
+    // Under the uniform hard-fail contract, a broken
+    // slide-clears-reasoning-state wiring would surface as a thrown
+    // `StatusError` on the affected turn — the try block above would
+    // have propagated it into `firstError` and broken out of the
+    // loop. Reaching this point means the turn completed cleanly.
 
     if (toNumber(turnStats.contextSlides) >= 1) {
       sawSlide = true

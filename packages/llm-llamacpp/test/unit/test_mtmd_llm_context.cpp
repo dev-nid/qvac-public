@@ -452,8 +452,10 @@ TEST_F(
 //   * a reasoning-capable hybrid multimodal model produces a `<think>` block,
 //   * end-of-prefill recurrent snapshot + restore + post-reasoning replay
 //     succeeds for the multimodal context,
-//   * `thinkingBlockDiscards` increments AND `thinkingCompactionFailed`
-//     stays at zero so the failure path is not silently masking a problem.
+//   * `thinkingBlockDiscards` increments. Under the uniform hard-fail
+//     contract (PR #2813) any compaction failure would throw
+//     `qvac_errors::StatusError` from `processPrompt`, so the
+//     `ASSERT_NO_THROW` below is the failure-path guard.
 //
 // Companion JS coverage lives in `gemma4.test.js` (pure-attention
 // multimodal); this is the hybrid-multimodal C++ counterpart called out by
@@ -498,21 +500,15 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
 
   const auto stats = model->runtimeStats();
   const double discards = getStatValue(stats, "thinkingBlockDiscards");
-  const double failed = getStatValue(stats, "thinkingCompactionFailed");
   SCOPED_TRACE(
       "thinkingBlockDiscards=" + std::to_string(discards) +
-      ", thinkingCompactionFailed=" + std::to_string(failed) +
       ", output (first 200 chars): " + output.substr(0, 200));
 
-  // Failure-counter check runs unconditionally: `thinkingCompactionFailed`
-  // must be zero whether or not reasoning closed, because a non-zero
-  // counter means snapshot / restore / replay errored on the multimodal
-  // path — not that reasoning ran long. Assert this BEFORE any
-  // `GTEST_SKIP()`, since gtest aborts the test body at the skip site
-  // (the skip macro returns immediately; statements after it never run).
-  EXPECT_EQ(failed, 0.0)
-      << "multimodal recurrent compaction must not record any failures "
-         "(snapshot / restore / replay must succeed on the multimodal path)";
+  // Under the uniform hard-fail contract, any compaction failure
+  // (snapshot capture, restore underflow, or replay rejection) would
+  // have thrown `qvac_errors::StatusError` from `processPrompt` and
+  // failed the `ASSERT_NO_THROW` above. Reaching this point means the
+  // compaction path completed cleanly.
 
   // The compactor only fires once `</think>` lands in the cache. If the
   // model gets stuck inside reasoning (no close marker within

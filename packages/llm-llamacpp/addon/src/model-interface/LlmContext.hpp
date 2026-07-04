@@ -336,41 +336,6 @@ public:
   virtual void resetThinkingBlockDiscards() {}
 
   /**
-   * Number of thinking-block compaction failures on recurrent /
-   * hybrid-SSM models in the most recent generation. Always 0 for
-   * pure-attention models (where the snapshot + replay step never
-   * runs).
-   *
-   * Covers two distinct failure classes; disambiguate from the
-   * request outcome:
-   *   * Hard failure: the end-of-generation restore or replay step
-   *     failed. The compactor cleared the sequence's KV / SSM
-   *     memory, the driver reset its positional accounting to a
-   *     clean state, and the request itself was failed with a
-   *     `StatusError` (batch error recovery additionally skips the
-   *     cache save so the last known-good on-disk cache is
-   *     preserved). The counter is bumped before the throw, so
-   *     callers who catch the error and read runtime stats see it.
-   *   * Soft failure: a recurrent-state snapshot could not be
-   *     captured. Two sub-cases with different downstream effects,
-   *     both non-fatal to the request:
-   *       - Open-marker snapshot failed. End-of-generation
-   *         compaction is skipped for this turn, so the reasoning
-   *         span stays in the live KV / SSM cache; if the request
-   *         has `saveCacheToDisk`, that un-compacted state is
-   *         persisted to disk. From the caller's point of view
-   *         `remove_thinking_from_context` did not run this turn.
-   *       - Batch admission rollback-anchor snapshot failed. Only
-   *         cancel rollback for that turn degrades to a no-op; if
-   *         the turn is not cancelled, live memory and any
-   *         subsequent save are unaffected.
-   */
-  [[nodiscard]] virtual int32_t getThinkingCompactionFailed() const {
-    return 0;
-  }
-  virtual void resetThinkingCompactionFailed() {}
-
-  /**
    * Consume the per-inference user-visible `llama_perf_context` snapshot
    * if one was captured (currently only by contexts that may run a
    * recurrent replay decode during thinking-block compaction). Returns

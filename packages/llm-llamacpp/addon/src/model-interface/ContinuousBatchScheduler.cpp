@@ -502,6 +502,18 @@ void ContinuousBatchScheduler::finalizeFinishedSequences() {
 
 MultiRequestBatcher::PrefillCompleteFn
 ContinuousBatchScheduler::prefillCompleteFn() {
+  // A throw from `onPrefillComplete` (e.g. from the recurrent
+  // boundary-snapshot capture site inside `snapshotForRecurrentRollback`
+  // under the uniform hard-fail contract for
+  // `remove_thinking_from_context`) propagates through
+  // `batcher_.advance` / `batcher_.completeMediaBarrier` and is caught
+  // by the `try` block in `workerLoop`, which then routes the affected
+  // group through `failGroupLocked` -> `cancelSlotLocked(Skip)`. That
+  // keeps saveCache off (last known-good on-disk cache preserved) and
+  // clears the seq KV before the slot is freed. No scheduler code
+  // change is needed here; this comment pins the invariant so a future
+  // refactor doesn't accidentally introduce a swallow-and-continue
+  // path.
   return
       [this](uint32_t seqId, llama_pos currentPos, size_t prefillTokenCount) {
         auto& slot = slots_[seqId];
@@ -834,11 +846,10 @@ void RuntimeStatsSnapshot::recordDecodeStep(
 
 void RuntimeStatsSnapshot::accumulateSlot(
     int64_t nPast, int64_t nSlides, int64_t thinkingDiscards,
-    int64_t compactionFailed, const Request& req) {
+    const Request& req) {
   cacheTokens += nPast;
   contextSlides += nSlides;
   thinkingBlockDiscards += thinkingDiscards;
-  thinkingCompactionFailed += compactionFailed;
   generatedTokens += static_cast<int64_t>(req.generatedTokens.size());
   // Count tokens actually prefilled, not the prompt size planned at admission:
   // once prefill completes, prefillFedCount is reset to 0, so the full prompt
@@ -1129,7 +1140,6 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
   int64_t nPast = 0;
   int64_t nSlides = 0;
   int64_t thinkingDiscards = 0;
-  int64_t compactionFailed = 0;
   if (slot.driver) {
     // `onCancel` has already rolled `nPast` back to the admission cursor
     // and, on the graceful-cancel leg, `saveCacheForSlot` persists that
@@ -1144,11 +1154,8 @@ void ContinuousBatchScheduler::accumulateSlotRuntimeStats(
     nSlides = static_cast<int64_t>(slot.driver->getNSlides());
     thinkingDiscards =
         static_cast<int64_t>(slot.driver->getThinkingBlockDiscards());
-    compactionFailed =
-        static_cast<int64_t>(slot.driver->getThinkingCompactionFailed());
   }
-  stats_.accumulateSlot(
-      nPast, nSlides, thinkingDiscards, compactionFailed, req);
+  stats_.accumulateSlot(nPast, nSlides, thinkingDiscards, req);
 }
 
 } // namespace qvac_lib_inference_addon_llama::batching

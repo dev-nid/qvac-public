@@ -153,9 +153,6 @@ public:
   [[nodiscard]] int32_t getThinkingBlockDiscards() const override;
   void resetThinkingBlockDiscards() override;
 
-  [[nodiscard]] int32_t getThinkingCompactionFailed() const override;
-  void resetThinkingCompactionFailed() override;
-
   [[nodiscard]] std::optional<llama_perf_context_data>
   takeUserVisiblePerfSnapshot() override;
 
@@ -295,10 +292,14 @@ private:
   // and stores it in `rollbackState_`. No-op unless the template
   // force-opened reasoning during prefill; generated-opener recurrent
   // turns are left uncompacted rather than replaying a close marker
-  // against a prefix that never saw the opener. On failure logs and
-  // increments the `thinkingCompactionFailed` runtime stat, leaving
-  // the snapshot empty so `compactThinkSpan` becomes a no-op for this
-  // turn (the answer is still delivered).
+  // against a prefix that never saw the opener. Under the uniform
+  // hard-fail contract for `remove_thinking_from_context`, snapshot
+  // capture failure propagates as a `qvac_errors::StatusError` from
+  // `ReasoningBlockCompactor::snapshotAtPrefillBoundary`. The caller
+  // is responsible for catching that throw, restoring its pre-prompt
+  // checkpoint via `restorePrefillEntry`, resetting local positional
+  // accounting, and re-throwing so no saveCache path can persist a
+  // cache whose header no longer matches live memory.
   void snapshotForRecurrentRollback();
 
   ToolsCompactController& tools_;

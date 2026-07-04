@@ -104,7 +104,6 @@ async function runChain (label, removeThinking) {
     console.log(`[${label}] turn ${i + 1}: closed=${closedReasoning} ` +
       `correct=${containsExpected} ` +
       `discards=${stats.thinkingBlockDiscards || 0} ` +
-      `failed=${stats.thinkingCompactionFailed || 0} ` +
       `tokens=${stats.generatedTokens || '?'} (${elapsedMs}ms)`)
   }
 
@@ -117,11 +116,10 @@ function summarise (label, turns) {
   console.log(`\n=== ${label} ===`)
   let allCorrect = true
   for (const t of turns) {
-    const failed = Number(t.stats.thinkingCompactionFailed || 0)
     const discards = Number(t.stats.thinkingBlockDiscards || 0)
     const tps = t.stats.TPS || 0
     console.log(`  turn ${t.idx}: closed=${t.closedReasoning} ` +
-      `correct=${t.containsExpected} discards=${discards} failed=${failed} ` +
+      `correct=${t.containsExpected} discards=${discards} ` +
       `tokens=${t.stats.generatedTokens || '?'} ` +
       `tps=${typeof tps === 'number' ? tps.toFixed(1) : tps} ` +
       `(${t.elapsedMs}ms)`)

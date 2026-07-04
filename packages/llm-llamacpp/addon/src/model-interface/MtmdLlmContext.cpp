@@ -558,9 +558,10 @@ bool MtmdLlmContext::evalMessageWithTools(
     if (!rollbackState_.capturePrefillEntry(
             modelCtx_.lctx, seqId_, current_.pos)) {
       // Capture failed: cancel will fall back to the no-op
-      // `removeLastNTokens` path. Surface via the same counter the rest
-      // of the recurrent-rollback code uses so this is visible from JS.
-      compactor_.incrementCompactionFailed();
+      // `removeLastNTokens` path. This is cancel-path bookkeeping,
+      // not part of the `remove_thinking_from_context` cleanup
+      // contract, so we degrade to a warning rather than hard-failing
+      // the request.
       QLOG_IF(
           Priority::WARNING,
           "[MtmdLlm] failed to capture prefill-entry recurrent snapshot; "
@@ -588,8 +589,9 @@ bool MtmdLlmContext::evalMessageWithTools(
           // Restore underflowed: the recurrent half is in an undefined
           // state. The fallback below is best-effort only; recurrent
           // memory does not honour `removeLastNTokens`, so the cache
-          // may stay inconsistent until the next full reset.
-          compactor_.incrementCompactionFailed();
+          // may stay inconsistent until the next full reset. This is
+          // cancel-path bookkeeping, not thinking-span removal, so we
+          // log a warning and continue rather than throwing.
           QLOG_IF(
               Priority::WARNING,
               string_format(
@@ -712,6 +714,9 @@ void MtmdLlmContext::cancelGenerationCleanup(
         current_.pos = restoredPos;
         refreshCurrentCacheTokensFromMemory();
       } else {
+        // Cancel-path bookkeeping: unrelated to the
+        // `remove_thinking_from_context` cleanup contract, so we log a
+        // warning and continue rather than throwing.
         QLOG_IF(
             Priority::WARNING,
             string_format(
@@ -720,7 +725,6 @@ void MtmdLlmContext::cancelGenerationCleanup(
                 restoredPos,
                 current_.pos,
                 seqId_));
-        compactor_.incrementCompactionFailed();
       }
     }
   } else {
@@ -990,15 +994,30 @@ std::function<void()>
 MtmdLlmContext::applyGenerationParams(const GenerationParams& overrides) {
   // Hybrid / fully-recurrent models (Qwen3.5, Qwen3-Next, Jamba, ...)
   // are supported via the snapshot + replay path in `compactThinkSpan`;
-  // no pre-flight rejection is needed here. Failure semantics:
-  //   - Pure-attention `seq_rm` failure: cache is left as-is and the
-  //     turn's answer is still delivered.
-  //   - Hybrid restore/replay failure: the compactor best-effort wipes
-  //     the sequence memory and throws `qvac_errors::StatusError`;
-  //     `compactThinkSpan` resets local positional / generation
-  //     bookkeeping and rethrows, so the turn's answer is NOT
-  //     delivered.
-  // Both paths increment the `thinkingCompactionFailed` runtime stat.
+  // no pre-flight rejection is needed here.
+  //
+  // Uniform hard-fail contract (PR #2813): when
+  // `remove_thinking_from_context` is on, ANY inability to remove the
+  // reasoning span from cache surfaces as `qvac_errors::StatusError`.
+  //   - Prefill-boundary snapshot capture failure: thrown from
+  //     `ReasoningBlockCompactor::snapshotAtPrefillBoundary`; the
+  //     `snapshotForRecurrentRollback` wrapper here restores the
+  //     pre-prompt checkpoint (or wipes the sequence on restore
+  //     underflow), resets local positional accounting, and re-throws.
+  //   - Pure-attention `seq_rm + seq_add` rejection: primitive is
+  //     all-or-nothing so live KV is unchanged; the compactor throws
+  //     and the caller unwinds via its pre-request rollback anchor.
+  //   - Hybrid restore/replay failure: the compactor best-effort
+  //     wipes the sequence memory and throws; `compactThinkSpan`
+  //     resets local positional / generation bookkeeping and
+  //     re-throws, so the turn's answer is NOT delivered.
+  //
+  // In every case the current turn's answer is NOT delivered; the
+  // caller (single-prompt JS wrapper or the batch scheduler worker-
+  // loop global catch) surfaces the error, and the batch error-
+  // recovery path additionally skips saveCache
+  // (`SaveCachePolicy::Skip`) so the last known-good on-disk cache is
+  // preserved.
   auto restoreSampler = applyGenerationParamsToContext(
       params_, smpl_, modelCtx_.model, overrides);
 
@@ -1097,13 +1116,6 @@ void MtmdLlmContext::resetThinkingBlockDiscards() {
   compactor_.resetBlockDiscards();
 }
 
-int32_t MtmdLlmContext::getThinkingCompactionFailed() const {
-  return compactor_.compactionFailed();
-}
-void MtmdLlmContext::resetThinkingCompactionFailed() {
-  compactor_.resetCompactionFailed();
-}
-
 std::optional<llama_perf_context_data>
 MtmdLlmContext::takeUserVisiblePerfSnapshot() {
   auto snapshot = userVisiblePerf_;
@@ -1176,8 +1188,47 @@ void MtmdLlmContext::snapshotForRecurrentRollback() {
   // residue compared to the reasoning body. Generated-opener templates
   // are skipped by the gate above because the completed prefill state
   // has no matching opener for the replayed close marker.
-  compactor_.snapshotAtPrefillBoundary(
-      modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
+  try {
+    compactor_.snapshotAtPrefillBoundary(
+        modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
+  } catch (const qvac_errors::StatusError&) {
+    // Boundary capture failed. Under the hard-fail contract, roll
+    // back to the pre-prompt checkpoint (if we still have one) so no
+    // subsequent turn on this driver observes the prompt tokens or
+    // committed image cells, then re-throw. The batch scheduler's
+    // slot cleanup additionally passes `SaveCachePolicy::Skip` so the
+    // last known-good on-disk cache is preserved.
+    const auto clearSeq = [this]() noexcept {
+      auto* mem = llama_get_memory(modelCtx_.lctx);
+      if (mem != nullptr) {
+        (void)llama_memory_seq_rm(mem, seqId_, -1, -1);
+      }
+    };
+    bool restoredPrefillEntry = false;
+    if (rollbackState_.hasPrefillEntry()) {
+      const llama_pos restoredPos = rollbackState_.prefillEntryNPast();
+      if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
+        current_ = preRequestUsage_;
+        current_.pos = restoredPos;
+        refreshCurrentCacheTokensFromMemory();
+        restoredPrefillEntry = true;
+      } else {
+        clearSeq();
+        current_ = {};
+      }
+    } else {
+      clearSeq();
+      current_ = {};
+    }
+    protectedPrefix_ =
+        restoredPrefillEntry ? preRequestProtectedPrefix_ : ContextUsage{};
+    pendingBatchFirstMsg_ = false;
+    rollbackState_.clearPrefillEntry();
+    rollbackState_.clearReasoningBoundary();
+    rollbackState_.clearPostReasoning();
+    compactor_.reset();
+    throw;
+  }
 }
 
 void MtmdLlmContext::capturePendingThinkClose() {
@@ -1240,10 +1291,9 @@ void MtmdLlmContext::compactThinkSpan() {
     current_.cacheTokens -= outcome.discarded;
     break;
   case OutcomeKind::NoOp:
-  case OutcomeKind::FailedAttention:
-    // Either nothing to do (NoOp) or the attention `seq_rm` was
-    // rejected without touching the KV range; live memory still
-    // matches `current_`, so leave it alone.
+    // Nothing to do: feature off, no span captured, or degenerate/
+    // overshooting span. Live memory still matches `current_`, so
+    // leave it alone.
     break;
   }
 
@@ -1333,14 +1383,12 @@ void MtmdLlmContext::resetState(bool resetStats) {
   protectedPrefix_ = {};
 
   // On partial reset (resetStats=false), preserve the slide counter,
-  // block discards, compaction failure counts, and vision-encode
-  // accumulators so `runtimeStats()` can read the per-inference
-  // values. On full reset (resetStats=true), clear them along with
-  // perf stats.
+  // block discards, and vision-encode accumulators so `runtimeStats()`
+  // can read the per-inference values. On full reset (resetStats=true),
+  // clear them along with perf stats.
   if (resetStats) {
     shifter_.resetSlides();
     compactor_.resetBlockDiscards();
-    compactor_.resetCompactionFailed();
     visionEncodeMs_ = 0.0;
     visionEncodeTiles_ = 0;
   }
@@ -1840,9 +1888,10 @@ void MtmdLlmContext::snapshotPreRequestRollbackAnchor() {
           modelCtx_.lctx, seqId_, current_.pos)) {
     // Silent failure would make `hasPrefillEntry()` false at cancel
     // time, turn `cancelGenerationCleanup`'s rollback into a no-op,
-    // and let peak positions leak back into `CacheTokens`. Surface via
-    // the shared failure counter + a warning.
-    compactor_.incrementCompactionFailed();
+    // and let peak positions leak back into `CacheTokens`. This is
+    // cancel-path bookkeeping, unrelated to
+    // `remove_thinking_from_context` cleanup, so we log a warning
+    // rather than hard-failing the request.
     QLOG_IF(
         Priority::WARNING,
         "[MtmdLlm] failed to capture prefill-entry recurrent snapshot at "

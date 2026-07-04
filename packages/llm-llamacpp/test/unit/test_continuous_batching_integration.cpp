@@ -824,18 +824,17 @@ TEST_F(
   const auto stats = model->runtimeStats();
   const double thinkingDiscards =
       test_common::getStatValue(stats, "thinkingBlockDiscards");
-  const double compactionFailed =
-      test_common::getStatValue(stats, "thinkingCompactionFailed");
 
   EXPECT_GE(thinkingDiscards, 1.0)
       << "scheduler path must take the end-of-prefill recurrent snapshot "
          "so `compactThinkSpan` can fire on the hybrid; got "
       << thinkingDiscards << " discards. outputs[0]=" << outputs[0]
       << " outputs[1]=" << outputs[1];
-  EXPECT_EQ(compactionFailed, 0.0)
-      << "recurrent restore + replay should succeed on the scheduler path; "
-         "got "
-      << compactionFailed << " failures";
+  // Under the uniform hard-fail contract (PR #2813), a compaction
+  // failure would have thrown `qvac_errors::StatusError` from
+  // `processPromptBatch` and failed the assertions above; reaching
+  // this point means the scheduler's recurrent snapshot / restore /
+  // replay path succeeded on both slots.
 }
 
 TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchHarmonyToolCalls) {

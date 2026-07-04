@@ -706,7 +706,6 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
   // Reset per-inference counters so they don't leak across runs.
   state_->llmContext_->resetNSlides();
   state_->llmContext_->resetThinkingBlockDiscards();
-  state_->llmContext_->resetThinkingCompactionFailed();
   state_->llmContext_->resetVisionEncodeMs();
 
   // Prompt media (both hoisted byte buffers and inline paths) is loaded by
@@ -947,7 +946,6 @@ LlamaModel::batchRuntimeStatsLocked() const {
       {"promptTokens", stats.promptTokens},
       {"contextSlides", stats.contextSlides},
       {"thinkingBlockDiscards", stats.thinkingBlockDiscards},
-      {"thinkingCompactionFailed", stats.thinkingCompactionFailed},
       // visionEncodeMs/Tiles intentionally omitted in batch mode: multiple
       // prompts share the one per-context accumulator (reset per prompt), so a
       // per-batch value would be misattributed / racy. See singleRuntimeStats.
@@ -995,9 +993,6 @@ LlamaModel::singleRuntimeStatsLocked() const {
        static_cast<int64_t>(state_->llmContext_->getNSlides())},
       {"thinkingBlockDiscards",
        static_cast<int64_t>(state_->llmContext_->getThinkingBlockDiscards())},
-      {"thinkingCompactionFailed",
-       static_cast<int64_t>(
-           state_->llmContext_->getThinkingCompactionFailed())},
       // Vision-encode time + slice count for the most recent inference.
       // Single-sequence semantics: the context accumulator resets per prompt,
       // so these are only meaningful on this single-prompt path — intentionally

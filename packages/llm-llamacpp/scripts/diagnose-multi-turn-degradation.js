@@ -95,8 +95,7 @@ function dump (label, turns) {
     console.log(`  cacheTokens=${stats.CacheTokens || '?'} ` +
       `generatedTokens=${stats.generatedTokens || '?'} ` +
       `promptTokens=${stats.promptTokens || '?'} ` +
-      `discards=${stats.thinkingBlockDiscards || 0} ` +
-      `failed=${stats.thinkingCompactionFailed || 0}`)
+      `discards=${stats.thinkingBlockDiscards || 0}`)
     console.log(`  reasoning body (${t.reasoning.length} chars):`)
     // Print the reasoning body indented so it's easy to scan
     const lines = t.reasoning.split('\n').filter(l => l.trim())

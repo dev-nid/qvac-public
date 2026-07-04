@@ -19,8 +19,17 @@ namespace qvac_lib_inference_addon_llama {
 //     `ReasoningRollbackState` after a feature-gate check),
 //   * the pure-attention `seq_rm + seq_add` compaction path and the
 //     recurrent / hybrid full-state restore + replay path,
-//   * the `thinkingBlockDiscards` and `thinkingCompactionFailed`
-//     runtime stats counters.
+//   * the `thinkingBlockDiscards` runtime stats counter.
+//
+// Failure contract (uniform across paths, per PR #2813 review):
+// when `remove_thinking_from_context` is enabled/defaulted-on,
+// ANY inability to remove the reasoning span from cache is a hard
+// failure. `snapshotAtPrefillBoundary` throws on capture underflow,
+// and `compact()` throws on pure-attention `seq_rm + seq_add`
+// rejection, hybrid restore underflow, and hybrid replay rejection.
+// Callers must catch, roll back to their pre-request cursor, and
+// re-throw so no saveCache path can persist a header that
+// misrepresents live memory or leaves the reasoning span in cache.
 //
 // State is per-inference. Call `reset()` at the start of each
 // `evalMessageWithTools`. Feature flags (`removeThinkingFromContext`,
@@ -114,9 +123,9 @@ public:
   //
   // Captures the full sequence state at `pos` when the feature gates
   // pass (recurrent memory + remove-thinking on + reasoning channel
-  // recognised). Logs and bumps `thinkingCompactionFailed_` on
-  // capture underflow. `labelTag` is "[TextLlm]" / "[MtmdLlm]" for
-  // logs.
+  // recognised). Throws `qvac_errors::StatusError` on capture
+  // underflow (see the class-level "Failure contract" comment).
+  // `labelTag` is "[TextLlm]" / "[MtmdLlm]" for logs.
   void snapshotAtPrefillBoundary(
       ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
       const char* labelTag);
@@ -135,27 +144,29 @@ public:
   // can't leave stale state behind.
   //
   // Failure contract:
-  //   * `FailedAttention` (returned): pure-attention `seq_rm` was
-  //     rejected. The KV range was not modified, so live memory still
-  //     matches the caller's cursor and no rollback is needed.
-  //   * hybrid `restoreReasoningBoundary` / `replayPostReasoning`
-  //     failures do NOT return an outcome. `compact()` best-effort
-  //     clears the sequence memory (attention KV cells + recurrent
-  //     state) and throws `qvac_errors::StatusError`. Callers must
-  //     catch, reset their positional accounting to zero to match the
-  //     cleared sequence, and re-throw so no saveCache path can write
-  //     a header that misrepresents live memory.
+  //   * Pure-attention `seq_rm + seq_add` rejection: `compact()`
+  //     throws `qvac_errors::StatusError`. The KV range was not
+  //     modified by the rejected primitive, so live memory still
+  //     matches the caller's cursor; no seq wipe is needed. The
+  //     caller unwinds via its pre-request rollback anchor and
+  //     re-throws.
+  //   * Hybrid `restoreReasoningBoundary` / `replayPostReasoning`
+  //     failure: `compact()` best-effort clears the sequence memory
+  //     (attention KV cells + recurrent state) and throws
+  //     `qvac_errors::StatusError`. Callers must catch, reset their
+  //     positional accounting to zero to match the cleared
+  //     sequence, and re-throw so no saveCache path can write a
+  //     header that misrepresents live memory.
+  //
+  // Under the default-on `remove_thinking_from_context` contract,
+  // there is no soft-failure return: any inability to remove the
+  // reasoning span from cache surfaces to the caller as an exception.
   struct Outcome {
     enum class Kind {
       // Feature off, no span captured, degenerate or overshooting span.
       NoOp,
       CompactedAttention,
       CompactedRecurrent,
-      // Pure-attention `seq_rm` was rejected: KV range untouched, so
-      // the caller keeps its cursor. Hybrid restore/replay failures
-      // throw instead of returning here — see the "Failure contract"
-      // comment above.
-      FailedAttention,
     };
     Kind kind = Kind::NoOp;
     // New cache position the caller should adopt. Unset for `NoOp`.
@@ -188,15 +199,10 @@ public:
   }
 
   // ---- Stats ----
-  void incrementCompactionFailed() noexcept { ++thinkingCompactionFailed_; }
   [[nodiscard]] int32_t blockDiscards() const noexcept {
     return thinkingBlockDiscards_;
   }
   void resetBlockDiscards() noexcept { thinkingBlockDiscards_ = 0; }
-  [[nodiscard]] int32_t compactionFailed() const noexcept {
-    return thinkingCompactionFailed_;
-  }
-  void resetCompactionFailed() noexcept { thinkingCompactionFailed_ = 0; }
 
   // Per-inference reset of span + close-capture state. Stats and
   // feature flags are NOT reset (stats are managed via dedicated
@@ -223,7 +229,6 @@ private:
   bool needsRecurrentSnapshot_ = false;
 
   int32_t thinkingBlockDiscards_ = 0;
-  int32_t thinkingCompactionFailed_ = 0;
 };
 
 } // namespace qvac_lib_inference_addon_llama
