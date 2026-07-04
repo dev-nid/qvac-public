@@ -2,15 +2,16 @@
 
 ## [0.32.0] - 2026-07-04
 
-This release enables thinking-block compaction by default and extends `remove_thinking_from_context` to hybrid / recurrent SSM model families such as Qwen3.5, Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, and Kimi-Linear. Hybrid models now compact reasoning state using a disk-backed snapshot + restore + replay path so later turns are not steered by hidden reasoning blocks.
+This release enables thinking-block compaction by default and extends `remove_thinking_from_context` to hybrid / recurrent SSM model families such as Qwen3.5, Qwen3-Next, Jamba, Granite-Hybrid, LFM2, Nemotron-H, and Kimi-Linear. Hybrid models now compact reasoning state using a disk-backed snapshot + restore + replay path so later turns are not steered by hidden reasoning blocks. The compactor is now strict: any failure to remove the reasoning span from cache is surfaced as a `StatusError` after a coherent rollback, rather than delivering an answer with residual reasoning tokens.
 
 ### Breaking Changes
 
 - `generationParams.remove_thinking_from_context` now defaults to `true` (was `false`). Callers that need to preserve reasoning tokens in context can opt out with `remove_thinking_from_context: false`.
+- Removed `RuntimeStats.thinkingCompactionFailed`. The feature is now strict: any failure to remove the reasoning span is surfaced as a `StatusError` instead of incrementing a soft-fail counter. Consumers reading this field will now observe `undefined`.
 
 ### New APIs
 
-- Added `RuntimeStats.thinkingCompactionFailed`, which reports thinking-block compaction failures on completed requests. Pure-attention `seq_rm` failures keep the previous soft-fail behavior and increment this counter.
+- Added `RuntimeStats.thinkingBlockDiscards`, reporting the number of `<think>` (or model-equivalent) reasoning blocks removed from cache by `remove_thinking_from_context`. Per-inference for single requests; summed across completed slots for batch requests.
 
 ### Changed
 
@@ -18,15 +19,20 @@ This release enables thinking-block compaction by default and extends `remove_th
 - Hybrid snapshot storage is disk-backed via llama state save/load APIs instead of duplicating the full KV + recurrent state in memory.
 - The compaction default and documentation now apply consistently across text, multimodal, and continuous-batching paths.
 - User-visible runtime stats exclude recurrent replay maintenance decode time, so replay work does not inflate prompt / generation counters or batch TTFT.
+- Continuous-batching multimodal path (`parallel >= 2` with images) now runs the same reasoning compaction as the text path; regression covered by `BatchMtmdQwen35DropsThinkBlocks`.
+- The pre-request rollback anchor is now captured after any in-prefill context slide, so cancel and compaction-failure rollbacks reset to the post-slide cursor instead of a stale pre-slide position.
+- Recurrent reasoning snapshotting is gated on a single-token close marker; hybrid templates whose close marker tokenises to more than one piece safely skip recurrent compaction rather than corrupting SSM state.
 
 ### Fixed
 
 - Hybrid restore / replay failures now fail hard instead of returning an answer from a potentially contaminated KV / SSM state. The compactor clears sequence memory, resets local accounting, and surfaces an error.
+- Pure-attention `remove_thinking_from_context` failures (rejected `seq_rm + seq_add`, or a reasoning span left partially resident after a tools-compact tail trim) now hard-fail with a coherent rollback: the driver drops `[preRequestCursor, currentCursor)` from live memory, resets positional accounting to the pre-request cursor, and rethrows so both driver metadata and live KV agree on the pre-request state.
 - Cancellation now restores the pre-request checkpoint in both prefill and decode stages, so cancelled requests follow the "request never happened" cache contract.
 - Batch cancellation now reports post-rollback `CacheTokens` instead of the peak value reached before rollback.
 - Failed batch recovery skips cache saving, preventing invalid cache files after hard-fail compaction or decode errors.
-- Continuous batching (`parallel >= 2`) now supports hybrid thinking compaction by taking the recurrent snapshot after scheduler-owned prefill.
+- Continuous batching (`parallel >= 2`) now supports hybrid text thinking compaction by taking the recurrent snapshot after scheduler-owned prefill.
 - Replay clipping preserves the reasoning close marker when tools compaction trims the answer tail, so subsequent turns on hybrid models see a complete `<think>...</think>` boundary rather than an unpaired opener.
+- Multimodal `MtmdLlmContext` refreshes `cacheTokens` after both attention and recurrent compaction, keeping the `cacheTokens == llama_memory_seq_token_count(seqId)` invariant honest under M-RoPE.
 
 ## Pull Requests
 
