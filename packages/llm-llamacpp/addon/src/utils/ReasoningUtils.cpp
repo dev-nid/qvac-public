@@ -79,19 +79,17 @@ bool initializeReasoningState(
     state.cached_close_tag_token = closeTokens[0];
   }
 
-  // `updateReasoningBuffer` matches the reasoning close on `tags.close`,
-  // so the token that flips `inside_reasoning` back off — and gets
-  // seeded into the recurrent replay buffer via
-  // `ReasoningBlockCompactor::recordCloseMarkerForReplay` — is the
-  // last piece of THAT tokenisation. If `tags.close` is multi-piece,
-  // the seed misses the earlier pieces and recurrent replay produces
-  // an unbalanced `<think>` opener. Record the single-piece invariant
-  // here so `ReasoningSnapshotPolicy` can gate the recurrent boundary
-  // snapshot on it (and callers can degrade cleanly for models whose
-  // template close does not resolve to one token).
-  const std::vector<llama_token> reasoningCloseTokens =
-      common_tokenize(lctx, tags.close, false, true);
-  state.close_is_single_token = (reasoningCloseTokens.size() == 1);
+  // The recurrent replay seeds `postReasoningTokens_` with the single
+  // sampled token that triggers the close-detection flip in
+  // `updateReasoningBuffer`; a multi-piece close would leave the SSM
+  // with an unbalanced `<think>` opener followed by only the tail
+  // piece. Gate on the tokenisation of the *canonical* close marker
+  // (`closeTagForEosRecovery`, which strips the chat template's
+  // surrounding whitespace for Qwen3-family) — tokenising the raw
+  // `tags.close` here would misclassify Qwen3 templates like
+  // `"\n</think>\n\n"` as multi-token even though `</think>` itself
+  // is a single vocab token.
+  state.close_is_single_token = (closeTokens.size() == 1);
 
   std::vector<llama_token> newlineTokens =
       common_tokenize(lctx, "\n", false, true);
