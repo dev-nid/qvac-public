@@ -206,10 +206,12 @@ export interface GenerationParams {
    * Before throwing, the affected sequence is cleaned up so that the
    * next request on the same context starts from a coherent state:
    *   * Pure-attention `seq_rm + seq_add` rejection — the primitive
-   *     is documented all-or-nothing, so live KV still matches the
-   *     driver cursor at that point. The single-prompt path unwinds
-   *     via its cancel handling; the batch path routes the throw
-   *     through the scheduler's error-recovery leg.
+   *     is documented all-or-nothing, so live KV is unchanged when
+   *     compaction is rejected. The driver drops the current
+   *     request's contribution (`[preRequestCursor, currentCursor)`)
+   *     from live memory and restores its positional accounting to
+   *     the pre-request cursor before throwing, so both driver
+   *     metadata and live KV agree on the pre-request state.
    *   * Boundary-capture or hybrid restore / replay failure — the
    *     driver rolls back to its pre-request checkpoint (or clears
    *     the sequence entirely on restore underflow) and resets

@@ -2,9 +2,12 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include <llama.h>
+
+#include "ContextSlider.hpp"
 
 #include "../utils/ReasoningRollbackState.hpp"
 #include "ToolsCompactController.hpp"
@@ -24,12 +27,17 @@ namespace qvac_lib_inference_addon_llama {
 // Failure contract (uniform across paths, per PR #2813 review):
 // when `remove_thinking_from_context` is enabled/defaulted-on,
 // ANY inability to remove the reasoning span from cache is a hard
-// failure. `snapshotAtPrefillBoundary` throws on capture underflow,
-// and `compact()` throws on pure-attention `seq_rm + seq_add`
-// rejection, hybrid restore underflow, and hybrid replay rejection.
-// Callers must catch, roll back to their pre-request cursor, and
-// re-throw so no saveCache path can persist a header that
-// misrepresents live memory or leaves the reasoning span in cache.
+// failure. `snapshotAtPrefillBoundary` throws on capture underflow;
+// `compact()` returns `Outcome::Kind::FailedKvIntact` on pure-
+// attention `seq_rm + seq_add` rejection (live KV was left untouched)
+// and `Outcome::Kind::FailedKvWiped` on hybrid restore underflow,
+// hybrid replay rejection, or the defensive no-boundary branch
+// (sequence memory was best-effort cleared). Callers must run the
+// live-KV recovery documented on the outcome kind (roll back
+// `[preRequestCursor, currentCursor)` or reset positional accounting
+// to zero) before rethrowing `qvac_errors::StatusError` so no
+// saveCache path can persist a header that misrepresents live
+// memory or leaves the reasoning span in cache.
 //
 // State is per-inference. Call `reset()` at the start of each
 // `evalMessageWithTools`. Feature flags (`removeThinkingFromContext`,
@@ -140,36 +148,53 @@ public:
   //
   // RAII cleanup: per-inference state (`thinkSpan_`, reasoning boundary
   // snapshot, post-reasoning buffer, capture flag) is cleared on every
-  // exit — including when `compact()` throws — so a no-op or failure
+  // exit — including on failure outcomes — so a no-op or failure
   // can't leave stale state behind.
   //
   // Failure contract:
   //   * Pure-attention `seq_rm + seq_add` rejection: `compact()`
-  //     throws `qvac_errors::StatusError`. The KV range was not
-  //     modified by the rejected primitive, so live memory still
-  //     matches the caller's cursor; no seq wipe is needed. The
-  //     caller unwinds via its pre-request rollback anchor and
-  //     re-throws.
+  //     returns `Outcome::Kind::FailedKvIntact`. The primitive is
+  //     documented all-or-nothing on rejection, so live KV still
+  //     matches the caller's cursor; no seq wipe is performed. The
+  //     caller MUST roll back the live cache to its pre-request
+  //     cursor (e.g. via `removeLastNTokens(nPast - preRequestNPast)`)
+  //     before rethrowing so both driver metadata and live KV stay
+  //     coherent for the next request on the same driver.
   //   * Hybrid `restoreReasoningBoundary` / `replayPostReasoning`
-  //     failure: `compact()` best-effort clears the sequence memory
-  //     (attention KV cells + recurrent state) and throws
-  //     `qvac_errors::StatusError`. Callers must catch, reset their
-  //     positional accounting to zero to match the cleared
-  //     sequence, and re-throw so no saveCache path can write a
-  //     header that misrepresents live memory.
+  //     failure, or a defensive missing-boundary hit on the
+  //     recurrent path: `compact()` best-effort clears the sequence
+  //     memory (attention KV cells + recurrent state) and returns
+  //     `Outcome::Kind::FailedKvWiped`. The caller MUST reset its
+  //     positional accounting to zero to match the cleared sequence
+  //     before rethrowing, so no saveCache path can write a header
+  //     that misrepresents live memory.
+  //
+  // Callers surface either failure to the outside world by throwing
+  // `qvac_errors::StatusError(FailedToDecode, outcome.failureMessage)`
+  // (or an equivalent) once the local rollback above has run.
   //
   // Under the default-on `remove_thinking_from_context` contract,
   // there is no soft-failure return: any inability to remove the
-  // reasoning span from cache surfaces to the caller as an exception.
+  // reasoning span from cache surfaces to the caller as one of the
+  // two `Failed*` outcomes above, and the caller is required to
+  // surface it as an exception.
   struct Outcome {
     enum class Kind {
       // Feature off, no span captured, degenerate or overshooting span.
       NoOp,
       CompactedAttention,
       CompactedRecurrent,
+      // Compaction failed but live KV was left untouched; caller must
+      // roll back `[preRequestCursor, currentCursor)` before rethrowing.
+      FailedKvIntact,
+      // Compaction failed and live KV was best-effort wiped; caller
+      // must reset positional accounting to zero before rethrowing.
+      FailedKvWiped,
     };
     Kind kind = Kind::NoOp;
-    // New cache position the caller should adopt. Unset for `NoOp`.
+    // New cache position the caller should adopt. Unset for `NoOp` and
+    // for the two `Failed*` outcomes (the caller derives the recovery
+    // cursor from its own `preRequestCursor` / zero, respectively).
     llama_pos newPos = 0;
     // Tokens dropped from the cache. `pos - newPos` for the attention
     // path; `pos - newPos` minus the residue for the recurrent path
@@ -186,10 +211,25 @@ public:
     llama_pos keptPrefixEnd = 0;
     // Post-reasoning tokens replayed (recurrent path only).
     size_t replayedTokens = 0;
+    // Populated on the `Failed*` outcomes: the message the caller
+    // should attach when rethrowing so operators see the same
+    // context (span, seqId, snapshot state) the compactor logged.
+    std::string failureMessage;
   };
   [[nodiscard]] Outcome compact(
       ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
       const char* labelTag);
+
+  // Testing seam: install a non-owning `IContextSliderOps` override
+  // that replaces the default singleton (real `llama_memory_seq_rm` /
+  // `llama_memory_seq_add`) inside `compact()`. Set to `nullptr` to
+  // clear. Persists across `reset()` because it is a test wiring
+  // concern, not per-inference state. Production code MUST NOT call
+  // this — the override lets unit and driver-level tests exercise
+  // the `FailedKvIntact` branch without a real `llama_context`.
+  void setContextSliderOpsForTesting(const IContextSliderOps* ops) noexcept {
+    sliderOpsOverride_ = ops;
+  }
 
   // Access to the underlying tools-compact controller. Exposed so
   // `ContextShifter` can route slide notifications to the same
@@ -229,6 +269,13 @@ private:
   bool needsRecurrentSnapshot_ = false;
 
   int32_t thinkingBlockDiscards_ = 0;
+
+  // Non-owning override for the KV primitives used by `compact()`.
+  // Null in production (falls back to `defaultContextSliderOps()`);
+  // tests install a fake via `setContextSliderOpsForTesting` so the
+  // `FailedKvIntact` branch can be triggered without a real
+  // `llama_context`.
+  const IContextSliderOps* sliderOpsOverride_ = nullptr;
 };
 
 } // namespace qvac_lib_inference_addon_llama

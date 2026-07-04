@@ -1209,27 +1209,8 @@ void TextLlmContext::compactThinkSpan() {
       !userVisiblePerf_.has_value()) {
     userVisiblePerf_ = llama_perf_context(modelCtx_.lctx);
   }
-  ReasoningBlockCompactor::Outcome outcome;
-  try {
-    outcome = compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
-  } catch (const qvac_errors::StatusError&) {
-    // Hybrid restore/replay failure. The compactor best-effort-wiped
-    // the sequence memory before throwing, so live KV/SSM is empty for
-    // this seqId. Sync our positional accounting to match (pos=0) and
-    // drop per-inference reasoning bookkeeping so a subsequent turn on
-    // this driver cannot decode into contaminated positions and any
-    // late saveCache path cannot write a header whose metadata no
-    // longer matches memory. Re-throw so the caller (single-prompt JS
-    // wrapper, or batch scheduler workerLoop's global catch) surfaces
-    // the failure instead of continuing on stale state.
-    nPast_ = 0;
-    firstMsgTokens_ = 0;
-    generationStarted_ = false;
-    assistantOutput_.clear();
-    rollbackState_.reset();
-    compactor_.reset();
-    throw;
-  }
+  const ReasoningBlockCompactor::Outcome outcome =
+      compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
   using OutcomeKind = ReasoningBlockCompactor::Outcome::Kind;
   switch (outcome.kind) {
   case OutcomeKind::CompactedAttention:
@@ -1244,6 +1225,50 @@ void TextLlmContext::compactThinkSpan() {
     // overshooting span. Live memory still matches `nPast_`, so leave
     // it alone.
     break;
+  case OutcomeKind::FailedKvIntact: {
+    // Pure-attention `seq_rm + seq_add` rejection. Live KV was not
+    // modified by the rejected primitive, so it still spans
+    // `[0, nPast_)`. Roll the driver back to the pre-request cursor
+    // and drop everything appended for the current request (prompt
+    // tail + any decoded output) from live memory so both driver
+    // metadata and KV agree on the pre-request state. Then rethrow
+    // so the caller (single-prompt JS wrapper, or batch scheduler
+    // workerLoop's global catch) surfaces the failure and the next
+    // turn on this driver decodes from a coherent baseline.
+    const llama_pos delta = nPast_ - preRequestNPast_;
+    if (delta > 0) {
+      removeLastNTokens(delta);
+    }
+    nPast_ = preRequestNPast_;
+    firstMsgTokens_ = preRequestFirstMsgTokens_;
+    generationStarted_ = false;
+    assistantOutput_.clear();
+    rollbackState_.reset();
+    compactor_.reset();
+    throw qvac_errors::StatusError(
+        errors::ADDON_ID,
+        errors::toString(errors::FailedToDecode),
+        outcome.failureMessage);
+  }
+  case OutcomeKind::FailedKvWiped: {
+    // Hybrid restore/replay failure (or the defensive no-boundary
+    // branch). The compactor best-effort-wiped the sequence memory,
+    // so live KV/SSM is empty for this seqId. Sync our positional
+    // accounting to match (pos=0) and drop per-inference reasoning
+    // bookkeeping so a subsequent turn on this driver cannot decode
+    // into contaminated positions and any late saveCache path cannot
+    // write a header whose metadata no longer matches memory.
+    nPast_ = 0;
+    firstMsgTokens_ = 0;
+    generationStarted_ = false;
+    assistantOutput_.clear();
+    rollbackState_.reset();
+    compactor_.reset();
+    throw qvac_errors::StatusError(
+        errors::ADDON_ID,
+        errors::toString(errors::FailedToDecode),
+        outcome.failureMessage);
+  }
   }
 }
 
@@ -1271,23 +1296,28 @@ void TextLlmContext::setRemoveThinkingFromContext(bool value) {
   //
   // Uniform hard-fail contract (PR #2813): when the feature is on,
   // ANY inability to remove the reasoning span from cache surfaces to
-  // the caller as `qvac_errors::StatusError`:
+  // the caller as `qvac_errors::StatusError`, thrown from
+  // `compactThinkSpan` after local rollback so both driver metadata
+  // and live KV agree on the recovery cursor:
   //   - Prefill-boundary snapshot capture failure — thrown from
   //     `ReasoningBlockCompactor::snapshotAtPrefillBoundary`; the
   //     `snapshotForRecurrentRollback` wrapper catches, restores the
   //     pre-prompt checkpoint (or wipes the sequence and resets
   //     positional accounting on restore underflow), and rethrows.
-  //   - Pure-attention `seq_rm + seq_add` rejection — the primitive
-  //     is all-or-nothing so live KV is unchanged; the caller's
-  //     pre-request rollback anchor (batch scheduler slot cleanup, or
-  //     the single-prompt path's cancel handling) is responsible for
-  //     unwinding. The compactor throws so the request itself fails.
+  //   - Pure-attention `seq_rm + seq_add` rejection — the compactor
+  //     returns `Outcome::Kind::FailedKvIntact`. The primitive is
+  //     all-or-nothing so live KV is unchanged; `compactThinkSpan`
+  //     drops `[preRequestNPast_, nPast_)` from live memory via
+  //     `removeLastNTokens`, restores `nPast_` / `firstMsgTokens_`
+  //     to the pre-request cursor, resets per-inference reasoning
+  //     bookkeeping, and throws.
   //   - Hybrid restore/replay failure — the compactor best-effort
-  //     wipes the sequence memory and throws. `compactThinkSpan`
-  //     catches, resets local positional / generation bookkeeping
-  //     (`nPast_`, `firstMsgTokens_`, `assistantOutput_`, rollback +
-  //     compactor state) so no subsequent turn or late cache save can
-  //     write into contaminated state, then rethrows.
+  //     wipes the sequence memory and returns
+  //     `Outcome::Kind::FailedKvWiped`. `compactThinkSpan` resets
+  //     positional bookkeeping to zero to match the cleared
+  //     sequence, drops per-inference state so no subsequent turn or
+  //     late cache save can write into contaminated state, and
+  //     throws.
   //
   // In every case the current turn's answer is NOT delivered; the
   // caller (single-prompt JS wrapper or the batch scheduler worker-

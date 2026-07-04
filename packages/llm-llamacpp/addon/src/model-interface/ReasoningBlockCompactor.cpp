@@ -141,6 +141,9 @@ void ReasoningBlockCompactor::snapshotAtPrefillBoundary(
 ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
     const char* labelTag) {
+  const IContextSliderOps& sliderOps = sliderOpsOverride_ != nullptr
+                                           ? *sliderOpsOverride_
+                                           : defaultContextSliderOps();
   // RAII-style cleanup so every early return drops the per-inference
   // rollback buffers and span. The original sites in `TextLlmContext`
   // and `MtmdLlmContext` had identical guards; centralised here so
@@ -200,18 +203,23 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
             end,
             pos,
             seqId));
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        string_format(
-            "%s ReasoningBlockCompactor::compact: no reasoning "
-            "boundary snapshot available on hybrid/recurrent path "
-            "(start=%d, end=%d, pos=%d, seqId=%d)",
-            labelTag,
-            start,
-            end,
-            pos,
-            seqId));
+    // Live memory is untouched at this defensive point, but we still
+    // report `FailedKvWiped` because the recurrent path's caller
+    // recovery is a full reset onto pos=0 — there is no coherent
+    // pre-request cursor to unwind to on a recurrent driver. Wipe the
+    // sequence so live memory matches that reset.
+    clearSeqOnFailure(ctx, seqId);
+    out.kind = Outcome::Kind::FailedKvWiped;
+    out.failureMessage = string_format(
+        "%s ReasoningBlockCompactor::compact: no reasoning "
+        "boundary snapshot available on hybrid/recurrent path "
+        "(start=%d, end=%d, pos=%d, seqId=%d)",
+        labelTag,
+        start,
+        end,
+        pos,
+        seqId);
+    return out;
   }
 
   // Pure-attention path: the SSM is uninvolved, so the seq_rm + seq_add
@@ -221,7 +229,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
   // reasoning span still resident in cache.
   if (!needsRecurrentSnapshot_) {
     const CompactRangeOutcome rangeOutcome =
-        compactKvRange(ctx, seqId, start, end, pos);
+        compactKvRange(ctx, seqId, start, end, pos, sliderOps);
     if (rangeOutcome.kind == CompactRangeOutcome::Kind::Compacted) {
       out.kind = Outcome::Kind::CompactedAttention;
       out.newPos = rangeOutcome.newNPast;
@@ -247,8 +255,9 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     }
     // `seq_rm + seq_add` was rejected. Attention KV was not modified
     // (the primitive is documented to be all-or-nothing on rejection),
-    // so no seq wipe is needed — live memory still matches `pos`. The
-    // caller unwinds via its pre-request rollback anchor.
+    // so no seq wipe is performed here — live memory still matches
+    // `pos`. Report `FailedKvIntact` so the caller can roll back
+    // `[preRequestCursor, pos)` on its own driver before rethrowing.
     QLOG_IF(
         Priority::WARNING,
         string_format(
@@ -261,18 +270,17 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
             end,
             pos,
             seqId));
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        string_format(
-            "%s ReasoningBlockCompactor::compact: pure-attention "
-            "seq_rm + seq_add rejected span [%d, %d) (pos=%d, "
-            "seqId=%d)",
-            labelTag,
-            start,
-            end,
-            pos,
-            seqId));
+    out.kind = Outcome::Kind::FailedKvIntact;
+    out.failureMessage = string_format(
+        "%s ReasoningBlockCompactor::compact: pure-attention "
+        "seq_rm + seq_add rejected span [%d, %d) (pos=%d, "
+        "seqId=%d)",
+        labelTag,
+        start,
+        end,
+        pos,
+        seqId);
+    return out;
   }
 
   // Recurrent / hybrid path. A `seq_rm` over a partial tail that
@@ -323,19 +331,18 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     // fail hard so callers cannot save a cache whose header no longer
     // matches what is serialized.
     clearSeqOnFailure(ctx, seqId);
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        string_format(
-            "%s ReasoningBlockCompactor::compact: full-state restore "
-            "underflowed on hybrid/recurrent compaction; sequence "
-            "cleared (snapshotPos=%d, spanStart=%d, spanEnd=%d, "
-            "seqId=%d)",
-            labelTag,
-            snapshotPos,
-            start,
-            end,
-            seqId));
+    out.kind = Outcome::Kind::FailedKvWiped;
+    out.failureMessage = string_format(
+        "%s ReasoningBlockCompactor::compact: full-state restore "
+        "underflowed on hybrid/recurrent compaction; sequence "
+        "cleared (snapshotPos=%d, spanStart=%d, spanEnd=%d, "
+        "seqId=%d)",
+        labelTag,
+        snapshotPos,
+        start,
+        end,
+        seqId);
+    return out;
   }
 
   const size_t replayCount = rollback_.postReasoningTokenCount();
@@ -356,17 +363,16 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     // partially advanced past `snapshotPos` with no way to observe
     // how far. Same coherence problem as restore failure; same fix.
     clearSeqOnFailure(ctx, seqId);
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        string_format(
-            "%s ReasoningBlockCompactor::compact: post-reasoning "
-            "replay rejected on hybrid/recurrent compaction; sequence "
-            "cleared (snapshotPos=%d, replayCount=%zu, seqId=%d)",
-            labelTag,
-            snapshotPos,
-            replayCount,
-            seqId));
+    out.kind = Outcome::Kind::FailedKvWiped;
+    out.failureMessage = string_format(
+        "%s ReasoningBlockCompactor::compact: post-reasoning "
+        "replay rejected on hybrid/recurrent compaction; sequence "
+        "cleared (snapshotPos=%d, replayCount=%zu, seqId=%d)",
+        labelTag,
+        snapshotPos,
+        replayCount,
+        seqId);
+    return out;
   }
 
   const llama_pos newPos = snapshotPos + static_cast<llama_pos>(replayCount);

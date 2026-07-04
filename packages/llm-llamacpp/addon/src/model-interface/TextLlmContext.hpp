@@ -215,6 +215,18 @@ public:
   void snapshotPreRequestCursor() override;
   void snapshotPreRequestRollbackAnchor() override;
 
+  // Testing seams: expose the owned `ReasoningBlockCompactor` and the
+  // otherwise-private `compactThinkSpan()` entry point so driver-level
+  // unit tests can install an `IContextSliderOps` override and drive
+  // the end-of-generation compaction step directly. Production code
+  // MUST NOT use these — production compaction fires from within
+  // `onGenerationFinished` / the scheduler's slot cleanup.
+  [[nodiscard]] qvac_lib_inference_addon_llama::ReasoningBlockCompactor&
+  compactorForTesting() noexcept {
+    return compactor_;
+  }
+  void compactThinkSpanForTesting() { compactThinkSpan(); }
+
 private:
   /// Hook fired exactly once per slot, immediately before the policy
   /// flushes its UTF-8 buffer at end-of-generation. Internal helper for

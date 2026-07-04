@@ -17,8 +17,10 @@
 #include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
 
+#include "model-interface/ContextSlider.hpp"
 #include "model-interface/LlamaModel.hpp"
 #include "model-interface/MtmdLlmContext.hpp"
+#include "model-interface/ReasoningBlockCompactor.hpp"
 #include "model-interface/TextLlmContext.hpp"
 #include "model-interface/ToolsCompactController.hpp"
 #include "test_common.hpp"
@@ -912,4 +914,159 @@ TEST(
     std::string output = model->processPrompt(recovery);
     EXPECT_GE(output.length(), 0);
   });
+}
+
+// ============================================================================
+// Layer 2c: TextLlmContext reasoning-compaction failure recovery
+// ============================================================================
+
+namespace {
+
+// `IContextSliderOps` fake that rejects every `seq_rm` call and never
+// touches `seq_add`. Installed on a `ReasoningBlockCompactor` via
+// `setContextSliderOpsForTesting` so `compact()` on the pure-attention
+// path takes the `Outcome::Kind::FailedKvIntact` branch without a real
+// llama.cpp memory rejection (which is essentially impossible to
+// synthesize on a valid range).
+class RejectingSliderOps final : public IContextSliderOps {
+public:
+  llama_pos nCtx(llama_context*) const override { return 4096; }
+
+  ContextSliderMemoryHandle memory(llama_context* lctx) const override {
+    // Forward the real handle so the compactor's own diagnostics /
+    // `clearSeqOnFailure` short-circuit sensibly. Not strictly needed
+    // for the pure-attention path but keeps the fake honest.
+    return llama_get_memory(lctx);
+  }
+
+  bool seqRm(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+      const override {
+    ++seqRmCalls_;
+    return false;
+  }
+
+  void seqAdd(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos,
+      llama_pos) const override {
+    ++seqAddCalls_;
+  }
+
+  int seqRmCalls() const { return seqRmCalls_; }
+  int seqAddCalls() const { return seqAddCalls_; }
+
+private:
+  mutable int seqRmCalls_ = 0;
+  mutable int seqAddCalls_ = 0;
+};
+
+} // namespace
+
+// PR #2813 fix regression: on a pure-attention driver, a `seq_rm +
+// seq_add` rejection from `compactThinkSpan` must roll the LIVE KV
+// cache and the driver's positional bookkeeping BACK to the
+// pre-request cursor before rethrowing. Prior to the fix,
+// `TextLlmContext::compactThinkSpan`'s catch handler treated every
+// compaction failure as the hybrid "sequence was wiped" case and reset
+// `nPast_` / `firstMsgTokens_` to zero — but live KV still held the
+// previous turns' tokens, so the next request on the same driver
+// decoded from a corrupted `pos=0` while KV cells covered `[0, N)`.
+//
+// This test primes the driver with two real prefills (so
+// `preRequestNPast_` sits at a non-zero cursor N1 while `nPast_`
+// advances to N1 + N2), then forces `compactThinkSpan` down the
+// pure-attention failure branch via a `RejectingSliderOps` fake, and
+// checks:
+//   * a `StatusError` is thrown (the caller still fails the request),
+//   * `nPast_` / `firstMsgTokens_` are restored to their pre-request
+//     values (N1 / preRequestFirstMsg), NOT reset to zero,
+//   * live-KV `seq_pos_max` matches `nPast_ - 1` so the next turn
+//     decodes from a coherent baseline,
+//   * the rejection short-circuited before `seq_add` fired (protects
+//     the `FailedKvIntact` invariant on the compactor side).
+TEST_F(
+    TextLlmContextCancelTest,
+    PureAttentionCompactionFailureRollsBackToPreRequestCursor) {
+  auto model = loadTextModel(qwen3PureAttentionModelPath());
+  if (!model) {
+    GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
+  }
+
+  LlmModelContext shared = makeShared(*model);
+  ToolsCompactController tools(std::nullopt);
+  common_params params = model->getCommonParams();
+  TextLlmContext driver(params, shared, tools, /*seqId=*/0);
+  driver.setRemoveThinkingFromContext(true);
+
+  // Turn 1 (warm baseline). This is the "prior turn's leftover state"
+  // that a next-turn compaction failure MUST NOT corrupt.
+  std::vector<common_chat_msg> turn1 = {makeMsg("user", "Hi there")};
+  ASSERT_TRUE(driver.evalMessageWithTools(
+      turn1, {}, /*isCacheLoaded=*/false, /*prefill=*/true));
+  const llama_pos preRequestNPast = driver.getNPast();
+  ASSERT_GT(preRequestNPast, 0);
+  const llama_pos preRequestFirstMsg = driver.getFirstMsgTokens();
+  const llama_pos preRequestSeqMax = seqPosMax(*model);
+  ASSERT_EQ(preRequestSeqMax, preRequestNPast - 1)
+      << "live KV must match nPast_ after a clean prefill for this test "
+         "to have a meaningful baseline";
+
+  // Turn 2 (the request that will fail compaction). `evalMessageWithTools`
+  // calls `snapshotPreRequestCursor` at entry, so `preRequestNPast_` is
+  // pinned at the post-turn-1 cursor before the prefill advances
+  // `nPast_` further.
+  ASSERT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", "How are you?")}, {}, /*isCacheLoaded=*/false,
+      /*prefill=*/true));
+  const llama_pos postTurn2NPast = driver.getNPast();
+  ASSERT_GT(postTurn2NPast, preRequestNPast)
+      << "turn 2 prefill must advance the cursor past the pre-request "
+         "cursor for the recovery-delta assertion to be meaningful";
+
+  // Install a plausible reasoning span spanning the tail of turn 2,
+  // then force the pure-attention path with a rejecting slider ops.
+  auto& compactor = driver.compactorForTesting();
+  compactor.setReasoningEnabled(true);
+  compactor.setNeedsRecurrentSnapshot(false);
+  RejectingSliderOps rejecting;
+  compactor.setContextSliderOpsForTesting(&rejecting);
+  const llama_pos spanStart = preRequestNPast + 1;
+  const llama_pos spanEnd = postTurn2NPast - 1;
+  ASSERT_LT(spanStart, spanEnd)
+      << "turn 2 must have added enough tokens to host a non-degenerate "
+         "reasoning span";
+  compactor.setOpenSpan(spanStart);
+  compactor.requestCloseCapture();
+  compactor.onCloseCommitted(spanEnd);
+  ASSERT_TRUE(compactor.hasCapturedCloseSpanForTesting());
+
+  EXPECT_THROW(driver.compactThinkSpanForTesting(), qvac_errors::StatusError)
+      << "compactThinkSpan must still surface the compaction failure to "
+         "the caller after local rollback";
+  compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(driver.getNPast(), preRequestNPast)
+      << "FailedKvIntact recovery must restore nPast_ to preRequestNPast_ "
+         "— the regression the fix guards is a reset to 0";
+  EXPECT_EQ(driver.getFirstMsgTokens(), preRequestFirstMsg)
+      << "FailedKvIntact recovery must restore firstMsgTokens_ to its "
+         "pre-request value";
+  EXPECT_EQ(seqPosMax(*model), preRequestSeqMax)
+      << "live KV must be trimmed to match nPast_ after recovery — "
+         "leftover cells past preRequestNPast_ would corrupt the next "
+         "turn's decode positions";
+  EXPECT_EQ(rejecting.seqRmCalls(), 1)
+      << "compactor must attempt the pure-attention primitive exactly once";
+  EXPECT_EQ(rejecting.seqAddCalls(), 0)
+      << "seq_rm rejection must short-circuit before seq_add fires — "
+         "otherwise the FailedKvIntact invariant (live KV unchanged) is "
+         "violated";
+
+  // Recovery: the driver must remain usable for a follow-up prefill on
+  // the pre-request baseline that we just rolled back to.
+  EXPECT_TRUE(driver.evalMessageWithTools(
+      {makeMsg("user", "Are you working?")}, {}, /*isCacheLoaded=*/false,
+      /*prefill=*/true))
+      << "post-recovery prefill must succeed on the rolled-back cache";
+  EXPECT_GT(driver.getNPast(), preRequestNPast);
 }

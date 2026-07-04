@@ -1,9 +1,11 @@
+#include <cstdint>
 #include <optional>
 
 #include <gtest/gtest.h>
 #include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
 
+#include "model-interface/ContextSlider.hpp"
 #include "model-interface/ReasoningBlockCompactor.hpp"
 #include "model-interface/ToolsCompactController.hpp"
 #include "utils/ReasoningRollbackState.hpp"
@@ -333,21 +335,24 @@ TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
 //
 // Any inability to remove the reasoning span from cache is a hard
 // failure under the default-on `remove_thinking_from_context` contract
-// (PR #2813). Both `snapshotAtPrefillBoundary` and `compact()` throw
-// `qvac_errors::StatusError` in every failure case; the caller must
-// catch, roll back to its pre-request cursor, and re-throw so no
-// saveCache path can serialize a header whose metadata contradicts
-// memory. `thinkingBlockDiscards` never bumps for a failed drop.
+// (PR #2813). `snapshotAtPrefillBoundary` still throws
+// `qvac_errors::StatusError` on boundary-capture failure (recovery
+// happens one level up in `snapshotForRecurrentRollback`), but
+// `compact()` reports failures via `Outcome::Kind::FailedKvIntact` /
+// `Outcome::Kind::FailedKvWiped` so callers can choose the correct
+// live-KV recovery (pre-request rollback vs full reset) before
+// rethrowing. In every failure path `thinkingBlockDiscards` never
+// bumps for the failed drop.
 //
 // Coverage:
 //   * Boundary-capture failure (`snapshotAtPrefillBoundary` on
 //     `ctx == nullptr`, which short-reads inside
 //     `captureReasoningBoundary`).
 //   * Hybrid restore failure (`compact()` on `ctx == nullptr` with a
-//     seeded boundary).
+//     seeded boundary) reports `FailedKvWiped`.
 //   * Defensive no-boundary branch (`compact()` on the hybrid path
 //     with no boundary — hits the "should have been caught at
-//     capture" fallback throw).
+//     capture" fallback) reports `FailedKvWiped`.
 //   * Non-failure no-op paths do NOT throw and do NOT bump discards.
 //
 // The symmetric replay throw shape is exercised end-to-end by the
@@ -402,18 +407,19 @@ TEST(
   ASSERT_EQ(fx.compactor.blockDiscards(), 0);
 
   // `ctx == nullptr` -> `restoreRecurrentState` returns false ->
-  // `restoreReasoningBoundary` returns false -> `compact()` throws.
-  EXPECT_THROW(
-      {
-        (void)fx.compactor.compact(
-            /*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
-      },
-      qvac_errors::StatusError);
+  // `restoreReasoningBoundary` returns false -> `compact()` reports
+  // `FailedKvWiped` with a populated failureMessage so the caller can
+  // rethrow with matching context.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, kLivePos, "[Test]");
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
+  EXPECT_FALSE(outcome.failureMessage.empty());
 
   // No successful drop counted.
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 
-  // The `ResetGuard` in `compact()` runs on the exception path too,
+  // The `ResetGuard` in `compact()` runs on the failure path too,
   // so per-inference state (span, boundary snapshot, replay buffer)
   // must be fully cleared. Without this the next inference's
   // `snapshotAtPrefillBoundary` no-ops on the stale boundary and the
@@ -427,9 +433,9 @@ TEST(
     ReasoningBlockCompactorFailureStats,
     NextCompactAfterRestoreFailureIsCleanNoOp) {
   // The reviewer's "next request starts from a clean/reset state"
-  // invariant, exercised at the compactor level: after a throw, a
-  // fresh compact() on the same instance MUST not carry over the
-  // failed inference's span or boundary.
+  // invariant, exercised at the compactor level: after a failure
+  // outcome, a fresh compact() on the same instance MUST not carry
+  // over the failed inference's span or boundary.
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -439,12 +445,10 @@ TEST(
   fx.compactor.setOpenSpan(/*start=*/15);
   fx.compactor.requestCloseCapture();
   fx.compactor.onCloseCommitted(/*pos=*/20);
-  EXPECT_THROW(
-      {
-        (void)fx.compactor.compact(
-            /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-      },
-      qvac_errors::StatusError);
+  const auto failed = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+  ASSERT_EQ(
+      failed.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
 
   // Simulating "next turn": no new span, no seeded boundary.
   const auto outcome = fx.compactor.compact(
@@ -470,13 +474,11 @@ TEST(
   fx.compactor.requestCloseCapture();
   fx.compactor.onCloseCommitted(/*pos=*/20);
 
-  EXPECT_THROW(
-      {
-        (void)fx.compactor.compact(
-            /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
-      },
-      qvac_errors::StatusError);
-
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped);
+  EXPECT_FALSE(outcome.failureMessage.empty());
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
@@ -508,4 +510,263 @@ TEST(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+}
+
+namespace {
+
+// Minimal `IContextSliderOps` fakes for the compactor tests.
+// `compactKvRange` on the pure-attention path is the only production
+// call site the compactor routes through the injectable ops. Two
+// fakes are provided so tests can drive either half of the primitive
+// contract without a real llama context:
+//
+//   * `AcceptingSliderOps` — `seqRm` returns `true`, so the compactor
+//     proceeds to `seqAdd` and reports `CompactedAttention`. Used by
+//     the successful-drop tests to observe that `seqAdd` fires and
+//     that side-effect notifications (e.g. `tools_.onSlide`) run.
+//   * `RejectingSliderOps` — `seqRm` returns `false` to mimic a
+//     rejected primitive. The production contract is "all-or-nothing
+//     on rejection", so `seqAdd` MUST NOT fire afterwards; otherwise
+//     the compactor's `FailedKvIntact` outcome would be misleading
+//     (it would imply KV was touched anyway).
+class AcceptingSliderOps final : public IContextSliderOps {
+public:
+  llama_pos nCtx(llama_context*) const override { return 4096; }
+
+  ContextSliderMemoryHandle memory(llama_context*) const override {
+    return fakeMemory_;
+  }
+
+  bool seqRm(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+      const override {
+    ++seqRmCalls_;
+    return true;
+  }
+
+  void seqAdd(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos,
+      llama_pos) const override {
+    ++seqAddCalls_;
+  }
+
+  int seqRmCalls() const { return seqRmCalls_; }
+  int seqAddCalls() const { return seqAddCalls_; }
+
+private:
+  ContextSliderMemoryHandle fakeMemory_ =
+      reinterpret_cast<ContextSliderMemoryHandle>(static_cast<uintptr_t>(0x1));
+  mutable int seqRmCalls_ = 0;
+  mutable int seqAddCalls_ = 0;
+};
+
+class RejectingSliderOps final : public IContextSliderOps {
+public:
+  llama_pos nCtx(llama_context*) const override { return 4096; }
+
+  ContextSliderMemoryHandle memory(llama_context*) const override {
+    return fakeMemory_;
+  }
+
+  bool seqRm(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos)
+      const override {
+    ++seqRmCalls_;
+    return false;
+  }
+
+  void seqAdd(
+      ContextSliderMemoryHandle, llama_seq_id, llama_pos, llama_pos,
+      llama_pos) const override {
+    ++seqAddCalls_;
+  }
+
+  int seqRmCalls() const { return seqRmCalls_; }
+  int seqAddCalls() const { return seqAddCalls_; }
+
+private:
+  ContextSliderMemoryHandle fakeMemory_ =
+      reinterpret_cast<ContextSliderMemoryHandle>(static_cast<uintptr_t>(0x1));
+  mutable int seqRmCalls_ = 0;
+  mutable int seqAddCalls_ = 0;
+};
+
+} // namespace
+
+// Pure-attention `seq_rm + seq_add` rejection MUST surface as
+// `FailedKvIntact` (not `FailedKvWiped`) so the caller can roll back
+// `[preRequestCursor, currentCursor)` on live KV instead of resetting
+// to zero. Regression coverage for the single-prompt hardening in
+// `TextLlmContext::compactThinkSpan` / `MtmdLlmContext::compactThinkSpan`
+// where the previous catch handler reset positional bookkeeping to
+// zero on this failure, leaving driver metadata and live KV out of
+// sync for the next request on the same driver.
+TEST(
+    ReasoningBlockCompactorFailureStats,
+    PureAttentionSeqRmRejectionReportsFailedKvIntact) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  // Pure-attention path: no recurrent snapshot needed. This is the
+  // configuration that must produce `FailedKvIntact` on rejection.
+  fx.compactor.setNeedsRecurrentSnapshot(false);
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/20);
+  ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  RejectingSliderOps rejecting;
+  fx.compactor.setContextSliderOpsForTesting(&rejecting);
+  // `ctx` is passed through untouched by the fake ops; safe to pass
+  // nullptr because neither `memory` nor `nCtx` inspects it.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvIntact);
+  EXPECT_FALSE(outcome.failureMessage.empty())
+      << "failureMessage must be populated so caller can rethrow with "
+         "matching diagnostic context";
+  EXPECT_EQ(rejecting.seqRmCalls(), 1)
+      << "compactor must attempt the pure-attention primitive exactly once";
+  EXPECT_EQ(rejecting.seqAddCalls(), 0)
+      << "seq_rm rejection must short-circuit before seq_add fires — "
+         "otherwise the `FailedKvIntact` invariant (live KV unchanged) is "
+         "violated";
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0)
+      << "failed drops must not bump the runtime discard counter";
+
+  // The `ResetGuard` still clears per-inference bookkeeping on the
+  // failure return so a follow-up compact() on the same instance
+  // starts clean.
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
+// ============================================================================
+// tools_compact × remove_thinking_from_context — shared post-generation seam
+// ============================================================================
+//
+// `TextLlmContext::onGenerationFinished` runs the two post-generation
+// policies back-to-back: `onGenerationCompletePolicy` (tools_compact
+// tail trim) fires first, then `compactThinkSpan()` (the reasoning
+// compactor). Prior to this PR, no unit or integration test enabled
+// both features at the same time — `reasoning.test.js` never sets
+// `tools_compact` and `tools-compact.test.js` never sets
+// `remove_thinking_from_context`. Pin the two invariants that connect
+// them on the shared code path so a future change to either policy
+// cannot silently break the other:
+//
+//   1. If the tools_compact tail trim (or any other tail eraser) has
+//      shrunk `nPast_` below the recorded close-span end, `compact()`
+//      MUST bail as a NoOp — it cannot replay tokens past the
+//      committed tail.
+//   2. On a successful pure-attention drop, `compact()` MUST notify an
+//      enabled `ToolsCompactController` via `onSlide` so the tools
+//      anchor tracks the shifted tail. Skipping this would leave the
+//      anchor pointing past the actual tool region on the next slide,
+//      breaking `clampDiscard`.
+
+TEST(
+    ReasoningBlockCompactorToolsCompactInteraction,
+    NoOpWhenLivePosBelowRecordedSpanEnd) {
+  // Simulate the ordering `onGenerationCompletePolicy` -> `compactThinkSpan`
+  // by advancing the close span BEYOND the `pos` value passed to
+  // `compact()`. This models the case where tools_compact trimmed
+  // enough tail tokens to overshoot the recorded reasoning close.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(false); // pure-attention
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/25);
+  ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  AcceptingSliderOps accepting;
+  fx.compactor.setContextSliderOpsForTesting(&accepting);
+  // `pos = 20 < end = 25`: the defensive `end > pos` guard in
+  // `compact()` must trip before touching KV.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+  EXPECT_EQ(accepting.seqRmCalls(), 0)
+      << "overshoot guard must fire before any KV primitive is called";
+  EXPECT_EQ(accepting.seqAddCalls(), 0);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0)
+      << "silent NoOp bail must not be counted as a successful discard";
+
+  // `ResetGuard` still clears per-inference state on the NoOp return,
+  // so the next inference starts from a clean slate even after an
+  // overshoot bail.
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
+TEST(
+    ReasoningBlockCompactorToolsCompactInteraction,
+    SuccessfulPureAttentionDropNotifiesEnabledToolsController) {
+  // Enable both features and drive a successful pure-attention
+  // compaction. Assert that the compactor threads its discard through
+  // `ToolsCompactController::onSlide` so the tools anchor shifts by
+  // the same amount the tail shrank.
+  ReasoningRollbackState rollback;
+  ToolsCompactController tools{ToolsCompactProfile{}};
+  ASSERT_TRUE(tools.enabled());
+
+  // Seed the tools controller with an anchor via the normal lifecycle:
+  //   - `onTokenize` captures the conversation-only token count,
+  //   - `onEvalComplete` derives `nPastBeforeTools_` from the delta.
+  //
+  // Concrete numbers: total-with-tools=100, without-tools=80 =>
+  // `nConversationOnlyTokens_ = 80`. After
+  // `onEvalComplete(nPast=100, totalTokensEvaled=100)` the anchor
+  // lands at `100 - (100 - 80) = 80`.
+  constexpr size_t kWithTools = 100;
+  constexpr size_t kWithoutTools = 80;
+  constexpr llama_pos kNPastAfterEval = 100;
+  tools.onTokenize(kWithTools, kWithoutTools);
+  tools.onEvalComplete(kNPastAfterEval, /*totalTokensEvaled=*/kNPastAfterEval);
+  ASSERT_EQ(tools.anchor(), 80);
+
+  ReasoningBlockCompactor compactor{rollback, tools};
+  compactor.setRemoveThinkingFromContext(true);
+  compactor.setReasoningEnabled(true);
+  compactor.setNeedsRecurrentSnapshot(false); // pure-attention
+
+  // Reasoning close span at `[15, 20)`, live pos at 25 — 5 tokens will
+  // be dropped by the successful compact.
+  compactor.setOpenSpan(/*start=*/15);
+  compactor.requestCloseCapture();
+  compactor.onCloseCommitted(/*pos=*/20);
+
+  AcceptingSliderOps accepting;
+  compactor.setContextSliderOpsForTesting(&accepting);
+  const auto outcome = compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+  compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(
+      outcome.kind,
+      ReasoningBlockCompactor::Outcome::Kind::CompactedAttention);
+  EXPECT_EQ(outcome.newPos, 20);
+  EXPECT_EQ(outcome.discarded, 5);
+  EXPECT_EQ(outcome.keptPrefixEnd, 15)
+      << "after seq_rm + seq_add, the protected prefix ends at the span start";
+  EXPECT_EQ(accepting.seqRmCalls(), 1);
+  EXPECT_EQ(accepting.seqAddCalls(), 1)
+      << "successful seq_rm must be followed by the paired seq_add";
+  EXPECT_EQ(compactor.blockDiscards(), 1);
+
+  // The whole point of this test: tools_compact must observe the drop.
+  // Anchor should shift from 80 to 75 via `onSlide(5, /*first=*/15)`.
+  // Without the `tools_.onSlide` call inside `compact()`, the anchor
+  // would stay at 80 and the next `clampDiscard` would allow a slide
+  // that eats into the tool region.
+  EXPECT_EQ(tools.anchor(), 75)
+      << "compactor must forward the discard through tools_.onSlide so the "
+         "anchor tracks the shifted tail";
 }
