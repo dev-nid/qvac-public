@@ -1166,6 +1166,18 @@ void MtmdLlmContext::configureReasoningTags(
   if (reasoningInitOk) {
     reasoningEnabled_ = true;
     compactor_.setReasoningEnabled(true);
+    if (needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
+        thinkingForcedOpen_ && !reasoningState_.close_is_single_token) {
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[MtmdLlm] recurrent reasoning-boundary snapshot will be "
+              "skipped: close marker '%s' tokenises to more than one "
+              "token under this vocab; remove_thinking_from_context "
+              "cannot compact reasoning on this model without invalidating "
+              "recurrent state\n",
+              reasoningTags->close.c_str()));
+    }
     return;
   }
 
@@ -1186,7 +1198,8 @@ void MtmdLlmContext::snapshotForRecurrentRollback() {
           needsRecurrentSnapshot_,
           removeThinkingFromContext_,
           reasoningEnabled_,
-          thinkingForcedOpen_)) {
+          thinkingForcedOpen_,
+          reasoningState_.close_is_single_token)) {
     return;
   }
   // Multimodal prefill decodes chunks (images + text) one at a time
@@ -1279,9 +1292,11 @@ void MtmdLlmContext::compactThinkSpan() {
     refreshCurrentCacheTokensFromMemory();
     break;
   case OutcomeKind::NoOp:
-    // Nothing to do: feature off, no span captured, or degenerate/
-    // overshooting span. Live memory still matches `current_`, so
-    // leave it alone.
+    // Nothing to do: feature off, no span captured, or a tail-eraser
+    // already shrank the cache past the recorded close (`end > pos`).
+    // Live memory still matches `current_`, so leave it alone. See
+    // `ReasoningBlockCompactor::compact` for the strict-cleanup vs
+    // reachability tradeoff on the `end > pos` branch.
     break;
   case OutcomeKind::FailedKvIntact: {
     // Pure-attention `seq_rm + seq_add` rejection. Live KV was not

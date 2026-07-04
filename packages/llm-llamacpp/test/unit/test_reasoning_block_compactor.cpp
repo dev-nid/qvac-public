@@ -31,7 +31,8 @@ TEST(ReasoningSnapshotPolicy, CapturesOnlyForForcedOpenRecurrentReasoning) {
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
-      /*thinkingForcedOpen=*/true));
+      /*thinkingForcedOpen=*/true,
+      /*closeMarkerSingleToken=*/true));
 }
 
 TEST(ReasoningSnapshotPolicy, SkipsGeneratedOpenRecurrentReasoning) {
@@ -42,7 +43,8 @@ TEST(ReasoningSnapshotPolicy, SkipsGeneratedOpenRecurrentReasoning) {
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
-      /*thinkingForcedOpen=*/false));
+      /*thinkingForcedOpen=*/false,
+      /*closeMarkerSingleToken=*/true));
 }
 
 TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
@@ -50,17 +52,36 @@ TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
       /*needsRecurrentSnapshot=*/false,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
-      /*thinkingForcedOpen=*/true));
+      /*thinkingForcedOpen=*/true,
+      /*closeMarkerSingleToken=*/true));
   EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/false,
       /*reasoningEnabled=*/true,
-      /*thinkingForcedOpen=*/true));
+      /*thinkingForcedOpen=*/true,
+      /*closeMarkerSingleToken=*/true));
   EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/false,
-      /*thinkingForcedOpen=*/true));
+      /*thinkingForcedOpen=*/true,
+      /*closeMarkerSingleToken=*/true));
+}
+
+// Recurrent replay seeds `postReasoningTokens_` with the single sampled
+// token that flips `updateReasoningBuffer` out of `inside_reasoning`. If
+// the close tag tokenises to more than one piece, that seed captures
+// only the tail piece and the restored SSM state ends with an unbalanced
+// `<think>` opener. The policy MUST reject the boundary snapshot in that
+// case so `remove_thinking_from_context` degrades to leaving reasoning
+// tokens in the cache instead of silently corrupting recurrent state.
+TEST(ReasoningSnapshotPolicy, SkipsWhenCloseMarkerIsMultiToken) {
+  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+      /*needsRecurrentSnapshot=*/true,
+      /*removeThinkingFromContext=*/true,
+      /*reasoningEnabled=*/true,
+      /*thinkingForcedOpen=*/true,
+      /*closeMarkerSingleToken=*/false));
 }
 
 TEST(ReasoningRollbackStateAppend, AppendsRegardlessOfCaptureFlag) {
@@ -661,10 +682,25 @@ TEST(
 // them on the shared code path so a future change to either policy
 // cannot silently break the other:
 //
-//   1. If the tools_compact tail trim (or any other tail eraser) has
-//      shrunk `nPast_` below the recorded close-span end, `compact()`
-//      MUST bail as a NoOp — it cannot replay tokens past the
-//      committed tail.
+//   1. If a tail-eraser (today: tools_compact) has shrunk `nPast_`
+//      below the recorded close-span end, `compact()` MUST behave
+//      per-path:
+//        a. Whole span already past the live cursor (`start >= pos`):
+//           NoOp — nothing resident to remove.
+//        b. Partial span still resident (`start < pos < end`):
+//           * Pure-attention: honor the default-on strict-cleanup
+//             contract by dropping the resident remainder via a
+//             clamped `[start, pos)` `seq_rm + seq_add`; reports
+//             `CompactedAttention`.
+//           * Recurrent / hybrid: NoOp — replay is anchored at a
+//             captured post-reasoning tail we can no longer reconcile
+//             against a shorter live cache without the driver's
+//             pre-request rollback anchor.
+//      The current Qwen3-only tools_compact caller is not expected to
+//      overshoot `</think>` (its trim is sized against the trailing
+//      tool region only); these guards are the defence-in-depth path
+//      if a future tail-eraser ever legitimately trims past the close
+//      marker.
 //   2. On a successful pure-attention drop, `compact()` MUST notify an
 //      enabled `ToolsCompactController` via `onSlide` so the tools
 //      anchor tracks the shifted tail. Skipping this would leave the
@@ -673,11 +709,12 @@ TEST(
 
 TEST(
     ReasoningBlockCompactorToolsCompactInteraction,
-    NoOpWhenLivePosBelowRecordedSpanEnd) {
-  // Simulate the ordering `onGenerationCompletePolicy` -> `compactThinkSpan`
-  // by advancing the close span BEYOND the `pos` value passed to
-  // `compact()`. This models the case where tools_compact trimmed
-  // enough tail tokens to overshoot the recorded reasoning close.
+    NoOpWhenWholeSpanTrimmedPastLivePos) {
+  // Whole recorded reasoning span sits past the live cursor: `start`
+  // and `end` are both above `pos`, so nothing from the span remains
+  // resident. This models a tail-eraser that reset `pos` to a point
+  // before the reasoning span (the shape produced by tools_compact
+  // trimming the entire assistant tail back to `nPastBeforeTools_`).
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -690,22 +727,105 @@ TEST(
 
   AcceptingSliderOps accepting;
   fx.compactor.setContextSliderOpsForTesting(&accepting);
-  // `pos = 20 < end = 25`: the defensive `end > pos` guard in
-  // `compact()` must trip before touching KV.
+  // `pos = 10 <= start = 15`: reasoning span already gone from cache;
+  // NoOp is the correct — not a leak — outcome.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/10, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+  EXPECT_EQ(accepting.seqRmCalls(), 0)
+      << "when the span is already trimmed away, no KV primitive must "
+         "fire";
+  EXPECT_EQ(accepting.seqAddCalls(), 0);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0)
+      << "NoOp on whole-span-trimmed must not be counted as a discard";
+
+  // `ResetGuard` still clears per-inference state on the NoOp return.
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
+TEST(
+    ReasoningBlockCompactorToolsCompactInteraction,
+    PartialResidentSpanCompactsOnPureAttention) {
+  // `start < pos < end`: the tail-eraser stopped inside the reasoning
+  // span, so `[start, pos)` is still resident. Under the default-on
+  // `remove_thinking_from_context` contract the compactor must not
+  // silently leak reasoning tokens — the pure-attention path clamps
+  // the effective end to `pos` and drops the resident remainder.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(false); // pure-attention
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/25);
+  ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  AcceptingSliderOps accepting;
+  fx.compactor.setContextSliderOpsForTesting(&accepting);
+  // `pos = 20`, recordedEnd = 25 → effectiveEnd clamped to 20, so the
+  // compactor drops `[15, 20)` — 5 tokens.
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::CompactedAttention);
+  EXPECT_EQ(outcome.newPos, 15)
+      << "after clamped seq_rm, newPos falls to the reasoning span start";
+  EXPECT_EQ(outcome.discarded, 5)
+      << "discard length must equal the resident remainder `pos - start`";
+  EXPECT_EQ(outcome.keptPrefixEnd, 15);
+  EXPECT_EQ(accepting.seqRmCalls(), 1)
+      << "clamped partial cleanup must issue the pure-attention seq_rm";
+  EXPECT_EQ(accepting.seqAddCalls(), 1)
+      << "successful seq_rm must be followed by its paired seq_add";
+  EXPECT_EQ(fx.compactor.blockDiscards(), 1)
+      << "clamped partial drop is still a real discard and must be counted";
+
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
+TEST(
+    ReasoningBlockCompactorToolsCompactInteraction,
+    NoOpWhenPartialResidentSpanOnRecurrentPath) {
+  // Same partial-resident shape as above but on the recurrent /
+  // hybrid path: replay is anchored at a captured post-reasoning tail
+  // that no longer matches the shorter live cache, and there is no
+  // safe way to reconcile without the driver's pre-request rollback
+  // anchor. NoOp here — the driver's own recovery path (context
+  // rollback or full reset on the next request) handles cleanup.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true); // recurrent / hybrid
+  // `setOpenSpan` refuses the recurrent+no-boundary combination, so a
+  // sentinel boundary snapshot is required for the span to be seeded
+  // at all. `nPast=10` is arbitrary — the recurrent NoOp bail returns
+  // before consulting the boundary payload.
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+  ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/25);
+  ASSERT_TRUE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  AcceptingSliderOps accepting;
+  fx.compactor.setContextSliderOpsForTesting(&accepting);
   const auto outcome = fx.compactor.compact(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
   fx.compactor.setContextSliderOpsForTesting(nullptr);
 
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
   EXPECT_EQ(accepting.seqRmCalls(), 0)
-      << "overshoot guard must fire before any KV primitive is called";
+      << "recurrent partial-resident NoOp must not touch any KV primitive";
   EXPECT_EQ(accepting.seqAddCalls(), 0);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0)
-      << "silent NoOp bail must not be counted as a successful discard";
+      << "recurrent NoOp bail must not be counted as a successful discard";
 
-  // `ResetGuard` still clears per-inference state on the NoOp return,
-  // so the next inference starts from a clean slate even after an
-  // overshoot bail.
   EXPECT_FALSE(fx.compactor.hasOpenSpan());
 }
 

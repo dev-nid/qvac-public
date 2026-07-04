@@ -1,5 +1,6 @@
 #include "ReasoningBlockCompactor.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <utility>
 
@@ -171,23 +172,61 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     return out;
   }
   const llama_pos start = thinkSpan_->first;
-  const llama_pos end = thinkSpan_->second;
+  const llama_pos recordedEnd = thinkSpan_->second;
   out.spanStart = start;
-  out.spanEnd = end;
+  out.spanEnd = recordedEnd;
 
   // Skip open (close never captured) or degenerate spans without
   // touching the cache. This is the single validation backstop for
   // all close-capture sites — none validate `end > start` themselves.
-  if (end < 0 || end <= start) {
+  if (recordedEnd < 0 || recordedEnd <= start) {
     return out;
   }
-  // Defensive: if the tools-compact tail trim or any other tail-eraser
-  // ran between span end and here, the recorded `end` may overshoot
-  // the live cache. Bail rather than risk replaying tokens past the
-  // committed tail.
-  if (end > pos) {
-    return out;
+  // `recordedEnd > pos` means a tail-eraser (today: the tools_compact
+  // tail trim in `TextLlmContext::onGenerationCompletePolicy`, which
+  // runs just before `compactThinkSpan()`) shrank the cache past the
+  // recorded close marker.
+  //
+  // Two sub-cases:
+  //   * `start >= pos`: the whole reasoning span was already dropped
+  //     by the tail-eraser; nothing resident, genuine NoOp.
+  //   * `start <  pos`: the tail-eraser stopped inside the span, so
+  //     `[start, pos)` is still resident. Under the default-on
+  //     `remove_thinking_from_context` contract we must not silently
+  //     leave reasoning tokens in cache, so clamp the effective end
+  //     to `pos` and let the compaction paths drop exactly the
+  //     resident remainder.
+  //
+  // Recurrent / hybrid path stays as a NoOp here even in the
+  // partial-resident sub-case: replay is anchored at `snapshotPos`
+  // with a captured post-reasoning tail; if the live cache is shorter
+  // than that captured tail we cannot reconcile the two without the
+  // pre-request rollback anchor that lives in the driver, so the
+  // driver's own `onCancel` / `FailedKvIntact` paths are the only
+  // safe recovery.
+  if (recordedEnd > pos) {
+    if (start >= pos) {
+      return out;
+    }
+    if (needsRecurrentSnapshot_) {
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "%s thinking-block compaction: recurrent path cannot "
+              "reconcile clamped span [%d, %d) against captured "
+              "post-reasoning tail (recordedEnd=%d, pos=%d, "
+              "seqId=%d); leaving cleanup to the driver's rollback "
+              "path\n",
+              labelTag,
+              start,
+              pos,
+              recordedEnd,
+              pos,
+              seqId));
+      return out;
+    }
   }
+  const llama_pos end = std::min(recordedEnd, pos);
 
   // Defence-in-depth: `setOpenSpan` already refuses the recurrent+
   // no-boundary path, and `snapshotAtPrefillBoundary` throws on

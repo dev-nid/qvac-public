@@ -140,6 +140,7 @@ TEST_F(ReasoningUtilsTest, ReasoningStateDefaultInitialization) {
   EXPECT_EQ(state.forcedOpenTokenCount, 0);
   EXPECT_EQ(state.cached_close_tag_token, LLAMA_TOKEN_NULL);
   EXPECT_EQ(state.cached_newline_token, LLAMA_TOKEN_NULL);
+  EXPECT_FALSE(state.close_is_single_token);
   EXPECT_TRUE(state.recent_output_buffer.empty());
   EXPECT_EQ(state.BUFFER_SIZE, 50);
 }

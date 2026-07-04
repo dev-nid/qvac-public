@@ -101,8 +101,8 @@ struct PrefillPlan {
 /// `TextLlmContext` implements both interfaces.
 ///
 /// Method ordering below mirrors a sequence's lifecycle:
-///   `validatePromptPolicy` -> `loadCache` -> `snapshotPreRequestCursor`
-///   -> `snapshotPreRequestRollbackAnchor` -> `preparePrefill`
+///   `validatePromptPolicy` -> `loadCache` -> `preparePrefill`
+///   -> `snapshotPreRequestCursor` -> `snapshotPreRequestRollbackAnchor`
 ///   -> `onPrefillComplete` -> N x `onLogitsReady`
 ///   -> (`onGenerationFinished` | `onCancel`) -> `onSequenceEnd` ->
 ///   `saveCache`
@@ -228,11 +228,11 @@ public:
 
   virtual void saveCache(const std::string& cacheKey) const = 0;
 
-  /// Capture the admission cursor for `onCancel` rollback. The scheduler
-  /// calls this right after `loadCache` so batch drivers land on the
-  /// same pre-request state that single-prompt drivers snapshot at their
-  /// own entry. Cheap: bookkeeping only, no I/O. Default no-op for
-  /// drivers whose cancel does not need it.
+  /// Capture the post-`preparePrefill` cursor for `onCancel` rollback. The
+  /// scheduler calls this after `preparePrefill` because prefill preparation
+  /// may slide or otherwise mutate existing KV state; anchoring earlier would
+  /// roll cancellation back to a stale cursor. Cheap: bookkeeping only, no I/O.
+  /// Default no-op for drivers whose cancel does not need it.
   virtual void snapshotPreRequestCursor() {}
 
   /// Capture the batch-path rollback anchor used by `onCancel` on

@@ -41,6 +41,7 @@ bool initializeReasoningState(
   state.forcedOpenTokenCount = 0;
   state.cached_close_tag_token = LLAMA_TOKEN_NULL;
   state.cached_newline_token = LLAMA_TOKEN_NULL;
+  state.close_is_single_token = false;
 
   if (lctx == nullptr || tags.open.empty() || tags.close.empty()) {
     return false;
@@ -77,6 +78,20 @@ bool initializeReasoningState(
   if (closeTokens.size() == 1) {
     state.cached_close_tag_token = closeTokens[0];
   }
+
+  // `updateReasoningBuffer` matches the reasoning close on `tags.close`,
+  // so the token that flips `inside_reasoning` back off — and gets
+  // seeded into the recurrent replay buffer via
+  // `ReasoningBlockCompactor::recordCloseMarkerForReplay` — is the
+  // last piece of THAT tokenisation. If `tags.close` is multi-piece,
+  // the seed misses the earlier pieces and recurrent replay produces
+  // an unbalanced `<think>` opener. Record the single-piece invariant
+  // here so `ReasoningSnapshotPolicy` can gate the recurrent boundary
+  // snapshot on it (and callers can degrade cleanly for models whose
+  // template close does not resolve to one token).
+  const std::vector<llama_token> reasoningCloseTokens =
+      common_tokenize(lctx, tags.close, false, true);
+  state.close_is_single_token = (reasoningCloseTokens.size() == 1);
 
   std::vector<llama_token> newlineTokens =
       common_tokenize(lctx, "\n", false, true);
