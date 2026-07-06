@@ -238,7 +238,12 @@ export interface GenerationParams {
    * deliberately does NOT persist the failed slot's cache: when the
    * request was configured with `cacheKey` + `saveCacheToDisk`, the
    * last known-good on-disk cache is preserved rather than being
-   * overwritten with the post-failure state.
+   * overwritten with the post-failure state. The same skip-save rule
+   * applies to graceful cancels of hybrid / recurrent requests when
+   * rollback to the pre-request cursor cannot be completed (recurrent
+   * full-state restore refused, or no pre-request snapshot was captured
+   * yet the driver has advanced past the pre-request cursor). Cancels
+   * that can be rolled back cleanly still persist as usual.
    */
   remove_thinking_from_context?: boolean
 }
@@ -247,6 +252,28 @@ export interface RunOptions {
   prefill?: boolean
   generationParams?: GenerationParams
   cacheKey?: string
+  /**
+   * When `true` and `cacheKey` is set, the driver persists the sequence's
+   * KV / recurrent state to disk under `cacheKey` at end-of-generation so a
+   * later run keyed by the same string can resume without re-prefilling.
+   *
+   * The continuous-batch scheduler intentionally SKIPS the save on
+   * teardown legs where persistence could corrupt the last known-good
+   * on-disk cache:
+   *   - Any batch error-recovery path (e.g. decode failure, per-slot
+   *     failure with `SaveCachePolicy::Skip`, or a
+   *     `remove_thinking_from_context` hard-fail).
+   *   - Graceful cancel of a hybrid / recurrent request whose driver
+   *     cannot roll live memory back to the pre-request cursor —
+   *     either the recurrent full-state restore was refused, or no
+   *     pre-request snapshot exists yet the driver advanced past the
+   *     pre-request cursor. Cancels that roll back cleanly still save.
+   *
+   * On both skip paths the sequence's in-memory KV is still cleared, so
+   * subsequent requests decode from a coherent baseline; only the
+   * on-disk cache is untouched. Pure-attention drivers always roll back
+   * via `removeLastNTokens` and therefore save on cancel as usual.
+   */
   saveCacheToDisk?: boolean
 }
 
