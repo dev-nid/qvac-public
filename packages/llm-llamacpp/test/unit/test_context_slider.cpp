@@ -8,8 +8,8 @@
 
 #include <gtest/gtest.h>
 
-#include "model-interface/ContextSlider.hpp"
 #include "model-interface/ContextShifter.hpp"
+#include "model-interface/ContextSlider.hpp"
 #include "model-interface/ReasoningBlockCompactor.hpp"
 #include "model-interface/ToolsCompactController.hpp"
 #include "utils/ReasoningRollbackState.hpp"
@@ -377,7 +377,8 @@ TEST_F(
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
       << "a generation slide after reasoning opens must hard-fail instead of "
          "making remove_thinking_from_context a silent NoOp";
-  EXPECT_NE(outcome.failureMessage.find("slide invalidated"), std::string::npos);
+  EXPECT_NE(
+      outcome.failureMessage.find("slide invalidated"), std::string::npos);
   EXPECT_EQ(compactor.blockDiscards(), 0)
       << "slide-invalidation failures are not successful reasoning discards";
 }

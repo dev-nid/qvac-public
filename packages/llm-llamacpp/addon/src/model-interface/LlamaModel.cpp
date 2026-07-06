@@ -783,7 +783,8 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
           state_->llmContext_->generateResponse(callback);
       if (!generationResult.ok) {
         resetState();
-        std::string errorMsg = string_format("%s: context overflow\n", __func__);
+        std::string errorMsg =
+            string_format("%s: context overflow\n", __func__);
         throw qvac_errors::StatusError(
             ADDON_ID, toString(ContextOverflow), errorMsg);
       }

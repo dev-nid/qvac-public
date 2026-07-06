@@ -1480,7 +1480,8 @@ TEST(
       R"([{"role":"user","content":"Run after thrown compaction failure."}])";
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
-  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  const std::vector<uint8_t> afterUncachedTransition =
+      readBinaryFile(cachePath);
   EXPECT_EQ(afterUncachedTransition, before)
       << "thrown compaction failure must invalidate the active cache session; "
          "otherwise a later prompt without cacheKey saves recovery state "
@@ -1581,7 +1582,8 @@ TEST(
       R"([{"role":"user","content":"Run after open-span failure."}])";
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
-  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  const std::vector<uint8_t> afterUncachedTransition =
+      readBinaryFile(cachePath);
   EXPECT_EQ(afterUncachedTransition, before)
       << "open-span failure must invalidate the active cache session; "
          "otherwise a later prompt without cacheKey saves recovery state "
