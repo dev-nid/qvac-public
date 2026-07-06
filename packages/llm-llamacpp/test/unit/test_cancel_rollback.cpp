@@ -24,6 +24,7 @@
 #include "model-interface/TextLlmContext.hpp"
 #include "model-interface/ToolsCompactController.hpp"
 #include "test_common.hpp"
+#include "test_internal_peers.hpp"
 #include "utils/RecurrentStateSnapshot.hpp"
 
 // Tests for the cancel-rollback paths introduced alongside
@@ -658,7 +659,7 @@ TEST_F(
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
   ASSERT_TRUE(driver.evalMessageWithTools(
       chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
-  ASSERT_TRUE(driver.generateResponse([](const std::string&) {}));
+  ASSERT_TRUE(driver.generateResponse([](const std::string&) {}).ok);
 
   EXPECT_FALSE(driver.takeUserVisiblePerfSnapshot().has_value())
       << "Pure-attention compactThinkSpan must NOT capture a snapshot — "
@@ -939,6 +940,195 @@ TEST(
     std::string output = model->processPrompt(shortPrompt);
     EXPECT_GE(output.length(), 0);
   });
+}
+
+TEST(
+    TextLlmContextCancelDuringGenerationTest,
+    SinglePromptHybridCancelRollbackFailureSkipsCacheSave) {
+  const std::string modelPath = qwen35HybridModelPath();
+  if (!fs::exists(modelPath)) {
+    GTEST_SKIP() << "Qwen3.5 hybrid model not found";
+  }
+
+  std::unordered_map<std::string, std::string> config;
+  config["device"] = test_common::getTestDevice();
+  config["ctx_size"] = "4096";
+  config["gpu_layers"] = test_common::getTestGpuLayers();
+  config["n_predict"] = "32";
+  config["backendsDir"] = test_common::getTestBackendsDir().string();
+
+  std::string mp = modelPath;
+  std::string proj;
+  auto model = std::make_unique<LlamaModel>(
+      std::move(mp), std::move(proj), std::move(config));
+  model->waitForLoadInitialization();
+  ASSERT_TRUE(model->isLoaded());
+
+  const fs::path cachePath =
+      fs::temp_directory_path() /
+      ("single-cancel-rollback-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".ggsq");
+  fs::remove(cachePath);
+
+  LlamaModel::Prompt seed;
+  seed.input = R"([{"role":"user","content":"Remember the clean baseline."}])";
+  seed.prefill = true;
+  seed.cacheKey = cachePath.string();
+  seed.saveCacheToDisk = true;
+  ASSERT_NO_THROW(model->processPrompt(seed));
+  ASSERT_TRUE(fs::exists(cachePath));
+  ASSERT_GT(fs::file_size(cachePath), 0u);
+
+  const std::vector<uint8_t> before = readBinaryFile(cachePath);
+  ASSERT_FALSE(before.empty());
+
+  LlmContext* baseCtx = LlamaModelTestPeer::llmContext(*model);
+  ASSERT_NE(baseCtx, nullptr);
+  auto* textCtx = dynamic_cast<TextLlmContext*>(baseCtx);
+  ASSERT_NE(textCtx, nullptr);
+  const llama_pos preRequestNPast = baseCtx->getNPast();
+  ASSERT_GT(preRequestNPast, 0);
+
+  std::atomic<bool> injectedFailure{false};
+  LlamaModel::Prompt cancellable;
+  cancellable.input =
+      R"([{"role":"user","content":"Start answering, then cancel."}])";
+  cancellable.cacheKey = cachePath.string();
+  cancellable.saveCacheToDisk = true;
+  cancellable.generationParams.remove_thinking_from_context = true;
+  cancellable.outputCallback = [&](const std::string&) {
+    if (injectedFailure.exchange(true)) {
+      return;
+    }
+    // Force the single-prompt cancel rollback restore to fail after the
+    // prefill-entry gate succeeds. The correct response is to return
+    // rollbackOk=false up to processPromptImpl(), which then skips
+    // saveCacheToDisk and preserves the existing cache file.
+    textCtx->seedPrefillEntryRollbackForTesting(preRequestNPast);
+    baseCtx->stop();
+  };
+
+  ASSERT_NO_THROW(model->processPrompt(cancellable));
+  ASSERT_TRUE(injectedFailure.load())
+      << "test did not reach the streaming callback to inject rollback failure";
+
+  const std::vector<uint8_t> after = readBinaryFile(cachePath);
+  EXPECT_EQ(after, before)
+      << "single-prompt cancel with failed recurrent rollback must leave the "
+         "last known-good on-disk cache untouched";
+
+  LlamaModel::Prompt uncached;
+  uncached.input = R"([{"role":"user","content":"Run after failed cancel."}])";
+  ASSERT_NO_THROW(model->processPrompt(uncached));
+
+  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  EXPECT_EQ(afterUncachedTransition, before)
+      << "failed rollback must also invalidate the active cache session; "
+         "otherwise a later prompt without cacheKey saves dirty live state "
+         "before clearing the cache";
+
+  fs::remove(cachePath);
+}
+
+TEST(
+    TextLlmContextCancelDuringGenerationTest,
+    SinglePromptHybridPrefillCancelRollbackFailureInvalidatesCacheSession) {
+  const std::string modelPath = qwen35HybridModelPath();
+  if (!fs::exists(modelPath)) {
+    GTEST_SKIP() << "Qwen3.5 hybrid model not found";
+  }
+
+  std::unordered_map<std::string, std::string> config;
+  config["device"] = test_common::getTestDevice();
+  config["ctx_size"] = "4096";
+  config["gpu_layers"] = test_common::getTestGpuLayers();
+  config["n_predict"] = "8";
+  config["batch-size"] = "1";
+  config["backendsDir"] = test_common::getTestBackendsDir().string();
+
+  std::string mp = modelPath;
+  std::string proj;
+  auto model = std::make_unique<LlamaModel>(
+      std::move(mp), std::move(proj), std::move(config));
+  model->waitForLoadInitialization();
+  ASSERT_TRUE(model->isLoaded());
+
+  const fs::path cachePath =
+      fs::temp_directory_path() /
+      ("single-prefill-cancel-rollback-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".ggsq");
+  fs::remove(cachePath);
+
+  LlamaModel::Prompt seed;
+  seed.input = R"([{"role":"user","content":"Remember the clean baseline."}])";
+  seed.prefill = true;
+  seed.cacheKey = cachePath.string();
+  seed.saveCacheToDisk = true;
+  ASSERT_NO_THROW(model->processPrompt(seed));
+  ASSERT_TRUE(fs::exists(cachePath));
+
+  const std::vector<uint8_t> before = readBinaryFile(cachePath);
+  ASSERT_FALSE(before.empty());
+
+  LlmContext* baseCtx = LlamaModelTestPeer::llmContext(*model);
+  ASSERT_NE(baseCtx, nullptr);
+  auto* textCtx = dynamic_cast<TextLlmContext*>(baseCtx);
+  ASSERT_NE(textCtx, nullptr);
+  textCtx->forcePrefillEntryRestoreFailureForTesting(true);
+
+  std::string longBody;
+  for (int i = 0; i < 220; ++i) {
+    longBody += "prefill cancellation rollback failure marker ";
+  }
+
+  LlamaModel::Prompt cancellable;
+  cancellable.input =
+      R"([{"role":"user","content":")" + longBody + R"("}])";
+  cancellable.prefill = true;
+  cancellable.cacheKey = cachePath.string();
+  cancellable.saveCacheToDisk = true;
+
+  std::atomic<bool> done{false};
+  std::thread worker([&] {
+    try {
+      model->processPrompt(cancellable);
+    } catch (...) {
+      // Treat any cancel-surface exception as a completed cancel for this test.
+    }
+    done.store(true);
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  baseCtx->stop();
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(done.load()) << "worker did not unwind within 10s of cancel";
+  worker.join();
+
+  const std::vector<uint8_t> after = readBinaryFile(cachePath);
+  EXPECT_EQ(after, before)
+      << "prefill cancel with failed recurrent rollback must leave the "
+         "last known-good on-disk cache untouched";
+
+  LlamaModel::Prompt uncached;
+  uncached.input =
+      R"([{"role":"user","content":"Run after failed prefill cancel."}])";
+  ASSERT_NO_THROW(model->processPrompt(uncached));
+
+  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  EXPECT_EQ(afterUncachedTransition, before)
+      << "prefill rollback failure must invalidate the active cache session; "
+         "otherwise a later prompt without cacheKey saves dirty live state "
+         "before clearing the cache";
+
+  fs::remove(cachePath);
 }
 
 // Mid-prefill cancel on a hybrid model via the high-level API. Unlike the

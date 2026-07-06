@@ -433,13 +433,13 @@ void TextLlmContext::tokenizeChat(
   }
 };
 
-bool TextLlmContext::evalMessage(
+LlmContext::EvalMessageResult TextLlmContext::evalMessage(
     const std::vector<common_chat_msg>& chatMsgs, bool isCacheLoaded,
     bool prefill) {
   return evalMessageWithTools(chatMsgs, {}, isCacheLoaded, prefill);
 }
 
-bool TextLlmContext::evalMessageWithTools(
+LlmContext::EvalMessageResult TextLlmContext::evalMessageWithTools(
     const std::vector<common_chat_msg>& chatMsgs,
     const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
     bool prefill) {
@@ -504,21 +504,25 @@ bool TextLlmContext::evalMessageWithTools(
   llama_pos tokenIndex = 0;
   while (tokenIndex < nTokens) {
     if (stopGeneration_.load()) {
+      bool rollbackOk = true;
       if (rollbackState_.hasPrefillEntry()) {
         // Recurrent / hybrid path: full-state restore is the only way
         // to drop partially decoded tokens; `removeLastNTokens` is a
         // no-op on recurrent memory and `seq_rm` over a partial tail
         // is rejected by the recurrent module.
         const llama_pos restoredNPast = rollbackState_.prefillEntryNPast();
-        if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
+        const bool forceRestoreFailure =
+            forcePrefillEntryRestoreFailureForTesting_;
+        forcePrefillEntryRestoreFailureForTesting_ = false;
+        if (!forceRestoreFailure &&
+            rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
           nPast_ = restoredNPast;
         } else {
           // Restore underflowed: the recurrent half is in an undefined
           // state. The fallback below is best-effort only and does not
-          // touch recurrent memory; the cache may stay inconsistent
-          // until the next full reset. This is cancel-path bookkeeping,
-          // not thinking-span removal, so we log a warning and continue
-          // rather than throwing.
+          // touch recurrent memory; report rollbackOk=false so
+          // processPromptImpl resets live state and invalidates the
+          // active cache session before any later save can persist it.
           QLOG_IF(
               Priority::WARNING,
               string_format(
@@ -530,13 +534,19 @@ bool TextLlmContext::evalMessageWithTools(
                   restoredNPast,
                   seqId_));
           removeLastNTokens(tokenIndex);
+          nPast_ = restoredNPast;
+          rollbackOk = false;
         }
       } else {
         removeLastNTokens(tokenIndex);
+        if (needsRecurrentSnapshot_ && nPast_ > preRequestNPast_) {
+          nPast_ = preRequestNPast_;
+          rollbackOk = false;
+        }
       }
       stopGeneration_.store(false);
       pendingBatchFirstMsg_ = false;
-      return false;
+      return {.ok = false, .cancelled = true, .rollbackOk = rollbackOk};
     }
     // Cap the current chunk at the snapshot boundary so recurrent /
     // hybrid models can capture the exact end-of-prefill state before
@@ -584,7 +594,7 @@ bool TextLlmContext::evalMessageWithTools(
   }
 
   onPrefillComplete(nPast_, inputTokens.size());
-  return true;
+  return {};
 }
 
 PrefillPlan TextLlmContext::preparePrefill(
@@ -774,7 +784,7 @@ llama_pos TextLlmContext::applyContextDiscard() {
   return 0;
 }
 
-bool TextLlmContext::generateResponse(
+LlmContext::GenerateResponseResult TextLlmContext::generateResponse(
     const std::function<void(const std::string&)>& outputCallback) {
 
   LlamaBatch batch(1, 0, 1); // batch for next token generation
@@ -796,23 +806,23 @@ bool TextLlmContext::generateResponse(
 
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    onCancel(outputCallback);
-    return true;
+    return {
+        .ok = true, .cancelled = true, .rollbackOk = onCancel(outputCallback)};
   }
 
   while (params_.n_predict <= 0 ||
          generatedAfterAccept < static_cast<unsigned>(params_.n_predict)) {
     if (stopGeneration_.load()) {
       stopGeneration_.store(false);
-      onCancel(outputCallback);
-      return true;
+      return {
+          .ok = true, .cancelled = true, .rollbackOk = onCancel(outputCallback)};
     }
 
     ++generatedAfterAccept;
     const SequenceStepResult step =
         onLogitsReady(-1, generatedAfterAccept, outputCallback, &batch);
     if (step.contextOverflow) {
-      return false;
+      return {.ok = false};
     }
     if (step.decodedInline) {
       continue;
@@ -842,11 +852,11 @@ bool TextLlmContext::generateResponse(
   // Mid-loop cancel exits leave `stopGeneration_` set and skip EOT.
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    onCancel(outputCallback);
-    return true;
+    return {
+        .ok = true, .cancelled = true, .rollbackOk = onCancel(outputCallback)};
   }
   onGenerationFinished(outputCallback);
-  return true;
+  return {};
 }
 
 SequenceStepResult TextLlmContext::onLogitsReady(

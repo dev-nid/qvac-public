@@ -50,9 +50,9 @@ public:
    * @param chatMsgs - chat messages.
    * @param is_cache_loaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - eval result (success / cancellation / rollback status).
    */
-  bool evalMessage(
+  EvalMessageResult evalMessage(
       const std::vector<common_chat_msg>& chatMsgs, bool isCacheLoaded,
       bool prefill) override;
 
@@ -64,9 +64,9 @@ public:
    * @param tools - tools.
    * @param isCacheLoaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - eval result (success / cancellation / rollback status).
    */
-  bool evalMessageWithTools(
+  EvalMessageResult evalMessageWithTools(
       const std::vector<common_chat_msg>& chatMsgs,
       const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
       bool prefill) override;
@@ -75,9 +75,9 @@ public:
    * The generate response method. It generates the response token by token.
    *
    * @param output_callback - the output callback.
-   * @return - true if successful, false if context overflow.
+   * @return - generation result (success / cancellation / rollback status).
    */
-  bool generateResponse(
+  GenerateResponseResult generateResponse(
       const std::function<void(const std::string&)>& outputCallback) override;
 
   std::function<void()>
@@ -226,6 +226,12 @@ public:
     return compactor_;
   }
   void compactThinkSpanForTesting() { compactThinkSpan(); }
+  void seedPrefillEntryRollbackForTesting(llama_pos nPast) noexcept {
+    rollbackState_.seedPrefillEntryForTesting(nPast);
+  }
+  void forcePrefillEntryRestoreFailureForTesting(bool value) noexcept {
+    forcePrefillEntryRestoreFailureForTesting_ = value;
+  }
 
 private:
   /// Hook fired exactly once per slot, immediately before the policy
@@ -326,6 +332,7 @@ private:
   llama_pos nPast_ = 0;
   llama_pos firstMsgTokens_ = 0;
   llama_pos perSeqCtxCeiling_ = -1;
+  bool forcePrefillEntryRestoreFailureForTesting_ = false;
   // Snapshot of `nPast_` / `firstMsgTokens_` at `evalMessageWithTools`
   // entry. Restored by `onCancel` to roll back to the pre-request cursor.
   llama_pos preRequestNPast_ = 0;

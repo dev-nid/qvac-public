@@ -196,15 +196,26 @@ public:
    */
   virtual ~LlmContext() = default;
 
+  struct EvalMessageResult {
+    bool ok = true;
+    bool cancelled = false;
+    bool rollbackOk = true;
+
+    operator bool() const noexcept { return ok; }
+  };
+
   /**
    * The eval message method. It evaluates the message and updates the context.
    *
    * @param chatMsgs - chat messages.
    * @param isCacheLoaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - ok=false when inference is stopped during prefill;
+   * cancelled=true when stopped by user cancellation; rollbackOk=false when a
+   * cancellation could not restore the pre-request recurrent state and callers
+   * must reset live state and invalidate cache persistence for this request.
    */
-  virtual bool evalMessage(
+  virtual EvalMessageResult evalMessage(
       const std::vector<common_chat_msg>& chatMsgs, bool isCacheLoaded,
       bool prefill) = 0;
 
@@ -216,20 +227,31 @@ public:
    * @param tools - tools.
    * @param isCacheLoaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - eval result (success / cancellation / rollback status).
    */
-  virtual bool evalMessageWithTools(
+  virtual EvalMessageResult evalMessageWithTools(
       const std::vector<common_chat_msg>& chatMsgs,
       const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
       bool prefill) = 0;
+
+  struct GenerateResponseResult {
+    bool ok = true;
+    bool cancelled = false;
+    bool rollbackOk = true;
+
+    operator bool() const noexcept { return ok; }
+  };
 
   /**
    * The generate response method. It generates the response token by token.
    *
    * @param outputCallback - the output callback.
-   * @return - true if successful, false if context overflow.
+   * @return - ok=false for context overflow; cancelled=true when generation
+   * was stopped by user cancellation; rollbackOk=false when a cancellation
+   * could not restore the pre-request recurrent state and callers must skip
+   * cache persistence for this request.
    */
-  virtual bool generateResponse(
+  virtual GenerateResponseResult generateResponse(
       const std::function<void(const std::string&)>& outputCallback) = 0;
 
   /**

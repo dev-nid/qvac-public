@@ -735,7 +735,7 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
       state_->llmContext_->applyGenerationParams(prompt.generationParams);
   ScopeGuard paramsGuard([&] { restore(); });
 
-  bool evalOk =
+  const LlmContext::EvalMessageResult evalResult =
       resolved.tools.empty()
           ? state_->llmContext_->evalMessage(
                 resolved.chatMsgs, resolved.isCacheLoaded, prompt.prefill)
@@ -745,10 +745,16 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
                 resolved.isCacheLoaded,
                 prompt.prefill);
 
-  if (!evalOk) {
+  if (!evalResult.ok) {
     QLOG_IF(
         Priority::DEBUG,
         "Inference was interrupted during prompt evaluation\n");
+    if (!evalResult.rollbackOk) {
+      resetState(false);
+      if (state_->cacheManager_.has_value()) {
+        state_->cacheManager_->invalidate();
+      }
+    }
     return out;
   }
 
@@ -767,7 +773,9 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
     callback = [&](const std::string& token) { oss << token; };
   }
 
-  if (!state_->llmContext_->generateResponse(callback)) {
+  const LlmContext::GenerateResponseResult generationResult =
+      state_->llmContext_->generateResponse(callback);
+  if (!generationResult.ok) {
     resetState();
     std::string errorMsg = string_format("%s: context overflow\n", __func__);
     throw qvac_errors::StatusError(
@@ -778,9 +786,21 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
     out = oss.str();
   }
 
-  maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
+  if (generationResult.rollbackOk) {
+    maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
+  } else {
+    // The driver could not prove the live recurrent state was rolled back
+    // to the pre-request cursor. Skipping this prompt's save protects the
+    // file immediately, but the active cache session must also be dropped:
+    // otherwise a later same-key prompt could reuse dirty live state, or a
+    // cache-key transition could save that dirty state under the old key.
+    resetState(false);
+    if (state_->cacheManager_.has_value()) {
+      state_->cacheManager_->invalidate();
+    }
+  }
 
-  if (resolved.shouldResetAfterInference) {
+  if (resolved.shouldResetAfterInference && generationResult.rollbackOk) {
     resetState(false);
   }
   return out;

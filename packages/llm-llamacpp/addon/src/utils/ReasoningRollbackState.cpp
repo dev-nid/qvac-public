@@ -105,5 +105,12 @@ void ReasoningRollbackState::seedReasoningBoundaryForTesting(
       "qvac_test_reasoning_boundary_sentinel.bin", nPast);
 }
 
+void ReasoningRollbackState::seedPrefillEntryForTesting(
+    llama_pos nPast) noexcept {
+  // Sentinel path — does not point at a real llama state file. Only
+  // tests should use this to drive restore-failure handling.
+  prefillEntry_.seedForTesting("qvac_test_prefill_entry_sentinel.bin", nPast);
+}
+
 } // namespace utils
 } // namespace qvac_lib_inference_addon_llama

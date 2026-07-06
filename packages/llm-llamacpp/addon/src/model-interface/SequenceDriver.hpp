@@ -217,11 +217,11 @@ public:
 
   /// Fired when the sequence is cancelled (user-requested or fatal error).
   /// Returns `true` when internal rollback (metadata + live KV / recurrent
-  /// state) is coherent with the pre-request cursor and the scheduler may
-  /// persist the driver's state via `saveCache`. Returns `false` when the
+  /// state) is coherent with the pre-request cursor and callers may persist
+  /// the driver's state via `saveCache`. Returns `false` when the
   /// rollback could not be completed (e.g. recurrent full-state restore
-  /// refused): live state may not match `getNPast()` and the scheduler
-  /// MUST skip cache persistence for this slot to preserve the last
+  /// refused): live state may not match `getNPast()` and callers MUST skip
+  /// cache persistence for this request to preserve the last
   /// known-good on-disk cache. Implementations that need no rollback
   /// (single hook) may simply return `true`.
   [[nodiscard]] virtual bool

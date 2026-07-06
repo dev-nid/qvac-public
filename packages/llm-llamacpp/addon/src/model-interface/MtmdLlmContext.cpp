@@ -455,13 +455,13 @@ void MtmdLlmContext::tokenizeChat(
   resetMedia();
 }
 
-bool MtmdLlmContext::evalMessage(
+LlmContext::EvalMessageResult MtmdLlmContext::evalMessage(
     const std::vector<common_chat_msg>& chatMsgs, bool isCacheLoaded,
     bool prefill) {
   return evalMessageWithTools(chatMsgs, {}, isCacheLoaded, prefill);
 }
 
-bool MtmdLlmContext::evalMessageWithTools(
+LlmContext::EvalMessageResult MtmdLlmContext::evalMessageWithTools(
     const std::vector<common_chat_msg>& chatMsgs,
     const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
     bool prefill) {
@@ -597,6 +597,7 @@ bool MtmdLlmContext::evalMessageWithTools(
     const auto* chunk = mtmd_input_chunks_get(chunksPtr, i);
 
     if (stopGeneration_.load()) {
+      bool rollbackOk = true;
       if (rollbackState_.hasPrefillEntry()) {
         // Recurrent / hybrid path: restore the pre-prefill snapshot to
         // drop partially decoded chunks (including any committed image
@@ -609,10 +610,10 @@ bool MtmdLlmContext::evalMessageWithTools(
         } else {
           // Restore underflowed: the recurrent half is in an undefined
           // state. The fallback below is best-effort only; recurrent
-          // memory does not honour `removeLastNTokens`, so the cache
-          // may stay inconsistent until the next full reset. This is
-          // cancel-path bookkeeping, not thinking-span removal, so we
-          // log a warning and continue rather than throwing.
+          // memory does not honour `removeLastNTokens`. Report
+          // rollbackOk=false so processPromptImpl resets live state and
+          // invalidates the active cache session before any later save
+          // can persist it.
           QLOG_IF(
               Priority::WARNING,
               string_format(
@@ -626,14 +627,20 @@ bool MtmdLlmContext::evalMessageWithTools(
           const llama_pos totalDelta = nPastLocal - current_.pos;
           current_.pos = nPastLocal;
           removeLastNTokens(totalDelta);
+          current_ = prefillEntryUsage;
+          rollbackOk = false;
         }
       } else {
         const llama_pos totalDelta = nPastLocal - current_.pos;
         current_.pos = nPastLocal;
         removeLastNTokens(totalDelta);
+        if (needsRecurrentSnapshot_ && current_.pos > prefillEntryUsage.pos) {
+          current_ = prefillEntryUsage;
+          rollbackOk = false;
+        }
       }
       stopGeneration_.store(false);
-      return false;
+      return {.ok = false, .cancelled = true, .rollbackOk = rollbackOk};
     }
     int32_t res;
     if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
@@ -703,7 +710,7 @@ bool MtmdLlmContext::evalMessageWithTools(
     }
   }
   tools_.onEvalComplete(current_.pos, nPositions);
-  return true;
+  return {};
 }
 
 void MtmdLlmContext::flushPendingUtf8ToCallback(
@@ -827,7 +834,7 @@ void MtmdLlmContext::applyContextDiscard() {
   }
 }
 
-bool MtmdLlmContext::generateResponse(
+LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
     const std::function<void(const std::string&)>& outputCallback) {
 
   int nRemain = params_.n_predict;
@@ -863,18 +870,19 @@ bool MtmdLlmContext::generateResponse(
 
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    // Single-prompt cancel: no cache save runs on this path, so the
-    // rollback-ok signal is not consumed here (it exists for the batch
-    // scheduler's saveCache gating).
-    (void)cancelGenerationCleanup(outputCallback);
-    return true;
+    return {
+        .ok = true,
+        .cancelled = true,
+        .rollbackOk = cancelGenerationCleanup(outputCallback)};
   }
 
   while (nRemain != 0) {
     if (stopGeneration_.load()) {
       stopGeneration_.store(false);
-      (void)cancelGenerationCleanup(outputCallback);
-      return true;
+      return {
+          .ok = true,
+          .cancelled = true,
+          .rollbackOk = cancelGenerationCleanup(outputCallback)};
     }
     if ((current_.pos + 1 >
              static_cast<llama_pos>(llama_n_ctx(modelCtx_.lctx)) ||
@@ -893,7 +901,7 @@ bool MtmdLlmContext::generateResponse(
               protectedPrefix_.pos,
               tools_.anchor(),
               tools_.enabled() ? "true" : "false"));
-      return false;
+      return {.ok = false};
     }
     applyContextDiscard();
 
@@ -1046,8 +1054,10 @@ bool MtmdLlmContext::generateResponse(
   // Mid-loop cancel exits leave `stopGeneration_` set and skip EOT.
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    (void)cancelGenerationCleanup(outputCallback);
-    return true;
+    return {
+        .ok = true,
+        .cancelled = true,
+        .rollbackOk = cancelGenerationCleanup(outputCallback)};
   }
   if (nRemain == 0) {
     flushPendingUtf8ToCallback(outputCallback);
@@ -1059,7 +1069,7 @@ bool MtmdLlmContext::generateResponse(
   // prefill-entry rollback checkpoint is no longer reachable. Drop
   // its temp file now instead of waiting for the next inference.
   rollbackState_.clearPrefillEntry();
-  return true;
+  return {};
 }
 
 std::function<void()>

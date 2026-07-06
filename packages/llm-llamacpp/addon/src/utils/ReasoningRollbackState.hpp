@@ -132,6 +132,12 @@ public:
   // `llama_state_seq_load_file` if anything tried to restore from it.
   void seedReasoningBoundaryForTesting(llama_pos nPast) noexcept;
 
+  // Test seam. Seeds the prefill-entry snapshot with a sentinel file
+  // path so unit tests can force `restorePrefillEntry()` to fail after
+  // `hasPrefillEntry()` succeeds. Production code MUST use
+  // `capturePrefillEntry` instead.
+  void seedPrefillEntryForTesting(llama_pos nPast) noexcept;
+
 private:
   RecurrentStateSnapshot prefillEntry_;
   RecurrentStateSnapshot reasoningBoundary_;

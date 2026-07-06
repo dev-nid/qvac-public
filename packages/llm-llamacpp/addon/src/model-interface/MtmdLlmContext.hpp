@@ -72,9 +72,9 @@ public:
    * @param chatMsgs - chat messages.
    * @param is_cache_loaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - eval result (success / cancellation / rollback status).
    */
-  bool evalMessage(
+  EvalMessageResult evalMessage(
       const std::vector<common_chat_msg>& chatMsgs, bool isCacheLoaded,
       bool prefill) override;
 
@@ -86,9 +86,9 @@ public:
    * @param tools - tools.
    * @param isCacheLoaded - whether the cache is loaded.
    * @param prefill - whether to only prefill context without generation setup.
-   * @return - true if successful, false if inference is stopped.
+   * @return - eval result (success / cancellation / rollback status).
    */
-  bool evalMessageWithTools(
+  EvalMessageResult evalMessageWithTools(
       const std::vector<common_chat_msg>& chatMsgs,
       const std::vector<common_chat_tool>& tools, bool isCacheLoaded,
       bool prefill) override;
@@ -97,9 +97,9 @@ public:
    * The generate response method. It generates the response.
    *
    * @param output_callback - the output callback.
-   * @return - true if successful, false if context overflow.
+   * @return - generation result (success / cancellation / rollback status).
    */
-  bool generateResponse(
+  GenerateResponseResult generateResponse(
       const std::function<void(const std::string&)>& outputCallback) override;
 
   std::function<void()>
@@ -353,9 +353,10 @@ private:
   // is safe. Returns `false` when the recurrent full-state restore was
   // refused: metadata is still forced back to `preRequestUsage_` /
   // `preRequestProtectedPrefix_` so callers see a sane cursor, but live
-  // recurrent state may not match, so the batch scheduler must skip
-  // `saveCache` for this slot. Single-prompt callers can discard the
-  // return value; no cache save runs on their cancel path.
+  // recurrent state may not match, so callers must skip `saveCache`
+  // for this request. The continuous-batch path consumes this directly
+  // from `onCancel`; the single-prompt path propagates it through
+  // `GenerateResponseResult::rollbackOk`.
   [[nodiscard]] bool cancelGenerationCleanup(
       const std::function<void(const std::string&)>& outputCallback);
 
