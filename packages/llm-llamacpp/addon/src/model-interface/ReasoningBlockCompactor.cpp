@@ -71,6 +71,16 @@ void ReasoningBlockCompactor::setOpenSpan(llama_pos start) {
   // defensive backstop for future callers that bypass those sites and
   // would otherwise drive `compact()` into its no-boundary
   // `FailedKvWiped` branch.
+  if (needsRecurrentSnapshot_ && slideInvalidatedBoundary_) {
+    // Generated-opener templates can slide after the recurrent boundary
+    // snapshot is captured but before `<think>` is detected. The slide
+    // clears that snapshot because its coordinates are stale. Once an opener
+    // appears, reasoning was actually emitted, so final compaction must
+    // hard-fail rather than silently refusing to track the span.
+    slideInvalidatedSpan_ = true;
+    clearSpan();
+    return;
+  }
   if (needsRecurrentSnapshot_ && !rollback_.hasReasoningBoundary()) {
     return;
   }
@@ -189,6 +199,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     ~ResetGuard() {
       self->thinkSpan_.reset();
       self->slideInvalidatedSpan_ = false;
+      self->slideInvalidatedBoundary_ = false;
       self->slideInvalidatedPos_ = 0;
       self->slideInvalidatedDiscarded_ = 0;
       self->rollback_.clearReasoningBoundary();
@@ -202,7 +213,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
         Priority::WARNING,
         string_format(
             "%s thinking-block compaction failed: generation-time context "
-            "slide invalidated a tracked reasoning span (pos=%d, "
+            "slide invalidated tracked reasoning state (pos=%d, "
             "discarded=%d, seqId=%d); wiping sequence and hard-failing so "
             "reasoning does not remain in cache\n",
             labelTag,
@@ -213,7 +224,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     out.kind = Outcome::Kind::FailedKvWiped;
     out.failureMessage = string_format(
         "%s ReasoningBlockCompactor::compact: generation-time context "
-        "slide invalidated tracked reasoning span (pos=%d, discarded=%d, "
+        "slide invalidated tracked reasoning state (pos=%d, discarded=%d, "
         "seqId=%d)",
         labelTag,
         slideInvalidatedPos_,

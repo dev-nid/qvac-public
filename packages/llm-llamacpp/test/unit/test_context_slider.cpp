@@ -383,6 +383,86 @@ TEST_F(
       << "slide-invalidation failures are not successful reasoning discards";
 }
 
+TEST_F(
+    ContextSliderTest,
+    GenerationSlideBeforeGeneratedOpenerDefersFailureUntilOpenerAppears) {
+  ReasoningRollbackState rollback;
+  ToolsCompactController tools(std::nullopt);
+  ReasoningBlockCompactor compactor(rollback, tools);
+  ContextShifter shifter(compactor, rollback);
+  FakeLlamaContextOps ops(/*ctxSize=*/100);
+
+  shifter.setDiscardBudget(20);
+  compactor.setRemoveThinkingFromContext(true);
+  compactor.setReasoningEnabled(true);
+  compactor.setNeedsRecurrentSnapshot(true);
+  rollback.seedReasoningBoundaryForTesting(/*nPast=*/60);
+  ASSERT_TRUE(rollback.hasReasoningBoundary());
+
+  const auto slide = shifter.applyGenerationDiscard(
+      /*ctx=*/nullptr,
+      kSeqId,
+      /*pos=*/100,
+      /*protectedPrefixPos=*/10,
+      /*effectiveCtx=*/100,
+      /*cacheTokens=*/-1,
+      "[Test]",
+      ops);
+
+  EXPECT_EQ(slide.kind, ContextShifter::Outcome::Kind::Slid);
+  EXPECT_FALSE(rollback.hasReasoningBoundary())
+      << "generation slides clear the stale recurrent boundary immediately";
+
+  compactor.setOpenSpan(/*start=*/80);
+  EXPECT_FALSE(compactor.hasOpenSpan())
+      << "the opener is not trackable after its boundary was invalidated";
+
+  const auto outcome =
+      compactor.compact(/*ctx=*/nullptr, kSeqId, slide.newPos, "[Test]");
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
+      << "a generated opener after a boundary-invalidating slide must "
+         "hard-fail instead of making remove_thinking_from_context a NoOp";
+  EXPECT_NE(
+      outcome.failureMessage.find("slide invalidated"), std::string::npos);
+  EXPECT_EQ(compactor.blockDiscards(), 0)
+      << "slide-invalidation failures are not successful reasoning discards";
+}
+
+TEST_F(
+    ContextSliderTest,
+    GenerationSlideBeforeGeneratedOpenerNoOpsWhenNoOpenerAppears) {
+  ReasoningRollbackState rollback;
+  ToolsCompactController tools(std::nullopt);
+  ReasoningBlockCompactor compactor(rollback, tools);
+  ContextShifter shifter(compactor, rollback);
+  FakeLlamaContextOps ops(/*ctxSize=*/100);
+
+  shifter.setDiscardBudget(20);
+  compactor.setRemoveThinkingFromContext(true);
+  compactor.setReasoningEnabled(true);
+  compactor.setNeedsRecurrentSnapshot(true);
+  rollback.seedReasoningBoundaryForTesting(/*nPast=*/60);
+
+  const auto slide = shifter.applyGenerationDiscard(
+      /*ctx=*/nullptr,
+      kSeqId,
+      /*pos=*/100,
+      /*protectedPrefixPos=*/10,
+      /*effectiveCtx=*/100,
+      /*cacheTokens=*/-1,
+      "[Test]",
+      ops);
+
+  EXPECT_EQ(slide.kind, ContextShifter::Outcome::Kind::Slid);
+  EXPECT_FALSE(rollback.hasReasoningBoundary());
+
+  const auto outcome =
+      compactor.compact(/*ctx=*/nullptr, kSeqId, slide.newPos, "[Test]");
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp)
+      << "a boundary-invalidating slide should only hard-fail if reasoning is "
+         "actually emitted later";
+}
+
 TEST_F(ContextSliderTest, GenerationSlideScenario_NoDiscardAllowed) {
   ToolsCompactController controller(std::nullopt);
   FakeLlamaContextOps ops(/*ctxSize=*/500);

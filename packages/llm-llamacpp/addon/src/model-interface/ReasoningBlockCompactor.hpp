@@ -33,8 +33,8 @@ namespace qvac_lib_inference_addon_llama {
 // and `Outcome::Kind::FailedKvWiped` on hybrid restore underflow,
 // hybrid replay rejection, recurrent partial-resident spans, recurrent
 // open spans without a captured close marker, generation slides that
-// invalidate a tracked reasoning span, or the defensive no-boundary
-// branch (sequence memory was best-effort cleared).
+// invalidate tracked reasoning state, or the defensive no-boundary branch
+// (sequence memory was best-effort cleared).
 // Callers must run the live-KV recovery documented on the outcome kind
 // (roll back `[preRequestCursor, currentCursor)` or reset positional
 // accounting to zero) before rethrowing `qvac_errors::StatusError` so
@@ -100,6 +100,12 @@ public:
     slideInvalidatedPos_ = pos;
     slideInvalidatedDiscarded_ = discarded;
     clearSpan();
+  }
+  void markBoundaryInvalidatedByGenerationSlide(
+      llama_pos pos, llama_pos discarded) noexcept {
+    slideInvalidatedBoundary_ = true;
+    slideInvalidatedPos_ = pos;
+    slideInvalidatedDiscarded_ = discarded;
   }
 
   // ---- Close-marker capture lifecycle ----
@@ -213,7 +219,7 @@ public:
   //     failure, a defensive missing-boundary hit, a recurrent
   //     partial-resident reasoning span left after a tail trim, a recurrent
   //     open reasoning span with no captured close marker, or a generation
-  //     slide that invalidated a tracked reasoning span:
+  //     slide that invalidated tracked reasoning state:
   //     `compact()` best-effort clears the sequence memory (attention
   //     KV cells + recurrent state) and returns
   //     `Outcome::Kind::FailedKvWiped`. The caller MUST reset its
@@ -305,6 +311,7 @@ public:
     thinkSpan_.reset();
     pendingThinkCloseCapture_ = false;
     slideInvalidatedSpan_ = false;
+    slideInvalidatedBoundary_ = false;
     slideInvalidatedPos_ = 0;
     slideInvalidatedDiscarded_ = 0;
   }
@@ -316,6 +323,7 @@ private:
   std::optional<std::pair<llama_pos, llama_pos>> thinkSpan_;
   bool pendingThinkCloseCapture_ = false;
   bool slideInvalidatedSpan_ = false;
+  bool slideInvalidatedBoundary_ = false;
   llama_pos slideInvalidatedPos_ = 0;
   llama_pos slideInvalidatedDiscarded_ = 0;
 

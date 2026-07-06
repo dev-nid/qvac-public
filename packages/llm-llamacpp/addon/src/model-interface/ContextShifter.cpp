@@ -48,10 +48,17 @@ ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
     ++nSlides_;
     // Recorded span positions are no longer valid after the shift. If a
     // reasoning span was active, mark final compaction as a strict failure
-    // rather than silently dropping the stale coordinates; otherwise clear any
+    // rather than silently dropping the stale coordinates. For generated-opener
+    // recurrent paths, a boundary snapshot can exist before `<think>` is
+    // detected; remember that the boundary was invalidated so a later opener
+    // hard-fails instead of becoming an untracked no-op. Otherwise clear any
     // pending close-capture state left over from earlier detection.
     if (compactor_.hasOpenSpan()) {
       compactor_.markSpanInvalidatedByGenerationSlide(pos, outcome.discarded);
+    } else if (rollback_.hasReasoningBoundary()) {
+      compactor_.markBoundaryInvalidatedByGenerationSlide(
+          pos, outcome.discarded);
+      compactor_.clearSpan();
     } else {
       compactor_.clearSpan();
     }
