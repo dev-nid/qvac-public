@@ -189,25 +189,32 @@ export interface GenerationParams {
    * reasoning channel.
    *
    * Recurrent / hybrid-SSM models (Qwen3.5, Qwen3-Next, Jamba,
-   * Granite-Hybrid, ...) are supported when the active chat template
-   * force-opens the reasoning channel during prefill and the reasoning
-   * close marker tokenises to a single token. The recurrent half of
-   * the memory module is snapshotted at that prefill boundary,
-   * restored at end-of-generation, and the close marker plus
-   * post-reasoning tail are replayed through the decoder so both KV
-   * halves stay consistent. If a hybrid / recurrent model uses a
-   * generated reasoning opener or a multi-token close marker while
-   * this feature is enabled, the request fails with `StatusError`
-   * instead of silently preserving reasoning in cache. Prefill-only
+   * Granite-Hybrid, ...) are supported when the reasoning close
+   * marker tokenises to a single vocab token. The recurrent half of
+   * the memory module is snapshotted at the end-of-prefill boundary
+   * and restored at end-of-generation. The replay buffer then feeds
+   * any generated-opener seed tokens, the canonical close marker, and
+   * the post-reasoning tail back through the decoder so both KV halves
+   * stay consistent. Chat templates that force-open the reasoning
+   * channel during prefill and templates that let the model generate
+   * the opener are both supported: on the generated-opener path, every
+   * sampled token from end-of-prefill up to and including the opener
+   * flip is seeded into the replay buffer so the restored snapshot
+   * still lands in a balanced `<think>...</think>` state on the next
+   * turn. If a hybrid / recurrent model uses a multi-token close
+   * marker while this feature is enabled, the request fails with
+   * `StatusError` instead of silently preserving reasoning in cache.
+   * Prefill-only
    * (cache-warm) requests are exempt from this check: they never
    * enter generation and cannot emit reasoning tokens, so a cache
    * warm on a non-conforming hybrid model still succeeds.
    *
    * Uniform hard-fail contract: any inability to remove the reasoning
    * span from cache — whether the end-of-prefill boundary snapshot
-   * capture, the pure-attention `seq_rm + seq_add` primitive, or the
-   * hybrid restore / replay step, or an unsupported hybrid template
-   * shape — is surfaced to the caller as a `StatusError`. There is no
+   * capture, the pure-attention `seq_rm + seq_add` primitive, the
+   * hybrid restore / replay step, or an unsupported multi-token
+   * recurrent close marker — is surfaced to the caller as a
+   * `StatusError`. There is no
    * soft-failure counter: if the feature is enabled and cache cleanup
    * cannot complete, the request fails rather than delivering an
    * answer with the reasoning span still resident in cache.

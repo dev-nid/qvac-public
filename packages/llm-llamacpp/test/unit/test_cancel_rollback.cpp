@@ -425,7 +425,8 @@ TEST_F(TextLlmContextCancelTest, OnCancelRestoresPreRequestSnapshotOnHybrid) {
   // The pre-request checkpoint sits at `preRequestNPast`, so restore
   // must wind the cursor BACK to that cursor — not leave it at the
   // post-prefill position.
-  driver.onCancel([](const std::string&) {});
+  EXPECT_TRUE(driver.onCancel([](const std::string&) {}))
+      << "onCancel must report rollback-ok when the recurrent restore succeeds";
 
   EXPECT_EQ(driver.getNPast(), preRequestNPast)
       << "onCancel on hybrid must restore to the PRE-REQUEST cursor, not "
@@ -467,7 +468,11 @@ TEST_F(
       chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
   ASSERT_GT(driver.getNPast(), preRequestNPast);
 
-  EXPECT_NO_THROW(driver.onCancel([](const std::string&) {}));
+  bool rollbackOk = false;
+  EXPECT_NO_THROW(rollbackOk = driver.onCancel([](const std::string&) {}));
+  EXPECT_TRUE(rollbackOk)
+      << "pure-attention onCancel must report rollback-ok "
+         "(no recurrent restore involved)";
 
   EXPECT_EQ(driver.getNPast(), preRequestNPast)
       << "onCancel on pure-attention must roll the cache back to the "
@@ -560,7 +565,10 @@ TEST_F(
          "for the regression assertion to be meaningful. preRequestNPast="
       << preRequestNPast << " ctxSize=" << ctxSize;
 
-  EXPECT_NO_THROW(driver.onCancel([](const std::string&) {}));
+  bool rollbackOk = false;
+  EXPECT_NO_THROW(rollbackOk = driver.onCancel([](const std::string&) {}));
+  EXPECT_TRUE(rollbackOk)
+      << "pure-attention onCancel after a slide must still report rollback-ok";
 
   const llama_pos postCancelNPast = driver.getNPast();
   EXPECT_LT(postCancelNPast, preRequestNPast)

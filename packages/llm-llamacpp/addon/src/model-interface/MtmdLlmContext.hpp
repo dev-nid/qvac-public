@@ -259,7 +259,7 @@ public:
   void onGenerationFinished(
       const std::function<void(const std::string&)>& outputCallback) override;
 
-  void onCancel(
+  [[nodiscard]] bool onCancel(
       const std::function<void(const std::string&)>& outputCallback) override;
 
   void validatePromptPolicy(
@@ -348,7 +348,15 @@ private:
   // attention KV and recurrent state. On pure-attention models or when
   // no snapshot is available, only flushes the UTF-8 buffer. Used by
   // the cancel exits in `generateResponse`.
-  void cancelGenerationCleanup(
+  // Returns `true` when the rollback (metadata + live memory) is
+  // coherent with the pre-request cursor and any downstream cache save
+  // is safe. Returns `false` when the recurrent full-state restore was
+  // refused: metadata is still forced back to `preRequestUsage_` /
+  // `preRequestProtectedPrefix_` so callers see a sane cursor, but live
+  // recurrent state may not match, so the batch scheduler must skip
+  // `saveCache` for this slot. Single-prompt callers can discard the
+  // return value; no cache save runs on their cancel path.
+  [[nodiscard]] bool cancelGenerationCleanup(
       const std::function<void(const std::string&)>& outputCallback);
 
   ToolsCompactController& tools_;
@@ -419,9 +427,9 @@ private:
   // batch path and `evalMessageWithTools` on the single-prompt path,
   // then consulted by `snapshotForRecurrentRollback`: prefill-only
   // requests never enter generation and cannot emit reasoning tokens,
-  // so the hard-fail contract for unsupported hybrid template shapes
-  // does not apply. See `TextLlmContext::isPrefillOnlyRequest_` for
-  // the full rationale.
+  // so the hard-fail contract for unsupported multi-token recurrent
+  // close markers does not apply. See
+  // `TextLlmContext::isPrefillOnlyRequest_` for the full rationale.
   bool isPrefillOnlyRequest_ = false;
 
   // Per-request toggle for the post-generation thinking-block KV

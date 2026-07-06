@@ -125,8 +125,9 @@ bool snapshotRecurrentState(
 // truly empty state — the same end state the in-memory variant
 // achieved by restoring the serialized empty-state bytes.
 // No-op when `snapshot` is empty (i.e. nothing has been captured).
-// Returns true on success, false when the underlying load reports a
-// 0-byte read (corrupted / missing / truncated file).
+// Returns true on success, false when the captured-empty sequence
+// clear is refused or the underlying load reports a 0-byte read
+// (corrupted / missing / truncated file).
 bool restoreRecurrentState(
     ::llama_context* lctx, llama_seq_id seqId,
     const RecurrentStateSnapshot& snapshot);

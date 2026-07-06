@@ -200,7 +200,7 @@ public:
   void onGenerationFinished(
       const std::function<void(const std::string&)>& outputCallback) override;
 
-  void onCancel(
+  [[nodiscard]] bool onCancel(
       const std::function<void(const std::string&)>& outputCallback) override;
 
   void validatePromptPolicy(
@@ -386,8 +386,8 @@ private:
   // scheduler / single-prompt caller and consulted by the recurrent
   // reasoning snapshot path: prefill-only requests never enter
   // generation and cannot emit reasoning tokens, so the hard-fail
-  // contract for unsupported hybrid template shapes does not apply.
-  // Prevents cache-warm calls from failing on hybrid models that
+  // contract for unsupported multi-token recurrent close markers does
+  // not apply. Prevents cache-warm calls from failing on models that
   // would only fail at generation time.
   bool isPrefillOnlyRequest_ = false;
 

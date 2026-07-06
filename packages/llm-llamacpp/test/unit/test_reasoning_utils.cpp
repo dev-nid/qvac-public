@@ -198,3 +198,44 @@ TEST_F(ReasoningUtilsTest, UpdateBufferStaysOutsideForUnrelatedContent) {
 
   EXPECT_FALSE(state.inside_reasoning);
 }
+
+// Regression guard for the recurrent-replay close-token seeding
+// invariant: on chat templates whose `state.tags.close` carries
+// surrounding whitespace padding (Qwen3's canonical form is
+// `"\n</think>\n\n"`), `updateReasoningBuffer` runs
+// `find(state.tags.close)` against the streamed piece buffer, so the
+// `inside_reasoning` flip fires only once the entire padded string is
+// present — i.e. on the LAST padding piece, not on `</think>` itself.
+//
+// `TextLlmContext` / `MtmdLlmContext` therefore must NOT seed the
+// recurrent replay buffer with the sampled token that tripped the
+// flip (that would be a trailing newline piece), and instead pass
+// `reasoningState_.cached_close_tag_token` — the canonical
+// single-vocab `</think>`. This test pins the flip-token semantics
+// on which that fix relies; if the detector ever moves to matching
+// the canonical close directly and the drivers regress to seeding
+// `tokenId`, one of the two must change together.
+TEST_F(ReasoningUtilsTest, UpdateBufferFlipDefersToTrailingPaddingOnPaddedClose) {
+  ReasoningState state;
+  state.tags = {.open = "<think>", .close = "\n</think>\n\n"};
+  state.inside_reasoning = true;
+
+  updateReasoningBuffer("\n", state);
+  EXPECT_TRUE(state.inside_reasoning)
+      << "leading padding newline alone does not complete the padded close";
+
+  updateReasoningBuffer("</think>", state);
+  EXPECT_TRUE(state.inside_reasoning)
+      << "canonical `</think>` piece does not by itself complete the padded "
+         "close — trailing padding is still pending";
+
+  updateReasoningBuffer("\n", state);
+  EXPECT_TRUE(state.inside_reasoning)
+      << "one trailing newline still leaves padding incomplete";
+
+  updateReasoningBuffer("\n", state);
+  EXPECT_FALSE(state.inside_reasoning)
+      << "flip fires only on the LAST padding token, so the sampled `tokenId` "
+         "at the flip site is a padding newline — not the canonical close. "
+         "Recurrent replay must seed `cached_close_tag_token`, never `tokenId`";
+}

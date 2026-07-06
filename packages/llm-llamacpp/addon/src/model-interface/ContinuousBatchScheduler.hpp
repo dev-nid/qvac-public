@@ -35,7 +35,14 @@ namespace qvac_lib_inference_addon_llama::batching {
 /// (natural stop) so onGenerationCompletePolicy runs; a prefill-only slot only
 /// flushes via onSequenceEnd. One place for the mapping every terminal path
 /// shares (normal drain, cancel-all, decode-error finalization).
-void finalizeTerminalDriver(
+///
+/// Returns `true` when the terminal hook left the driver in a state safe
+/// to persist via `saveCache`. Cancel/DecodeError paths forward
+/// `onCancel`'s rollback-ok signal; other terminal paths always return
+/// `true`. Callers that persist cache MUST skip `saveCache` when this
+/// returns `false` so a failed recurrent rollback cannot leak the
+/// cancelled request into the on-disk cache.
+[[nodiscard]] bool finalizeTerminalDriver(
     SequenceDriver& driver, StopReason reason, bool prefillOnly,
     const std::function<void(const std::string&)>& outputCallback);
 
@@ -103,10 +110,12 @@ struct RuntimeStatsSnapshot {
 
   void reset();
 
-  /// Account for one `llama_decode` step of `stepDuration`. A step carrying
-  /// any decode token is charged wholly to decode; only pure-prefill steps
-  /// feed the prefill bucket, so prompt tokens piggybacking a decode step
-  /// never inflate the prefill rate.
+  /// Account for one `llama_decode` step of `stepDuration`. Mixed
+  /// prefill+decode steps are split proportionally by token count between
+  /// the prefill and decode buckets, so batch TTFT / ppTPS reflect the
+  /// prompt work that piggybacks a decode step during continuous batching.
+  /// Compactor replay decode is excluded because `onGenerationFinished`
+  /// runs outside this timer, not by any special-casing here.
   void recordDecodeStep(
       uint64_t numActiveSequences, uint64_t prefillTokens,
       uint64_t decodeTokens, std::chrono::nanoseconds stepDuration);
@@ -120,14 +129,17 @@ struct RuntimeStatsSnapshot {
   [[nodiscard]] double elapsedMs() const;
 
   /// Generation throughput (tok/s) from decode-step timing, 0 if none. Batch
-  /// analogue of single-prompt `TPS`.
+  /// analogue of single-prompt `TPS`. Mixed-step time is split
+  /// proportionally with the prefill bucket (see `recordDecodeStep`).
   [[nodiscard]] double decodeTokensPerSecond() const;
-  /// Prompt-processing throughput (tok/s) from pure-prefill-step timing, 0 if
-  /// none. Batch analogue of `ppTPS`.
+  /// Prompt-processing throughput (tok/s) from prefill-step timing, 0 if
+  /// none. Batch analogue of `ppTPS`. Mixed steps contribute their prefill
+  /// share of both tokens and time (see `recordDecodeStep`).
   [[nodiscard]] double prefillTokensPerSecond() const;
-  /// Wall-clock time (ms) spent in pure-prefill batch steps. Batch
-  /// analogue of single-prompt `TTFT`; excludes decode and compactor
-  /// replay decode so internal cache maintenance does not inflate it.
+  /// Wall-clock time (ms) attributed to prefill across batch steps
+  /// (pure-prefill steps plus the prefill share of mixed steps). Batch
+  /// analogue of single-prompt `TTFT`; excludes compactor replay decode
+  /// because that runs outside this timer, not by mixed-step gating.
   [[nodiscard]] double prefillTimeMs() const noexcept { return prefillTimeMs_; }
 
 private:

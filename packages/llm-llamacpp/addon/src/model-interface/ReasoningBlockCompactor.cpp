@@ -223,13 +223,16 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
   //     to `pos` and let the compaction paths drop exactly the
   //     resident remainder.
   //
-  // Recurrent / hybrid path stays as a NoOp here even in the
-  // partial-resident sub-case: replay is anchored at `snapshotPos`
-  // with a captured post-reasoning tail; if the live cache is shorter
-  // than that captured tail we cannot reconcile the two without the
-  // pre-request rollback anchor that lives in the driver, so the
-  // driver's own `onCancel` / `FailedKvIntact` paths are the only
-  // safe recovery.
+  // Recurrent / hybrid path cannot compact the partial-resident
+  // sub-case: replay is anchored at `snapshotPos` with a captured
+  // post-reasoning tail; if the live cache is shorter than that
+  // captured tail, the replay buffer and live cache no longer describe
+  // the same suffix. Returning `NoOp` here would complete the request
+  // with `[start, pos)` reasoning tokens still resident, violating the
+  // default-on strict cleanup contract. The compactor does not own the
+  // driver's pre-request rollback anchor, so the only self-contained
+  // recovery is to wipe the sequence and force the caller through the
+  // existing `FailedKvWiped` hard-fail path.
   if (recordedEnd > pos) {
     if (start >= pos) {
       return out;
@@ -241,14 +244,26 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
               "%s thinking-block compaction: recurrent path cannot "
               "reconcile clamped span [%d, %d) against captured "
               "post-reasoning tail (recordedEnd=%d, pos=%d, "
-              "seqId=%d); leaving cleanup to the driver's rollback "
-              "path\n",
+              "seqId=%d); wiping sequence and hard-failing so "
+              "reasoning does not remain in cache\n",
               labelTag,
               start,
               pos,
               recordedEnd,
               pos,
               seqId));
+      clearSeqOnFailure(ctx, seqId);
+      out.kind = Outcome::Kind::FailedKvWiped;
+      out.failureMessage = string_format(
+          "%s ReasoningBlockCompactor::compact: recurrent / hybrid "
+          "partial-resident reasoning span [%d, %d) remains after tail "
+          "trim (recordedEnd=%d, pos=%d, seqId=%d)",
+          labelTag,
+          start,
+          pos,
+          recordedEnd,
+          pos,
+          seqId);
       return out;
     }
   }

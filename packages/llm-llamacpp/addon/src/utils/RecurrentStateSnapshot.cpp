@@ -194,13 +194,15 @@ bool restoreRecurrentState(
     // sequence-clear primitive is the correct semantic equivalent —
     // both attention KV cells and the recurrent / hybrid hidden
     // state for `seqId` are dropped, so the next decode starts from
-    // pos 0 with a virgin memory.
+    // pos 0 with a virgin memory. Propagate the primitive's result:
+    // reporting success after a refused clear would let callers save
+    // metadata for an empty sequence while live memory still contains
+    // stale recurrent state.
     auto* mem = llama_get_memory(lctx);
     if (mem == nullptr) {
       return false;
     }
-    llama_memory_seq_rm(mem, seqId, -1, -1);
-    return true;
+    return llama_memory_seq_rm(mem, seqId, -1, -1);
   }
   size_t nTokenCount = 0;
   const size_t loadedBytes = llama_state_seq_load_file(

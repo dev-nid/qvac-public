@@ -216,7 +216,15 @@ public:
       const std::function<void(const std::string&)>& outputCallback) = 0;
 
   /// Fired when the sequence is cancelled (user-requested or fatal error).
-  virtual void
+  /// Returns `true` when internal rollback (metadata + live KV / recurrent
+  /// state) is coherent with the pre-request cursor and the scheduler may
+  /// persist the driver's state via `saveCache`. Returns `false` when the
+  /// rollback could not be completed (e.g. recurrent full-state restore
+  /// refused): live state may not match `getNPast()` and the scheduler
+  /// MUST skip cache persistence for this slot to preserve the last
+  /// known-good on-disk cache. Implementations that need no rollback
+  /// (single hook) may simply return `true`.
+  [[nodiscard]] virtual bool
   onCancel(const std::function<void(const std::string&)>& outputCallback) = 0;
 
   /// Try to populate this sequence's KV-cache from a previously

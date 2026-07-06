@@ -126,6 +126,19 @@ public:
   // matching close marker before the answer tail, which is an
   // unbalanced (out-of-distribution) recurrent state for hybrid models
   // on the next turn.
+  //
+  // Callers MUST pass the *canonical* single-vocab close token
+  // (`reasoningState_.cached_close_tag_token`), not the sampled token
+  // that tripped the string-search detector flip in
+  // `updateReasoningBuffer`. Chat templates whose close carries
+  // surrounding whitespace padding (e.g. Qwen3's `"\n</think>\n\n"`)
+  // defer the flip onto a trailing padding piece — seeding that
+  // padding token would drive the recurrent replay through a newline
+  // with no matching `</think>`, defeating the balancing invariant
+  // this method exists to preserve. `cached_close_tag_token` is
+  // populated (non-null) whenever the recurrent-capture policy
+  // admits us (both `close_is_single_token == true`); passing
+  // `LLAMA_TOKEN_NULL` is silently dropped rather than seeded.
   void recordCloseMarkerForReplay(llama_token id);
 
   // Seeds the replay buffer with a token that was sampled BEFORE the
@@ -188,9 +201,10 @@ public:
   //     before rethrowing so both driver metadata and live KV stay
   //     coherent for the next request on the same driver.
   //   * Hybrid `restoreReasoningBoundary` / `replayPostReasoning`
-  //     failure, or a defensive missing-boundary hit on the
-  //     recurrent path: `compact()` best-effort clears the sequence
-  //     memory (attention KV cells + recurrent state) and returns
+  //     failure, a defensive missing-boundary hit, or a recurrent
+  //     partial-resident reasoning span left after a tail trim:
+  //     `compact()` best-effort clears the sequence memory (attention
+  //     KV cells + recurrent state) and returns
   //     `Outcome::Kind::FailedKvWiped`. The caller MUST reset its
   //     positional accounting to zero to match the cleared sequence
   //     before rethrowing, so no saveCache path can write a header
@@ -207,7 +221,8 @@ public:
   // surface it as an exception.
   struct Outcome {
     enum class Kind {
-      // Feature off, no span captured, degenerate or overshooting span.
+      // Feature off, no span captured, degenerate span, or a tail trim
+      // removed the whole reasoning span before compaction ran.
       NoOp,
       CompactedAttention,
       CompactedRecurrent,

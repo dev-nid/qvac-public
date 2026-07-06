@@ -939,11 +939,29 @@ SequenceStepResult TextLlmContext::onLogitsReady(
       // Defer end capture — the close-marker token has not yet been
       // committed to the cache.
       compactor_.requestCloseCapture();
-      // Seed the recurrent replay buffer with the close-marker token
-      // so the restored SSM state ends `<think>...</think>` balanced
-      // before the captured answer tail. See
-      // `ReasoningBlockCompactor::recordCloseMarkerForReplay`.
-      compactor_.recordCloseMarkerForReplay(tokenId);
+      // Seed the recurrent replay buffer with the *canonical* close
+      // vocab token, not the sampled `tokenId` that triggered the
+      // detector flip.
+      //
+      // `updateReasoningBuffer` runs `find(state.tags.close)` against
+      // the streamed text buffer, and `state.tags.close` for chat
+      // templates like Qwen3's carries the surrounding whitespace
+      // padding (e.g. `"\n</think>\n\n"`). The flip therefore fires on
+      // the last piece that completes the padded string — typically a
+      // template newline token — while the actual `</think>` vocab
+      // entry was emitted 1–3 tokens earlier. Seeding that trailing
+      // padding token would drive the recurrent replay through a
+      // padding piece with no matching `</think>`, leaving the SSM
+      // in an unbalanced `<think>...` state on the next turn.
+      //
+      // `cached_close_tag_token` is populated from tokenising the
+      // stripped canonical close (`</think>`) at reasoning init and is
+      // non-null whenever the recurrent-capture policy admits us
+      // (both `close_is_single_token == true`), so it is always safe
+      // on this branch. `recordCloseMarkerForReplay` additionally
+      // no-ops on `LLAMA_TOKEN_NULL` and on non-recurrent paths.
+      compactor_.recordCloseMarkerForReplay(
+          reasoningState_.cached_close_tag_token);
     }
   }
 
@@ -1032,7 +1050,7 @@ void TextLlmContext::onGenerationFinished(
   rollbackState_.clearPrefillEntry();
 }
 
-void TextLlmContext::onCancel(
+bool TextLlmContext::onCancel(
     const std::function<void(const std::string&)>& outputCallback) {
   // Cancel = "request never happened": roll back to the pre-request
   // cursor for both prefill- and decode-stage cancels.
@@ -1041,6 +1059,7 @@ void TextLlmContext::onCancel(
   // the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
+  bool rollbackOk = true;
   if (needsRecurrentSnapshot_) {
     // Recurrent / hybrid: partial `seq_rm` is rejected by recurrent
     // memory, so the only rollback option is a full-state restore.
@@ -1049,17 +1068,25 @@ void TextLlmContext::onCancel(
       if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
         nPast_ = restoredNPast;
       } else {
-        // Cancel-path bookkeeping: unrelated to the
-        // `remove_thinking_from_context` cleanup contract, so we log a
-        // warning and continue rather than throwing.
+        // Recurrent full-state restore refused: live memory may still
+        // hold the cancelled request's peak state. Force metadata back
+        // to the pre-request cursor so `getNPast()` / stats stay honest,
+        // and signal failure to the caller so the scheduler skips
+        // `saveCache` for this slot — persisting the peak state would
+        // let the cancelled request leak into the on-disk cache and
+        // survive across reloads. Sequence-level wipe is left to the
+        // scheduler's post-teardown `clearSeqKv`.
         QLOG_IF(
             Priority::WARNING,
             string_format(
                 "[TextLlm] prefillEntry restore failed on cancel "
-                "(snapshotNPast=%d, nPast=%d, seqId=%d)\n",
+                "(snapshotNPast=%d, nPast=%d, seqId=%d); scheduler must "
+                "skip saveCache to preserve last known-good on-disk cache\n",
                 restoredNPast,
                 nPast_,
                 seqId_));
+        nPast_ = restoredNPast;
+        rollbackOk = false;
       }
     }
   } else {
@@ -1077,6 +1104,7 @@ void TextLlmContext::onCancel(
   compactor_.clearSpan();
   assistantOutput_.clear();
   generationStarted_ = false;
+  return rollbackOk;
 }
 
 void TextLlmContext::configureReasoningTags(
@@ -1147,11 +1175,11 @@ void TextLlmContext::configureReasoningTags(
 llama_pos
 TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
   // Prefill-only (cache-warm) requests never enter generation and
-  // cannot emit reasoning tokens, so the hard-fail contract for
-  // unsupported hybrid template shapes does not apply. Short-circuit
-  // to the "no boundary" sentinel before consulting the policy so a
-  // cache warm on a non-conforming hybrid model succeeds instead of
-  // failing on preconditions that could only matter at decode time.
+  // cannot emit reasoning tokens, so the hard-fail contract for an
+  // unsupported multi-token recurrent close marker does not apply.
+  // Short-circuit to the "no boundary" sentinel before consulting the
+  // policy so a cache warm on a model that would only fail at decode
+  // time still succeeds.
   if (isPrefillOnlyRequest_) {
     return -1;
   }
@@ -1294,11 +1322,11 @@ void TextLlmContext::compactThinkSpan() {
     }
     break;
   case OutcomeKind::NoOp:
-    // Nothing to do: feature off, no span captured, or a tail-eraser
-    // already shrank the cache past the recorded close (`end > pos`).
-    // Live memory still matches `nPast_`, so leave it alone. See
-    // `ReasoningBlockCompactor::compact` for the strict-cleanup vs
-    // reachability tradeoff on the `end > pos` branch.
+    // Nothing to do: feature off, no span captured, degenerate span,
+    // or a tail-eraser already removed the whole reasoning span before
+    // compaction ran. Live memory still matches `nPast_`, so leave it
+    // alone. Partial-resident recurrent spans are not allowed to reach
+    // this branch; the compactor reports `FailedKvWiped` instead.
     break;
   case OutcomeKind::FailedKvIntact: {
     // Pure-attention `seq_rm + seq_add` rejection. Live KV was not

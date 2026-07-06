@@ -717,7 +717,7 @@ void MtmdLlmContext::flushPendingUtf8ToCallback(
   }
 }
 
-void MtmdLlmContext::cancelGenerationCleanup(
+bool MtmdLlmContext::cancelGenerationCleanup(
     const std::function<void(const std::string&)>& outputCallback) {
   // Cancel = "request never happened": roll back to the pre-request
   // cursor for both prefill- and decode-stage cancels.
@@ -726,6 +726,7 @@ void MtmdLlmContext::cancelGenerationCleanup(
   // the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
+  bool rollbackOk = true;
   if (needsRecurrentSnapshot_) {
     // Recurrent / hybrid: partial `seq_rm` is rejected by recurrent
     // memory, so the only rollback option is a full-state restore.
@@ -736,17 +737,28 @@ void MtmdLlmContext::cancelGenerationCleanup(
         current_.pos = restoredPos;
         refreshCurrentCacheTokensFromMemory();
       } else {
-        // Cancel-path bookkeeping: unrelated to the
-        // `remove_thinking_from_context` cleanup contract, so we log a
-        // warning and continue rather than throwing.
+        // Recurrent full-state restore refused: live memory may still
+        // hold the cancelled request's peak state. Force metadata back
+        // to the pre-request cursor so `getNPast()` / `CacheTokens`
+        // stats stay honest, and signal failure to the caller so the
+        // batch scheduler skips `saveCache` for this slot — persisting
+        // the peak state would let the cancelled request leak into the
+        // on-disk cache and survive across reloads. Sequence-level wipe
+        // is left to the scheduler's post-teardown `clearSeqKv`.
         QLOG_IF(
             Priority::WARNING,
             string_format(
                 "[MtmdLlm] prefillEntry restore failed on cancel "
-                "(snapshotPos=%d, currentPos=%d, seqId=%d)\n",
+                "(snapshotPos=%d, currentPos=%d, seqId=%d); scheduler "
+                "must skip saveCache to preserve last known-good on-disk "
+                "cache\n",
                 restoredPos,
                 current_.pos,
                 seqId_));
+        current_ = preRequestUsage_;
+        current_.pos = restoredPos;
+        current_.cacheTokens = restoredPos;
+        rollbackOk = false;
       }
     }
   } else {
@@ -763,6 +775,7 @@ void MtmdLlmContext::cancelGenerationCleanup(
   rollbackState_.clearReasoningBoundary();
   rollbackState_.clearPostReasoning();
   compactor_.clearSpan();
+  return rollbackOk;
 }
 
 void MtmdLlmContext::refreshCurrentCacheTokensFromMemory() {
@@ -829,14 +842,17 @@ bool MtmdLlmContext::generateResponse(
 
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    cancelGenerationCleanup(outputCallback);
+    // Single-prompt cancel: no cache save runs on this path, so the
+    // rollback-ok signal is not consumed here (it exists for the batch
+    // scheduler's saveCache gating).
+    (void)cancelGenerationCleanup(outputCallback);
     return true;
   }
 
   while (nRemain != 0) {
     if (stopGeneration_.load()) {
       stopGeneration_.store(false);
-      cancelGenerationCleanup(outputCallback);
+      (void)cancelGenerationCleanup(outputCallback);
       return true;
     }
     if ((current_.pos + 1 >
@@ -906,11 +922,16 @@ bool MtmdLlmContext::generateResponse(
         // Defer end capture — the close-marker token has not yet been
         // committed to the cache.
         compactor_.requestCloseCapture();
-        // Seed the recurrent replay buffer with the close-marker
-        // token so the restored SSM state ends `<think>...</think>`
-        // balanced before the captured answer tail. See
-        // `ReasoningBlockCompactor::recordCloseMarkerForReplay`.
-        compactor_.recordCloseMarkerForReplay(tokenId);
+        // Seed the *canonical* close vocab token, not the sampled
+        // `tokenId` that tripped the detector. See the matching
+        // comment in TextLlmContext::onLogitsReady: on templates whose
+        // close carries surrounding whitespace padding (Qwen3's
+        // `"\n</think>\n\n"` being the canonical case) the string-
+        // search flip fires on the last padding token, not on the
+        // `</think>` vocab entry, so seeding `tokenId` would replay a
+        // padding piece and leave the SSM unbalanced on the next turn.
+        compactor_.recordCloseMarkerForReplay(
+            reasoningState_.cached_close_tag_token);
       }
     }
 
@@ -1004,7 +1025,7 @@ bool MtmdLlmContext::generateResponse(
   // Mid-loop cancel exits leave `stopGeneration_` set and skip EOT.
   if (stopGeneration_.load()) {
     stopGeneration_.store(false);
-    cancelGenerationCleanup(outputCallback);
+    (void)cancelGenerationCleanup(outputCallback);
     return true;
   }
   if (nRemain == 0) {
@@ -1231,10 +1252,11 @@ void MtmdLlmContext::setOpenThinkSpan(llama_pos start) {
 
 void MtmdLlmContext::snapshotForRecurrentRollback() {
   // Prefill-only (cache-warm) requests never enter generation and
-  // cannot emit reasoning tokens, so the hard-fail contract for
-  // unsupported hybrid template shapes does not apply. Skip the
-  // boundary capture entirely before consulting the policy so a cache
-  // warm on a non-conforming hybrid model succeeds.
+  // cannot emit reasoning tokens, so the hard-fail contract for an
+  // unsupported multi-token recurrent close marker does not apply.
+  // Skip the boundary capture entirely before consulting the policy so
+  // a cache warm on a model that would only fail at decode time still
+  // succeeds.
   if (isPrefillOnlyRequest_) {
     return;
   }
@@ -1341,11 +1363,12 @@ void MtmdLlmContext::compactThinkSpan() {
     refreshCurrentCacheTokensFromMemory();
     break;
   case OutcomeKind::NoOp:
-    // Nothing to do: feature off, no span captured, or a tail-eraser
-    // already shrank the cache past the recorded close (`end > pos`).
-    // Live memory still matches `current_`, so leave it alone. See
-    // `ReasoningBlockCompactor::compact` for the strict-cleanup vs
-    // reachability tradeoff on the `end > pos` branch.
+    // Nothing to do: feature off, no span captured, degenerate span,
+    // or a tail-eraser already removed the whole reasoning span before
+    // compaction ran. Live memory still matches `current_`, so leave
+    // it alone. Partial-resident recurrent spans are not allowed to
+    // reach this branch; the compactor reports `FailedKvWiped`
+    // instead.
     break;
   case OutcomeKind::FailedKvIntact: {
     // Pure-attention `seq_rm + seq_add` rejection. Live KV was not
@@ -1770,13 +1793,13 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
   capturePendingThinkClose();
 
   if (stopGeneration_.load()) {
-    stopGeneration_.store(false);
-    flushPendingUtf8ToCallback(outputCallback);
-    const llama_token eot = llama_vocab_eot(modelCtx_.vocab);
-    return {
-        .token =
-            eot == LLAMA_TOKEN_NULL ? llama_vocab_eos(modelCtx_.vocab) : eot,
-        .finished = true};
+    // Leave `stopGeneration_` set so the post-loop `cancelGenerationCleanup`
+    // in `generateResponse` runs; do NOT emit EOT since the rollback drops
+    // all sampled tokens. Aligns with `TextLlmContext::onLogitsReady` and
+    // avoids routing an internal stop through the scheduler's normal-finish
+    // path (which would trigger `onGenerationFinished` — cache save +
+    // reasoning compaction — instead of `onCancel` rollback).
+    return {.finished = true};
   }
 
   if ((current_.pos + 1 > ctxCeiling() ||
@@ -1836,7 +1859,13 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
     }
     if (wasInside && !nowInside) {
       compactor_.requestCloseCapture();
-      compactor_.recordCloseMarkerForReplay(tokenId);
+      // Canonical close token, not the sampled `tokenId` — see the
+      // matching comment on the earlier normal-close site in this
+      // file (and the fuller rationale in TextLlmContext) for why
+      // string-buffer padding can defer the detector flip onto a
+      // template-newline token.
+      compactor_.recordCloseMarkerForReplay(
+          reasoningState_.cached_close_tag_token);
     }
   }
 
@@ -1902,13 +1931,13 @@ void MtmdLlmContext::onGenerationFinished(
   rollbackState_.clearPrefillEntry();
 }
 
-void MtmdLlmContext::onCancel(
+bool MtmdLlmContext::onCancel(
     const std::function<void(const std::string&)>& outputCallback) {
   // Batch cancel = "request never happened": roll back to the
   // pre-request cursor captured at admission by `snapshotPreRequestCursor`.
   // The single-prompt path invokes `cancelGenerationCleanup` directly
   // from its own generation loop.
-  cancelGenerationCleanup(outputCallback);
+  return cancelGenerationCleanup(outputCallback);
 }
 
 void MtmdLlmContext::validatePromptPolicy(

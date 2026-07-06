@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <inference-addon-cpp/Errors.hpp>
@@ -998,13 +999,15 @@ TEST(
 
 TEST(
     ReasoningBlockCompactorToolsCompactInteraction,
-    NoOpWhenPartialResidentSpanOnRecurrentPath) {
+    PartialResidentSpanHardFailsOnRecurrentPath) {
   // Same partial-resident shape as above but on the recurrent /
   // hybrid path: replay is anchored at a captured post-reasoning tail
   // that no longer matches the shorter live cache, and there is no
-  // safe way to reconcile without the driver's pre-request rollback
-  // anchor. NoOp here — the driver's own recovery path (context
-  // rollback or full reset on the next request) handles cleanup.
+  // safe way for the compactor to reconcile it with the driver's
+  // pre-request rollback anchor. It must not return NoOp and complete
+  // successfully, because `[start, pos)` reasoning tokens would still
+  // be resident in cache. Instead it returns FailedKvWiped so callers
+  // reset their metadata and surface the strict cleanup failure.
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -1027,12 +1030,17 @@ TEST(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
   fx.compactor.setContextSliderOpsForTesting(nullptr);
 
-  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
+      << "recurrent partial-resident span must hard-fail instead of "
+         "leaking resident reasoning tokens";
+  EXPECT_NE(outcome.failureMessage.find("partial-resident"), std::string::npos);
   EXPECT_EQ(accepting.seqRmCalls(), 0)
-      << "recurrent partial-resident NoOp must not touch any KV primitive";
+      << "recurrent partial-resident hard-fail must not use partial KV "
+         "removal primitives";
   EXPECT_EQ(accepting.seqAddCalls(), 0);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0)
-      << "recurrent NoOp bail must not be counted as a successful discard";
+      << "recurrent hard-fail bail must not be counted as a successful discard";
 
   EXPECT_FALSE(fx.compactor.hasOpenSpan());
 }
