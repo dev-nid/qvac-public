@@ -420,6 +420,12 @@ TEST_F(
   prompt.cacheKey = cachePath.string();
   prompt.saveCacheToDisk = true;
   prompt.media.push_back(readBinaryFile(imagePath));
+  // This test validates that cacheKey keeps generated multimodal memory
+  // resident after generation. The fixture's small n_predict can stop Qwen3.5
+  // inside an unfinished reasoning block, which is covered by dedicated
+  // remove_thinking_from_context tests; opt out here so the cache-residency
+  // assertion remains focused on its original contract.
+  prompt.generationParams.remove_thinking_from_context = false;
 
   std::string output = model->processPrompt(prompt);
   EXPECT_GE(output.length(), 0);

@@ -188,12 +188,39 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
     ReasoningBlockCompactor* self;
     ~ResetGuard() {
       self->thinkSpan_.reset();
+      self->slideInvalidatedSpan_ = false;
+      self->slideInvalidatedPos_ = 0;
+      self->slideInvalidatedDiscarded_ = 0;
       self->rollback_.clearReasoningBoundary();
       self->rollback_.clearPostReasoning();
     }
   } guard{this};
 
   Outcome out;
+  if (removeThinkingFromContext_ && slideInvalidatedSpan_) {
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "%s thinking-block compaction failed: generation-time context "
+            "slide invalidated a tracked reasoning span (pos=%d, "
+            "discarded=%d, seqId=%d); wiping sequence and hard-failing so "
+            "reasoning does not remain in cache\n",
+            labelTag,
+            slideInvalidatedPos_,
+            slideInvalidatedDiscarded_,
+            seqId));
+    clearSeqOnFailure(ctx, seqId);
+    out.kind = Outcome::Kind::FailedKvWiped;
+    out.failureMessage = string_format(
+        "%s ReasoningBlockCompactor::compact: generation-time context "
+        "slide invalidated tracked reasoning span (pos=%d, discarded=%d, "
+        "seqId=%d)",
+        labelTag,
+        slideInvalidatedPos_,
+        slideInvalidatedDiscarded_,
+        seqId);
+    return out;
+  }
   if (!removeThinkingFromContext_ || !thinkSpan_.has_value()) {
     return out;
   }

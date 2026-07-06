@@ -26,7 +26,7 @@ ContextShifter::ContextShifter(
 ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
     ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
     llama_pos protectedPrefixPos, llama_pos effectiveCtx, llama_pos cacheTokens,
-    const char* labelTag) {
+    const char* labelTag, const IContextSliderOps& ops) {
   // Slide notification is routed through the compactor's tools
   // controller so we keep a single tools reference per inference.
   auto outcome = trySlideGeneration(
@@ -36,7 +36,7 @@ ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
       protectedPrefixPos,
       nDiscarded_,
       compactor_.toolsController(),
-      defaultContextSliderOps(),
+      ops,
       effectiveCtx,
       cacheTokens);
 
@@ -46,10 +46,15 @@ ContextShifter::Outcome ContextShifter::applyGenerationDiscard(
     out.newPos = outcome.newNPast;
     out.discarded = outcome.discarded;
     ++nSlides_;
-    // Recorded span positions are no longer valid after the shift;
-    // drop them along with the recurrent snapshot (which targeted the
-    // pre-slide SSM state) and the post-reasoning capture buffer.
-    compactor_.clearSpan();
+    // Recorded span positions are no longer valid after the shift. If a
+    // reasoning span was active, mark final compaction as a strict failure
+    // rather than silently dropping the stale coordinates; otherwise clear any
+    // pending close-capture state left over from earlier detection.
+    if (compactor_.hasOpenSpan()) {
+      compactor_.markSpanInvalidatedByGenerationSlide(pos, outcome.discarded);
+    } else {
+      compactor_.clearSpan();
+    }
     rollback_.clearReasoningBoundary();
     rollback_.clearPostReasoning();
     QLOG_IF(

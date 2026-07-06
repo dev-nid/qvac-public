@@ -9,7 +9,14 @@
 #include <gtest/gtest.h>
 
 #include "model-interface/ContextSlider.hpp"
+#include "model-interface/ContextShifter.hpp"
+#include "model-interface/ReasoningBlockCompactor.hpp"
 #include "model-interface/ToolsCompactController.hpp"
+#include "utils/ReasoningRollbackState.hpp"
+
+using qvac_lib_inference_addon_llama::ContextShifter;
+using qvac_lib_inference_addon_llama::ReasoningBlockCompactor;
+using qvac_lib_inference_addon_llama::utils::ReasoningRollbackState;
 
 namespace {
 constexpr llama_seq_id kSeqId = 7;
@@ -31,6 +38,11 @@ struct SeqAddCall {
   llama_pos endPos = 0;
   llama_pos delta = 0;
 };
+
+bool operator==(const SeqAddCall& lhs, const SeqAddCall& rhs) {
+  return lhs.seqId == rhs.seqId && lhs.startPos == rhs.startPos &&
+         lhs.endPos == rhs.endPos && lhs.delta == rhs.delta;
+}
 
 class FakeLlamaContextOps final : public IContextSliderOps {
 public:
@@ -323,6 +335,51 @@ TEST_F(ContextSliderTest, GenerationSlidInvokesLlamaOpsWithExpectedRanges) {
   EXPECT_EQ(ops.seqAddCalls()[0].startPos, 170);
   EXPECT_EQ(ops.seqAddCalls()[0].endPos, 400);
   EXPECT_EQ(ops.seqAddCalls()[0].delta, -120);
+}
+
+TEST_F(
+    ContextSliderTest,
+    GenerationSlideWithTrackedReasoningSpanInvalidatesFinalCompaction) {
+  ReasoningRollbackState rollback;
+  ToolsCompactController tools(std::nullopt);
+  ReasoningBlockCompactor compactor(rollback, tools);
+  ContextShifter shifter(compactor, rollback);
+  FakeLlamaContextOps ops(/*ctxSize=*/100);
+
+  shifter.setDiscardBudget(20);
+  compactor.setRemoveThinkingFromContext(true);
+  compactor.setReasoningEnabled(true);
+  compactor.setNeedsRecurrentSnapshot(false);
+  compactor.setOpenSpan(/*start=*/80);
+  ASSERT_TRUE(compactor.hasOpenSpan());
+
+  const auto slide = shifter.applyGenerationDiscard(
+      /*ctx=*/nullptr,
+      kSeqId,
+      /*pos=*/100,
+      /*protectedPrefixPos=*/10,
+      /*effectiveCtx=*/100,
+      /*cacheTokens=*/-1,
+      "[Test]",
+      ops);
+
+  EXPECT_EQ(slide.kind, ContextShifter::Outcome::Kind::Slid);
+  EXPECT_EQ(slide.newPos, 80);
+  EXPECT_FALSE(compactor.hasOpenSpan())
+      << "slide invalidates absolute span coordinates immediately";
+  ASSERT_EQ(ops.seqRmCalls().size(), 1u);
+  EXPECT_EQ(ops.seqRmCalls()[0], (SeqRmCall{kSeqId, 10, 30}));
+  ASSERT_EQ(ops.seqAddCalls().size(), 1u);
+  EXPECT_EQ(ops.seqAddCalls()[0], (SeqAddCall{kSeqId, 30, 100, -20}));
+
+  const auto outcome =
+      compactor.compact(/*ctx=*/nullptr, kSeqId, slide.newPos, "[Test]");
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
+      << "a generation slide after reasoning opens must hard-fail instead of "
+         "making remove_thinking_from_context a silent NoOp";
+  EXPECT_NE(outcome.failureMessage.find("slide invalidated"), std::string::npos);
+  EXPECT_EQ(compactor.blockDiscards(), 0)
+      << "slide-invalidation failures are not successful reasoning discards";
 }
 
 TEST_F(ContextSliderTest, GenerationSlideScenario_NoDiscardAllowed) {

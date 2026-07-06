@@ -10,8 +10,8 @@
 namespace qvac_lib_inference_addon_llama {
 
 // Thin wrapper around `trySlideGeneration` that owns the slide budget
-// (`nDiscarded`) and slide counter (`nSlides`), and clears post-slide-
-// invalidated state on the compactor and rollback owners.
+// (`nDiscarded`) and slide counter (`nSlides`), and invalidates post-slide
+// reasoning state on the compactor and rollback owners.
 //
 // Position-specific bookkeeping (`nPast_` for text vs
 // `current_.pos / .cacheTokens` for multimodal) stays on the caller,
@@ -48,9 +48,11 @@ public:
   // Attempts a generation-time slide. Returns an outcome that the
   // caller maps onto its own position fields (text: `nPast_`; mtmd:
   // `current_.pos` plus `refreshCurrentCacheTokensFromMemory()`).
-  // Clears the compactor's span and the rollback state's reasoning
-  // boundary + post-reasoning buffer on success — they all referenced
-  // pre-slide positions that are no longer valid.
+  // Invalidates the compactor's span and clears the rollback state's reasoning
+  // boundary + post-reasoning buffer on success — they all referenced pre-slide
+  // positions that are no longer valid. If a reasoning span was active, final
+  // compaction hard-fails instead of silently completing with unknown resident
+  // reasoning tokens.
   //
   // Throws `qvac_errors::StatusError` on memory-op failure, matching
   // the original inline behaviour in both contexts.
@@ -61,7 +63,8 @@ public:
   Outcome applyGenerationDiscard(
       ::llama_context* ctx, llama_seq_id seqId, llama_pos pos,
       llama_pos protectedPrefixPos, llama_pos effectiveCtx,
-      llama_pos cacheTokens, const char* labelTag);
+      llama_pos cacheTokens, const char* labelTag,
+      const IContextSliderOps& ops = defaultContextSliderOps());
 
 private:
   ReasoningBlockCompactor& compactor_;

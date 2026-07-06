@@ -729,6 +729,7 @@ TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
   // Recovery: the model must accept another inference cleanly.
   LlamaModel::Prompt recovery;
   recovery.input = R"([{"role":"user","content":"Hi"}])";
+  recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GE(output.length(), 0);
@@ -803,6 +804,7 @@ TEST_F(
   // an image) cleanly on the rolled-back cache.
   LlamaModel::Prompt recovery;
   recovery.input = R"([{"role":"user","content":"Hi"}])";
+  recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GE(output.length(), 0);
@@ -936,6 +938,7 @@ TEST(
   // Recovery: subsequent inference must succeed on the cancelled context.
   LlamaModel::Prompt shortPrompt;
   shortPrompt.input = R"([{"role":"user","content":"Hi"}])";
+  shortPrompt.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(shortPrompt);
     EXPECT_GE(output.length(), 0);
@@ -1021,6 +1024,7 @@ TEST(
 
   LlamaModel::Prompt uncached;
   uncached.input = R"([{"role":"user","content":"Run after failed cancel."}])";
+  uncached.generationParams.remove_thinking_from_context = false;
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
   const std::vector<uint8_t> afterUncachedTransition =
@@ -1120,6 +1124,7 @@ TEST(
   LlamaModel::Prompt uncached;
   uncached.input =
       R"([{"role":"user","content":"Run after failed prefill cancel."}])";
+  uncached.generationParams.remove_thinking_from_context = false;
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
   const std::vector<uint8_t> afterUncachedTransition =
@@ -1218,6 +1223,7 @@ TEST(
   // Recovery: a fresh prefill must succeed on the rolled-back cache.
   LlamaModel::Prompt recovery;
   recovery.input = R"([{"role":"user","content":"Hi"}])";
+  recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GE(output.length(), 0);
