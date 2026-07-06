@@ -18,14 +18,20 @@ using qvac_lib_inference_addon_llama::utils::RecurrentReasoningBoundaryDecision;
 using qvac_lib_inference_addon_llama::utils::
     shouldCaptureRecurrentReasoningBoundary;
 
-// Unit coverage for the hybrid / recurrent close-marker replay seam.
+// Unit coverage for the hybrid / recurrent reasoning replay seam.
 //
-// End-of-prefill snapshots keep the forced `<think>\n` opener in the
-// restored SSM state, so the post-reasoning replay buffer must
-// explicitly carry the matching close marker to leave a balanced
-// `<think>...</think>` shape after compaction. These tests pin:
+// End-of-prefill snapshots are taken at the boundary between prefill
+// and generation. For force-open templates the opener already lives in
+// the snapshot; for generated-opener templates the compactor seeds the
+// sampled opener token span into the replay buffer via
+// `recordPreReasoningToken` so the restored SSM state is still balanced
+// after compaction. Either way the replay buffer must carry the
+// matching close marker so the resulting `<think>...</think>` shape is
+// balanced. These tests pin:
 //   1. the unconditional append primitive (`appendPostReasoningToken`),
-//   2. the compactor wrapper (`recordCloseMarkerForReplay`) feature gates,
+//   2. the compactor wrappers (`recordCloseMarkerForReplay` and
+//      `recordPreReasoningToken`) feature gates and open-span
+//      invariants,
 //   3. the success path against a seeded boundary snapshot.
 
 TEST(ReasoningSnapshotPolicy, CapturesOnlyForForcedOpenRecurrentReasoning) {
@@ -45,13 +51,14 @@ TEST(ReasoningSnapshotPolicy, CapturesOnlyForForcedOpenRecurrentReasoning) {
       RecurrentReasoningBoundaryDecision::Capture);
 }
 
-TEST(ReasoningSnapshotPolicy, RejectsGeneratedOpenRecurrentReasoning) {
-  // Generated-opener recurrent turns cannot use an end-of-prefill
-  // snapshot: the restored prefix would not contain `<think>`, so
-  // replaying `</think>` would poison the next recurrent state. The
-  // caller must hard-fail when the feature is enabled instead of
-  // silently preserving reasoning in cache.
-  EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
+TEST(ReasoningSnapshotPolicy, CapturesGeneratedOpenRecurrentReasoning) {
+  // Generated-opener recurrent turns are now supported: the caller
+  // seeds the sampled opener token span (including any preamble)
+  // into the replay buffer alongside the close marker, so the
+  // restored end-of-prefill prefix no longer needs to contain
+  // `<think>`. The policy must return `Capture` so the boundary
+  // snapshot is taken and the seed-and-replay path can fire.
+  EXPECT_TRUE(shouldCaptureRecurrentReasoningBoundary(
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
@@ -64,7 +71,7 @@ TEST(ReasoningSnapshotPolicy, RejectsGeneratedOpenRecurrentReasoning) {
           /*reasoningEnabled=*/true,
           /*thinkingForcedOpen=*/false,
           /*closeMarkerSingleToken=*/true),
-      RecurrentReasoningBoundaryDecision::UnsupportedGeneratedOpener);
+      RecurrentReasoningBoundaryDecision::Capture);
 }
 
 TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
@@ -340,6 +347,178 @@ TEST(ReasoningBlockCompactorReplaySeed, SkipsNullCloseMarker) {
   EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 0u);
 }
 
+// ---------------------------------------------------------------------------
+// `recordPreReasoningToken` seed contract
+// ---------------------------------------------------------------------------
+//
+// Generated-opener recurrent turns seed every token sampled between
+// end-of-prefill and the open-detection flip into the replay buffer via
+// `recordPreReasoningToken` so the restored snapshot + replay lands in a
+// balanced `<think>...</think>` state (see the compactor header comment
+// on `recordPreReasoningToken` for full rationale). The tests below mirror
+// the `recordCloseMarkerForReplay` gates so future callers can trust that
+// pre-reasoning seeding is a NO-OP on any configuration where the replay
+// path is not going to fire.
+
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpWhenRemoveThinkingOff) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(false);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/5);
+  fx.compactor.recordPreReasoningToken(/*preToken=*/198);
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpWhenReasoningDisabled) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(false);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/5);
+  fx.compactor.recordPreReasoningToken(198);
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpForPureAttentionModels) {
+  // Pure attention uses `seq_rm + seq_add` at compact time and never
+  // consumes the replay buffer, so pre-reasoning seeding would be dead
+  // state exactly like the close-marker seed path.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(false);
+  fx.compactor.recordPreReasoningToken(198);
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpWhenBoundaryNotCaptured) {
+  // Snapshot never captured (e.g. capture underflowed before generation
+  // started). Accumulating tokens in the replay buffer would be dead
+  // state — `compact()` cannot restore without a boundary.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  ASSERT_FALSE(fx.rollback.hasReasoningBoundary());
+  fx.compactor.recordPreReasoningToken(198);
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+}
+
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningSkipsNullToken) {
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/5);
+  fx.compactor.recordPreReasoningToken(LLAMA_TOKEN_NULL);
+  EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
+  EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 0u);
+}
+
+TEST(
+    ReasoningBlockCompactorReplaySeed,
+    PreReasoningSeedsInSampleOrderBeforeCloseMarker) {
+  // Simulates a generated-opener recurrent turn where the model emits
+  // some preamble (`\n`) followed by a multi-token opener (`<think>` =>
+  // 2 pieces), then eventually a close marker. Replay buffer must be
+  // `[preamble, opener_piece_0, opener_piece_1, close]` so the SSM
+  // advance is balanced after boundary restore.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+  ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
+
+  fx.compactor.recordPreReasoningToken(/*preamble=*/198);
+  fx.compactor.recordPreReasoningToken(/*openerPiece0=*/50);
+  fx.compactor.recordPreReasoningToken(/*openerPiece1=*/51);
+  fx.compactor.recordCloseMarkerForReplay(/*closeMarker=*/100);
+
+  ASSERT_EQ(fx.rollback.postReasoningTokenCount(), 4u);
+  EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 4u);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[0], 198);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[1], 50);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[2], 51);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[3], 100);
+}
+
+TEST(
+    ReasoningBlockCompactorReplaySeed,
+    PreReasoningNoOpAfterOpenSpanRecorded) {
+  // Full-lifecycle regression: the caller invokes
+  // `recordPreReasoningToken` for every sampled token where
+  // `reasoningState_.inside_reasoning == false`. That predicate is
+  // TRUE both before the opener AND after `updateReasoningBuffer`
+  // flips inside_reasoning back to false on the close marker.
+  // Without gating on the open span, every post-close answer token
+  // would be appended twice — once via `recordPostReasoningToken`
+  // (captured tail) and once via `recordPreReasoningToken` (seeded
+  // prefix) — and the recurrent replay would decode the answer twice
+  // through the SSM.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+
+  // Pre-open: preamble + opener piece seeded.
+  fx.compactor.recordPreReasoningToken(/*preamble=*/198);
+  fx.compactor.recordPreReasoningToken(/*opener=*/50);
+
+  // Open flip fires -> span recorded.
+  fx.compactor.setOpenSpan(/*start=*/15);
+  ASSERT_TRUE(fx.compactor.hasOpenSpan());
+
+  // Close flip fires: close seeded, span end committed, capture on.
+  fx.compactor.recordCloseMarkerForReplay(/*closeMarker=*/100);
+  fx.compactor.requestCloseCapture();
+  fx.compactor.onCloseCommitted(/*pos=*/20);
+  ASSERT_TRUE(fx.rollback.isCapturingPostReasoning());
+
+  // Post-close answer token: caller invokes BOTH
+  // `recordPostReasoningToken` (captured tail) AND
+  // `recordPreReasoningToken` (because `inside_reasoning == false`
+  // again). The pre-reasoning call MUST no-op — otherwise the
+  // answer token lands twice.
+  fx.rollback.recordPostReasoningToken(/*answer=*/2500);
+  fx.compactor.recordPreReasoningToken(/*answer=*/2500);
+
+  ASSERT_EQ(fx.rollback.postReasoningTokenCount(), 4u);
+  EXPECT_EQ(fx.rollback.seededPostReasoningCount(), 3u);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[0], 198);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[1], 50);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[2], 100);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[3], 2500);
+}
+
+TEST(
+    ReasoningBlockCompactorReplaySeed,
+    PreReasoningSeedSurvivesClipWhenNoCapturedTail) {
+  // Combined preamble + opener + close seed with an empty captured tail:
+  // `clipPostReasoningTokens(0)` MUST preserve the full seeded prefix.
+  // Regression against a future clip cap that only accounts for the
+  // close marker.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+
+  fx.compactor.recordPreReasoningToken(/*preamble=*/198);
+  fx.compactor.recordPreReasoningToken(/*opener=*/50);
+  fx.compactor.recordCloseMarkerForReplay(/*closeMarker=*/100);
+  ASSERT_EQ(fx.rollback.seededPostReasoningCount(), 3u);
+
+  fx.rollback.clipPostReasoningTokens(/*maxCapturedTail=*/0);
+
+  ASSERT_EQ(fx.rollback.postReasoningTokenCount(), 3u);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[0], 198);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[1], 50);
+  EXPECT_EQ(fx.rollback.postReasoningTokens()[2], 100);
+}
+
 // Pin the close-capture handshake contract used by every close-marker
 // site (normal buffer-transition path AND EOS-substitution path):
 // `onCloseCommitted` only records the span end after a prior
@@ -399,9 +578,9 @@ TEST(ReasoningBlockCompactorCloseCommit, RecordsSpanEndAfterRequest) {
 //     `captureReasoningBoundary`).
 //   * Hybrid restore failure (`compact()` on `ctx == nullptr` with a
 //     seeded boundary) reports `FailedKvWiped`.
-//   * Generated-opener recurrent turn — hybrid model, no boundary
-//     snapshot captured — must cleanly no-op (span never opens on
-//     recurrent+no-boundary; `compact()` returns `NoOp`).
+//   * Defensive no-boundary compactor entry — hybrid model, no
+//     boundary snapshot captured — must cleanly no-op (span never
+//     opens on recurrent+no-boundary; `compact()` returns `NoOp`).
 //   * Non-failure no-op paths do NOT throw and do NOT bump discards.
 //
 // The symmetric replay throw shape is exercised end-to-end by the
@@ -505,12 +684,13 @@ TEST(
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
-// Defensive no-boundary regression: production callers now hard-fail
-// unsupported generated-opener recurrent templates before generation.
-// If a future caller bypasses `ReasoningSnapshotPolicy` and reaches the
-// compactor with recurrent memory but no boundary snapshot, `setOpenSpan`
-// must still refuse to record a span so `compact()` does not wipe the
-// sequence through its defensive no-boundary branch.
+// Defensive no-boundary regression: `ReasoningSnapshotPolicy` still
+// hard-fails multi-token close-marker templates before generation and
+// `snapshotAtPrefillBoundary` throws on capture underflow, but if a
+// future caller bypasses those sites and reaches the compactor with
+// recurrent memory but no boundary snapshot, `setOpenSpan` must still
+// refuse to record a span so `compact()` does not wipe the sequence
+// through its defensive no-boundary branch.
 TEST(
     ReasoningBlockCompactorFailureStats,
     RecurrentNoBoundarySpanSkipsCompactionAsDefensiveNoOp) {

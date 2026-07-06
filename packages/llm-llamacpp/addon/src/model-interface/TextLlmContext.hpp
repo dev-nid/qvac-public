@@ -296,9 +296,9 @@ private:
   // the feature is enabled for a recurrent / hybrid generation request
   // but the template does not satisfy the snapshot + replay
   // preconditions. Snapshots at END of prefill (boundary ==
-  // `prefillLen`) only when the forced opener is already in the cache,
-  // so the restored recurrent state stays structurally balanced after
-  // replay.
+  // `prefillLen`); generated opener tokens, when present, are seeded
+  // into the replay buffer so the restored recurrent state stays
+  // structurally balanced after replay.
   [[nodiscard]] llama_pos
   computeRecurrentSnapshotBoundary(llama_pos prefillLen) const;
 

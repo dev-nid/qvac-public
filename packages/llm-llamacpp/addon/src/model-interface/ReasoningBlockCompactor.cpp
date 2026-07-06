@@ -66,10 +66,10 @@ void ReasoningBlockCompactor::setOpenSpan(llama_pos start) {
     return;
   }
   // Recurrent / hybrid compaction requires an end-of-prefill boundary
-  // snapshot to restore against. `ReasoningSnapshotPolicy` now makes
-  // unsupported recurrent templates hard-fail before generation, so this
-  // guard is only a defensive backstop for future callers that bypass the
-  // policy and would otherwise drive `compact()` into its no-boundary
+  // snapshot to restore against. The policy and snapshot capture sites
+  // fail unsupported requests before this point, so this guard is only a
+  // defensive backstop for future callers that bypass those sites and
+  // would otherwise drive `compact()` into its no-boundary
   // `FailedKvWiped` branch.
   if (needsRecurrentSnapshot_ && !rollback_.hasReasoningBoundary()) {
     return;
@@ -87,6 +87,32 @@ void ReasoningBlockCompactor::recordCloseMarkerForReplay(llama_token id) {
   if (!needsRecurrentSnapshot_ || !rollback_.hasReasoningBoundary()) {
     return;
   }
+  rollback_.appendPostReasoningToken(id);
+}
+
+void ReasoningBlockCompactor::recordPreReasoningToken(llama_token id) {
+  if (!removeThinkingFromContext_ || !reasoningEnabled_) {
+    return;
+  }
+  if (!needsRecurrentSnapshot_ || !rollback_.hasReasoningBoundary()) {
+    return;
+  }
+  // Only meaningful before the reasoning open flip. Callers invoke this
+  // for every sampled token where `reasoningState_.inside_reasoning`
+  // is false, which is TRUE both before the opener AND after
+  // `updateReasoningBuffer` flips back on the close marker. Without
+  // this guard every post-close answer token would be appended twice:
+  // once by `recordPostReasoningTokenIfActive` (captured tail) and once
+  // here (seeded prefix), and the recurrent replay would decode the
+  // answer through the SSM twice.
+  if (thinkSpan_.has_value()) {
+    return;
+  }
+  // Same primitive as the close marker: append to the seeded prefix
+  // so `clipPostReasoningTokens` will preserve these tokens across a
+  // tools-compact tail trim. Order in `postReasoningTokens_` is
+  // `[pre-reasoning..., close, captured tail...]`, matching the
+  // desired replay sequence after the boundary snapshot is restored.
   rollback_.appendPostReasoningToken(id);
 }
 

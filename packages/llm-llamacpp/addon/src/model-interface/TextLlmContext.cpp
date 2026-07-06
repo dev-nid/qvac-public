@@ -45,9 +45,8 @@ void throwUnsupportedRecurrentReasoningCompaction(
       toString(FailedToDecode),
       string_format(
           "%s remove_thinking_from_context is enabled for a hybrid/recurrent "
-          "model, but recurrent reasoning compaction requires a chat template "
-          "that force-opens reasoning during prefill and a single-token close "
-          "marker; unsupported because %s",
+          "model, but recurrent reasoning compaction requires a single-token "
+          "reasoning close marker; unsupported because %s",
           labelTag,
           qvac_lib_inference_addon_llama::utils::
               recurrentReasoningBoundaryFailureReason(decision)));
@@ -913,6 +912,20 @@ SequenceStepResult TextLlmContext::onLogitsReady(
 
   if (reasoningEnabled_) {
     const bool wasInside = reasoningState_.inside_reasoning;
+    // Seed the sampled token into the recurrent replay buffer BEFORE
+    // running the reasoning detector: on generated-opener templates
+    // (`thinkingForcedOpen == false`) every token sampled after
+    // end-of-prefill and up to and including the token that flips
+    // `inside_reasoning` from false to true is part of the pre-
+    // reasoning span (template preamble + opener pieces). The
+    // compactor's restored end-of-prefill snapshot does not contain
+    // any of those tokens, so the replay must carry them or the SSM
+    // would land in an unbalanced state on the next turn. No-op on
+    // pure-attention paths, when the feature is off, or before the
+    // boundary snapshot exists.
+    if (!wasInside) {
+      compactor_.recordPreReasoningToken(tokenId);
+    }
     qvac_lib_inference_addon_llama::utils::updateReasoningBuffer(
         tokenStr, reasoningState_);
     const bool nowInside = reasoningState_.inside_reasoning;
@@ -1024,7 +1037,8 @@ void TextLlmContext::onCancel(
   // Cancel = "request never happened": roll back to the pre-request
   // cursor for both prefill- and decode-stage cancels.
   // `reasoningBoundary` is compaction-only and not used here — restoring
-  // it would leak the cancelled prompt + forced opener into the cache.
+  // it would leak the cancelled prompt / generated-prefix state into
+  // the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
   if (needsRecurrentSnapshot_) {
@@ -1108,14 +1122,13 @@ void TextLlmContext::configureReasoningTags(
     const bool reasoningCompactionActive = params_.reasoning_budget != 0;
     if (needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
         reasoningCompactionActive && !isPrefillOnlyRequest_ &&
-        (!thinkingForcedOpen_ || !reasoningState_.close_is_single_token)) {
+        !reasoningState_.close_is_single_token) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
               "[TextLlm] recurrent reasoning compaction will hard-fail if "
               "this request emits reasoning: remove_thinking_from_context is "
-              "enabled on a hybrid/recurrent model, but the template must "
-              "force-open reasoning during prefill and close marker '%s' "
+              "enabled on a hybrid/recurrent model, but close marker '%s' "
               "must tokenise to one token\n",
               reasoningTags->close.c_str()));
     }
@@ -1153,31 +1166,18 @@ TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
     break;
   case RecurrentReasoningBoundaryDecision::Disabled:
     return -1;
-  case RecurrentReasoningBoundaryDecision::UnsupportedGeneratedOpener:
   case RecurrentReasoningBoundaryDecision::UnsupportedMultiTokenClose:
     throwUnsupportedRecurrentReasoningCompaction("[TextLlm]", decision);
   }
-  // Snapshot at the END of prefill only after the chat template
-  // force-opened `<think>` and decoded that opener into the cache.
-  // Rationale: hybrid SSM models keep their context exclusively in
-  // the recurrent hidden state, and that state needs to look like a
-  // structurally valid assistant turn from the model's training
-  // distribution. Snapshotting BEFORE the forced opener and replaying
-  // only the answer makes the SSM forget reasoning ever happened —
-  // Qwen3.5 then enters an unrecoverable `<think>` loop on the NEXT
-  // turn because the chat template's freshly-injected `<think>\n`
-  // arrives in an OOD recurrent state.
+  // Snapshot at the END of prefill. For force-open templates the
+  // restored prefix already contains the reasoning opener. For
+  // generated-opener templates the restored prefix does NOT contain
+  // `<think>`, so the decode loop seeds every sampled token up to the
+  // open-detection flip into the replay buffer before the close marker
+  // and visible tail. That gives the recurrent state the same compacted
+  // structural shape (`preamble + <think> + </think> + answer`) without
+  // replaying the reasoning body.
   //
-  // Snapshot-at-end-of-prefill keeps the forced opener in the SSM's
-  // hidden state (small "opener residue" in the cache after rollback)
-  // — a known and accepted cost. The reasoning BODY is still dropped
-  // by the rollback, just not the 1–2 forced-opener tokens.
-  //
-  // Generated-opener templates are different: the end-of-prefill
-  // snapshot does not contain `<think>`, so replaying a close marker
-  // after restore would produce `prompt + </think> + answer`. Under the
-  // strict default-on contract, the decision above hard-fails those
-  // recurrent turns instead of silently preserving reasoning in cache.
   // Pure-attention models keep the existing `seq_rm` path, unaffected.
   const llama_pos boundary = prefillLen;
   // Degenerate templates whose entire prefill IS the forced opener
@@ -1365,19 +1365,19 @@ TextLlmContext::takeUserVisiblePerfSnapshot() {
 void TextLlmContext::setRemoveThinkingFromContext(bool value) {
   // Recurrent / hybrid SSM models (Qwen3.5, Qwen3-Next, Jamba, ...) are
   // supported via the snapshot + replay path in `compactThinkSpan` when
-  // the template force-opens reasoning during prefill and the close
-  // marker is a single token: a full-state snapshot is captured at
-  // end-of-prefill, restored at end-of-generation, and the close marker
-  // plus post-reasoning tail are replayed through `llama_decode` so
-  // both KV halves stay consistent.
+  // the close marker is a single token: a full-state snapshot is
+  // captured at end-of-prefill, restored at end-of-generation, and the
+  // generated pre-reasoning prefix (when any), close marker, and
+  // post-reasoning tail are replayed through `llama_decode` so both KV
+  // halves stay consistent.
   //
   // Uniform hard-fail contract (PR #2813): when the feature is on,
   // ANY inability to remove the reasoning span from cache surfaces to
   // the caller as `qvac_errors::StatusError`, thrown from
   // `compactThinkSpan` after local rollback so both driver metadata
   // and live KV agree on the recovery cursor:
-  //   - Unsupported recurrent template shape (generated opener or
-  //     multi-token close marker) — thrown from
+  //   - Unsupported recurrent template shape (multi-token close
+  //     marker) — thrown from
   //     `snapshotForRecurrentRollback`; the wrapper restores the
   //     pre-prompt checkpoint (or wipes the sequence and resets
   //     positional accounting on restore underflow), and rethrows.

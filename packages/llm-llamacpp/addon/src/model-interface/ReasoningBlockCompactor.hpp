@@ -121,11 +121,38 @@ public:
   // of any subsequent tokens recorded through `recordPostReasoningToken`.
   // Gated on the recurrent-snapshot feature and an existing boundary
   // snapshot — pure-attention models neither restore nor replay.
-  // Without this, the restored SSM state would contain the forced
-  // `<think>\n` opener with no matching close marker before the
-  // answer tail, which is an unbalanced (out-of-distribution) recurrent
-  // state for hybrid models on the next turn.
+  // Without this, the restored SSM state would contain either the
+  // force-opened opener or the replayed generated opener with no
+  // matching close marker before the answer tail, which is an
+  // unbalanced (out-of-distribution) recurrent state for hybrid models
+  // on the next turn.
   void recordCloseMarkerForReplay(llama_token id);
+
+  // Seeds the replay buffer with a token that was sampled BEFORE the
+  // reasoning open marker fired (either template preamble that the
+  // model emits before `<think>`, or one of the tokens that make up
+  // the opener itself). Called for every sampled token while reasoning
+  // is not yet open, so on the recurrent / hybrid path the restored
+  // end-of-prefill snapshot can replay `[pre-reasoning tokens...,
+  // close token, captured tail...]` and land in a balanced
+  // `<think>...</think>` state without ever advancing the SSM through
+  // the discarded reasoning span.
+  //
+  // Gated identically to `recordCloseMarkerForReplay`: no-op on pure-
+  // attention paths, on features-off requests, and before the
+  // end-of-prefill boundary snapshot has been captured (nothing to
+  // restore against, so seeding would be pointless bookkeeping).
+  // Additionally no-op once an open span has been recorded (i.e.
+  // after the reasoning open flip) so callers can safely invoke this
+  // for every token where `reasoningState_.inside_reasoning == false`
+  // without duplicating post-close answer tokens that
+  // `recordPostReasoningToken` is already capturing.
+  //
+  // Force-open templates do not exercise the pre-open branch of this
+  // path because `reasoningState_.inside_reasoning` is set at the end
+  // of prefill, so callers never see a "pre-reasoning" token in that
+  // case.
+  void recordPreReasoningToken(llama_token id);
 
   // ---- End-of-prefill snapshot ----
   //

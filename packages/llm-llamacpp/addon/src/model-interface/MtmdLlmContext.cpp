@@ -44,9 +44,8 @@ void throwUnsupportedRecurrentReasoningCompaction(
       toString(FailedToDecode),
       string_format(
           "%s remove_thinking_from_context is enabled for a hybrid/recurrent "
-          "model, but recurrent reasoning compaction requires a chat template "
-          "that force-opens reasoning during prefill and a single-token close "
-          "marker; unsupported because %s",
+          "model, but recurrent reasoning compaction requires a single-token "
+          "reasoning close marker; unsupported because %s",
           labelTag,
           recurrentReasoningBoundaryFailureReason(decision)));
 }
@@ -723,7 +722,8 @@ void MtmdLlmContext::cancelGenerationCleanup(
   // Cancel = "request never happened": roll back to the pre-request
   // cursor for both prefill- and decode-stage cancels.
   // `reasoningBoundary` is compaction-only and not used here — restoring
-  // it would leak the cancelled prompt + forced opener into the cache.
+  // it would leak the cancelled prompt / generated-prefix state into
+  // the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
   if (needsRecurrentSnapshot_) {
@@ -886,6 +886,14 @@ bool MtmdLlmContext::generateResponse(
     // `current_.pos - (openTokenCount - 1)`.
     if (reasoningEnabled_) {
       const bool wasInside = reasoningState_.inside_reasoning;
+      // See TextLlmContext::onLogitsReady for the design rationale:
+      // seed every pre-reasoning sampled token into the recurrent
+      // replay buffer BEFORE running the detector so a generated
+      // opener template still lands in a balanced state after the
+      // end-of-prefill snapshot is restored.
+      if (!wasInside) {
+        compactor_.recordPreReasoningToken(tokenId);
+      }
       qvac_lib_inference_addon_llama::utils::updateReasoningBuffer(
           tokenStr, reasoningState_);
       const bool nowInside = reasoningState_.inside_reasoning;
@@ -1016,16 +1024,17 @@ std::function<void()>
 MtmdLlmContext::applyGenerationParams(const GenerationParams& overrides) {
   // Hybrid / fully-recurrent models (Qwen3.5, Qwen3-Next, Jamba, ...)
   // are supported via the snapshot + replay path in `compactThinkSpan`
-  // when the template force-opens reasoning during prefill and the
-  // close marker is a single token.
+  // when the close marker is a single token. Generated pre-reasoning
+  // tokens are seeded into the replay buffer before the close marker,
+  // so templates no longer have to force-open reasoning during prefill.
   //
   // Uniform hard-fail contract (PR #2813): when
   // `remove_thinking_from_context` is on, ANY inability to remove the
   // reasoning span from cache surfaces as `qvac_errors::StatusError`,
   // thrown from `compactThinkSpan` after local rollback so both
   // driver metadata and live KV agree on the recovery cursor:
-  //   - Unsupported recurrent template shape (generated opener or
-  //     multi-token close marker): thrown from
+  //   - Unsupported recurrent template shape (multi-token close
+  //     marker): thrown from
   //     `snapshotForRecurrentRollback`; the wrapper restores the
   //     pre-prompt checkpoint (or wipes the sequence on restore
   //     underflow), resets local positional accounting, and re-throws.
@@ -1195,14 +1204,13 @@ void MtmdLlmContext::configureReasoningTags(
     const bool reasoningCompactionActive = params_.reasoning_budget != 0;
     if (needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
         reasoningCompactionActive && !isPrefillOnlyRequest_ &&
-        (!thinkingForcedOpen_ || !reasoningState_.close_is_single_token)) {
+        !reasoningState_.close_is_single_token) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
               "[MtmdLlm] recurrent reasoning compaction will hard-fail if "
               "this request emits reasoning: remove_thinking_from_context is "
-              "enabled on a hybrid/recurrent model, but the template must "
-              "force-open reasoning during prefill and close marker '%s' "
+              "enabled on a hybrid/recurrent model, but close marker '%s' "
               "must tokenise to one token\n",
               reasoningTags->close.c_str()));
     }
@@ -1241,12 +1249,12 @@ void MtmdLlmContext::snapshotForRecurrentRollback() {
   }
   // Multimodal prefill decodes chunks (images + text) one at a time
   // via `mtmd_helper_eval_chunk_single`, so the recurrent rollback
-  // anchor is the completed prefill state. For forced-open templates
-  // this leaves the opener in the restored prefix — a small accepted
-  // residue compared to the reasoning body. Generated-opener templates
-  // have no matching opener in the completed prefill state for the
-  // replayed close marker, so the strict default-on contract hard-fails
-  // them below instead of silently preserving reasoning in cache.
+  // anchor is the completed prefill state. For force-open templates
+  // this leaves the opener in the restored prefix. For generated-
+  // opener templates the decode loop seeds every sampled token up to
+  // the open-detection flip into the replay buffer before the close
+  // marker and visible tail, so the restored recurrent state still
+  // sees a balanced compacted reasoning block.
   try {
     if (decision != RecurrentReasoningBoundaryDecision::Capture) {
       throwUnsupportedRecurrentReasoningCompaction("[MtmdLlm]", decision);
@@ -1812,6 +1820,12 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
 
   if (reasoningEnabled_) {
     const bool wasInside = reasoningState_.inside_reasoning;
+    // Seed pre-reasoning tokens for the recurrent replay path — see
+    // the earlier MtmdLlmContext detection site and
+    // TextLlmContext::onLogitsReady for full rationale.
+    if (!wasInside) {
+      compactor_.recordPreReasoningToken(tokenId);
+    }
     qvac_lib_inference_addon_llama::utils::updateReasoningBuffer(
         tokenStr, reasoningState_);
     const bool nowInside = reasoningState_.inside_reasoning;
