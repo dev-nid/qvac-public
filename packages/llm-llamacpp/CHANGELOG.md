@@ -21,7 +21,7 @@ This release enables thinking-block compaction by default and extends `remove_th
 - User-visible runtime stats exclude recurrent replay maintenance decode time, so replay work does not inflate prompt / generation counters or batch TTFT.
 - Continuous-batching multimodal path (`parallel >= 2` with images) now runs the same reasoning compaction as the text path; regression covered by `BatchMtmdQwen35DropsThinkBlocks`.
 - The pre-request rollback anchor is now captured after any in-prefill context slide, so cancel and compaction-failure rollbacks reset to the post-slide cursor instead of a stale pre-slide position.
-- Recurrent reasoning snapshotting is gated on a single-token close marker; hybrid templates whose close marker tokenises to more than one piece safely skip recurrent compaction rather than corrupting SSM state.
+- Recurrent reasoning snapshotting is gated on forced-open templates with a single-token close marker; hybrid templates with generated reasoning openers or multi-token close markers now hard-fail when `remove_thinking_from_context` is enabled rather than silently preserving reasoning in cache or corrupting SSM state. Prefill-only (cache-warm) requests are exempt: they never enter generation and cannot emit reasoning tokens, so the boundary capture is skipped and the request succeeds even on non-conforming hybrid templates.
 
 ### Fixed
 
