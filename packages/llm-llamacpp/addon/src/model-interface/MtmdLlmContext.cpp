@@ -760,6 +760,27 @@ bool MtmdLlmContext::cancelGenerationCleanup(
         current_.cacheTokens = restoredPos;
         rollbackOk = false;
       }
+    } else if (current_.pos > preRequestUsage_.pos) {
+      // No prefill-entry snapshot is available (capture at admission was
+      // refused or the anchor was never taken), yet the driver has since
+      // advanced past the pre-request cursor. There is no way to roll
+      // the recurrent state back — partial `seq_rm` is rejected on
+      // recurrent memory — so force metadata back to the pre-request
+      // cursor for honest stats and signal failure so the scheduler
+      // skips `saveCache`, preserving the last known-good on-disk cache.
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[MtmdLlm] cancel with no prefill-entry snapshot and advanced "
+              "cursor (preRequestPos=%d, currentPos=%d, seqId=%d); scheduler "
+              "must skip saveCache to avoid persisting the cancelled "
+              "request's peak state\n",
+              preRequestUsage_.pos,
+              current_.pos,
+              seqId_));
+      current_ = preRequestUsage_;
+      current_.cacheTokens = preRequestUsage_.pos;
+      rollbackOk = false;
     }
   } else {
     const llama_pos delta = current_.pos - preRequestUsage_.pos;

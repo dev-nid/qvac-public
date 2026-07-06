@@ -1088,6 +1088,26 @@ bool TextLlmContext::onCancel(
         nPast_ = restoredNPast;
         rollbackOk = false;
       }
+    } else if (nPast_ > preRequestNPast_) {
+      // No prefill-entry snapshot is available (capture at admission was
+      // refused or the anchor was never taken), yet the driver has since
+      // advanced past the pre-request cursor. There is no way to roll
+      // the recurrent state back — partial `seq_rm` is rejected on
+      // recurrent memory — so force metadata back to the pre-request
+      // cursor for honest stats and signal failure so the scheduler
+      // skips `saveCache`, preserving the last known-good on-disk cache.
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "[TextLlm] cancel with no prefill-entry snapshot and advanced "
+              "cursor (preRequestNPast=%d, nPast=%d, seqId=%d); scheduler "
+              "must skip saveCache to avoid persisting the cancelled "
+              "request's peak state\n",
+              preRequestNPast_,
+              nPast_,
+              seqId_));
+      nPast_ = preRequestNPast_;
+      rollbackOk = false;
     }
   } else {
     const llama_pos delta = nPast_ - preRequestNPast_;
