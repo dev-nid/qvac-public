@@ -15,21 +15,27 @@ This release enables thinking-block compaction by default and extends `remove_th
 
 ### Changed
 
-- Recurrent / hybrid models no longer reject `remove_thinking_from_context`. The addon now captures a full-state snapshot at the reasoning boundary, restores it at end-of-generation, and replays the post-reasoning answer tail through `llama_decode`.
+- Recurrent / hybrid models no longer reject `remove_thinking_from_context`. The addon now captures a full-state snapshot at the reasoning boundary, restores it at end-of-generation, and replays the generated pre-reasoning prefix, close marker, and post-reasoning answer tail through `llama_decode`.
+- Recurrent reasoning snapshotting now supports both forced-open templates and generated reasoning openers when the close marker is a single token. Hybrid templates with multi-token close markers still hard-fail when `remove_thinking_from_context` is enabled, rather than silently preserving reasoning in cache or corrupting SSM state. Prefill-only (cache-warm) requests are exempt: they never enter generation and cannot emit reasoning tokens, so the boundary capture is skipped and the request succeeds even on non-conforming hybrid templates.
 - Hybrid snapshot storage is disk-backed via llama state save/load APIs instead of duplicating the full KV + recurrent state in memory.
+- Batch cache saves now use temp-file writes plus atomic promotion, matching the single-prompt `CacheManager` path so a failed or interrupted save preserves the previous good cache file.
 - The compaction default and documentation now apply consistently across text, multimodal, and continuous-batching paths.
 - User-visible runtime stats exclude recurrent replay maintenance decode time, so replay work does not inflate prompt / generation counters or batch TTFT.
 - Continuous-batching multimodal path (`parallel >= 2` with images) now runs the same reasoning compaction as the text path; regression covered by `BatchMtmdQwen35DropsThinkBlocks`.
 - The pre-request rollback anchor is now captured after any in-prefill context slide, so cancel and compaction-failure rollbacks reset to the post-slide cursor instead of a stale pre-slide position.
-- Recurrent reasoning snapshotting is gated on forced-open templates with a single-token close marker; hybrid templates with generated reasoning openers or multi-token close markers now hard-fail when `remove_thinking_from_context` is enabled rather than silently preserving reasoning in cache or corrupting SSM state. Prefill-only (cache-warm) requests are exempt: they never enter generation and cannot emit reasoning tokens, so the boundary capture is skipped and the request succeeds even on non-conforming hybrid templates.
 
 ### Fixed
 
 - Hybrid restore / replay failures now fail hard instead of returning an answer from a potentially contaminated KV / SSM state. The compactor clears sequence memory, resets local accounting, and surfaces an error.
+- Generation-time context slides that invalidate reasoning state now hard-fail instead of turning `remove_thinking_from_context` into a silent no-op. This covers both already-open reasoning spans and generated-opener cases where a recurrent boundary snapshot was invalidated before `<think>` was detected; if no opener is later emitted, compaction remains a no-op.
 - Pure-attention `remove_thinking_from_context` failures (rejected `seq_rm + seq_add`, or a reasoning span left partially resident after a tools-compact tail trim) now hard-fail with a coherent rollback: the driver drops `[preRequestCursor, currentCursor)` from live memory, resets positional accounting to the pre-request cursor, and rethrows so both driver metadata and live KV agree on the pre-request state.
 - Cancellation now restores the pre-request checkpoint in both prefill and decode stages, so cancelled requests follow the "request never happened" cache contract.
 - Batch cancellation now reports post-rollback `CacheTokens` instead of the peak value reached before rollback.
 - Failed batch recovery skips cache saving, preventing invalid cache files after hard-fail compaction or decode errors.
+- Explicit single-prompt `saveCacheToDisk` failures now reset model state and invalidate the active cache session before rethrowing, preventing later prompts from retrying or reusing a stale unsaved cache session.
+- Batch cache save failures now clean up temporary sidecar files and avoid leaving partially written canonical cache files.
+- Text and multimodal batch cache loads now validate restored live llama memory against cache metadata (`NPast` and `CacheTokens`) before accepting the session. Mismatches reject the cache and clear restored sequence state.
+- Finetune pre-flush cache save failures now reset model state and invalidate the active cache session before rethrowing.
 - Continuous batching (`parallel >= 2`) now supports hybrid text thinking compaction by taking the recurrent snapshot after scheduler-owned prefill.
 - Replay clipping preserves the reasoning close marker when tools compaction trims the answer tail, so subsequent turns on hybrid models see a complete `<think>...</think>` boundary rather than an unpaired opener.
 - Multimodal `MtmdLlmContext` refreshes `cacheTokens` after both attention and recurrent compaction, keeping the `cacheTokens == llama_memory_seq_token_count(seqId)` invariant honest under M-RoPE.
