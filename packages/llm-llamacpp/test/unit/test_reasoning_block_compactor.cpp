@@ -721,17 +721,14 @@ TEST(
 }
 
 TEST(ReasoningBlockCompactorFailureStats, NoOpOutcomesDoNotThrow) {
-  // Non-failure no-op paths (degenerate span where close never landed)
-  // leave the cache untouched and MUST NOT throw. Without this guard,
-  // any caller invoking `compact()` on an incomplete span (e.g. a turn
-  // where reasoning never closed) would be spuriously failed.
+  // Non-failure no-op paths where the live cursor is already before the
+  // reasoning span leave the cache untouched and MUST NOT throw. Without this
+  // guard, a tail-eraser that removed the entire span before compaction ran
+  // would be spuriously failed.
   //
-  // We deliberately do NOT cover the `end <= start` and `end > pos`
-  // sub-cases here because the public API does not expose a way to
-  // construct those configurations: `setOpenSpan` rejects `start < 0`
-  // and `onCloseCommitted` only ever monotonically writes `end`. Those
-  // bail-outs are defensive backstops that fire only if the compactor
-  // is mis-used by an internal caller.
+  // This test covers the open-ended shape only after the live cursor has
+  // already moved before the span. Resident open-ended spans are covered below
+  // because they must compact or hard-fail, not return NoOp.
 
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
@@ -743,7 +740,7 @@ TEST(ReasoningBlockCompactorFailureStats, NoOpOutcomesDoNotThrow) {
   ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
 
   const auto outcome = fx.compactor.compact(
-      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/10, "[Test]");
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp);
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
@@ -827,6 +824,71 @@ private:
 
 } // namespace
 
+TEST(
+    ReasoningBlockCompactorOpenSpan,
+    PureAttentionCompactsResidentOpenSpanWithoutClose) {
+  // Generation can end after `<think>` but before `</think>` due to
+  // n_predict, antiprompt, or context limits. If `[start, pos)` is still
+  // resident, pure-attention compaction must remove that open span rather
+  // than report a successful NoOp that leaves reasoning in cache.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(false);
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  AcceptingSliderOps accepting;
+  fx.compactor.setContextSliderOpsForTesting(&accepting);
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(
+      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::CompactedAttention);
+  EXPECT_EQ(outcome.newPos, 15);
+  EXPECT_EQ(outcome.discarded, 5);
+  EXPECT_EQ(outcome.keptPrefixEnd, 15);
+  EXPECT_EQ(accepting.seqRmCalls(), 1);
+  EXPECT_EQ(accepting.seqAddCalls(), 1);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 1);
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
+TEST(
+    ReasoningBlockCompactorOpenSpan,
+    RecurrentResidentOpenSpanHardFailsWithoutClose) {
+  // Recurrent / hybrid memory cannot safely replay an unfinished reasoning
+  // block: there is no captured close marker to balance the restored state.
+  // The compactor must hard-fail so callers reset/throw and skip cache save.
+  CompactorFixture fx;
+  fx.compactor.setRemoveThinkingFromContext(true);
+  fx.compactor.setReasoningEnabled(true);
+  fx.compactor.setNeedsRecurrentSnapshot(true);
+  fx.rollback.seedReasoningBoundaryForTesting(/*nPast=*/10);
+  ASSERT_TRUE(fx.rollback.hasReasoningBoundary());
+
+  fx.compactor.setOpenSpan(/*start=*/15);
+  ASSERT_FALSE(fx.compactor.hasCapturedCloseSpanForTesting());
+
+  AcceptingSliderOps accepting;
+  fx.compactor.setContextSliderOpsForTesting(&accepting);
+  const auto outcome = fx.compactor.compact(
+      /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
+  fx.compactor.setContextSliderOpsForTesting(nullptr);
+
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
+      << "recurrent open-ended reasoning span must hard-fail instead of "
+         "leaking resident reasoning tokens";
+  EXPECT_NE(
+      outcome.failureMessage.find("open reasoning span"), std::string::npos);
+  EXPECT_EQ(accepting.seqRmCalls(), 0);
+  EXPECT_EQ(accepting.seqAddCalls(), 0);
+  EXPECT_EQ(fx.compactor.blockDiscards(), 0);
+  EXPECT_FALSE(fx.compactor.hasOpenSpan());
+}
+
 // Pure-attention `seq_rm + seq_add` rejection MUST surface as
 // `FailedKvIntact` (not `FailedKvWiped`) so the caller can roll back
 // `[preRequestCursor, currentCursor)` on live KV instead of resetting
@@ -902,10 +964,10 @@ TEST(
 //             contract by dropping the resident remainder via a
 //             clamped `[start, pos)` `seq_rm + seq_add`; reports
 //             `CompactedAttention`.
-//           * Recurrent / hybrid: NoOp — replay is anchored at a
+//           * Recurrent / hybrid: hard-fail — replay is anchored at a
 //             captured post-reasoning tail we can no longer reconcile
-//             against a shorter live cache without the driver's
-//             pre-request rollback anchor.
+//             against a shorter live cache without leaving resident
+//             reasoning behind.
 //      The current Qwen3-only tools_compact caller is not expected to
 //      overshoot `</think>` (its trim is sized against the trailing
 //      tool region only); these guards are the defence-in-depth path

@@ -31,13 +31,14 @@ namespace qvac_lib_inference_addon_llama {
 // `compact()` returns `Outcome::Kind::FailedKvIntact` on pure-
 // attention `seq_rm + seq_add` rejection (live KV was left untouched)
 // and `Outcome::Kind::FailedKvWiped` on hybrid restore underflow,
-// hybrid replay rejection, or the defensive no-boundary branch
-// (sequence memory was best-effort cleared). Callers must run the
-// live-KV recovery documented on the outcome kind (roll back
-// `[preRequestCursor, currentCursor)` or reset positional accounting
-// to zero) before rethrowing `qvac_errors::StatusError` so no
-// saveCache path can persist a header that misrepresents live
-// memory or leaves the reasoning span in cache.
+// hybrid replay rejection, recurrent partial-resident spans, recurrent
+// open spans without a captured close marker, or the defensive
+// no-boundary branch (sequence memory was best-effort cleared).
+// Callers must run the live-KV recovery documented on the outcome kind
+// (roll back `[preRequestCursor, currentCursor)` or reset positional
+// accounting to zero) before rethrowing `qvac_errors::StatusError` so
+// no saveCache path can persist a header that misrepresents live memory
+// or leaves the reasoning span in cache.
 //
 // State is per-inference. Call `reset()` at the start of each
 // `evalMessageWithTools`. Feature flags (`removeThinkingFromContext`,
@@ -201,8 +202,9 @@ public:
   //     before rethrowing so both driver metadata and live KV stay
   //     coherent for the next request on the same driver.
   //   * Hybrid `restoreReasoningBoundary` / `replayPostReasoning`
-  //     failure, a defensive missing-boundary hit, or a recurrent
-  //     partial-resident reasoning span left after a tail trim:
+  //     failure, a defensive missing-boundary hit, a recurrent
+  //     partial-resident reasoning span left after a tail trim, or a
+  //     recurrent open reasoning span with no captured close marker:
   //     `compact()` best-effort clears the sequence memory (attention
   //     KV cells + recurrent state) and returns
   //     `Outcome::Kind::FailedKvWiped`. The caller MUST reset its
@@ -221,8 +223,8 @@ public:
   // surface it as an exception.
   struct Outcome {
     enum class Kind {
-      // Feature off, no span captured, degenerate span, or a tail trim
-      // removed the whole reasoning span before compaction ran.
+      // Feature off, no span captured, degenerate span, or the live cursor is
+      // already before the reasoning span when compaction runs.
       NoOp,
       CompactedAttention,
       CompactedRecurrent,

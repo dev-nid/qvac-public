@@ -723,6 +723,15 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
     hasKvCacheContext = true;
   }
 
+  auto resetAndInvalidateActiveCache = [this]() {
+    resetState(false);
+    if (state_->cacheManager_.has_value()) {
+      state_->cacheManager_->invalidate();
+    }
+  };
+
+  bool shouldSaveCache = false;
+  bool shouldResetAfterInference = false;
   state_->llmContext_->validatePromptPolicy(
       resolved.chatMsgs, resolved.tools, resolved.layout, hasKvCacheContext);
 
@@ -733,74 +742,85 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
 
   auto restore =
       state_->llmContext_->applyGenerationParams(prompt.generationParams);
-  ScopeGuard paramsGuard([&] { restore(); });
 
-  const LlmContext::EvalMessageResult evalResult =
-      resolved.tools.empty()
-          ? state_->llmContext_->evalMessage(
-                resolved.chatMsgs, resolved.isCacheLoaded, prompt.prefill)
-          : state_->llmContext_->evalMessageWithTools(
-                resolved.chatMsgs,
-                resolved.tools,
-                resolved.isCacheLoaded,
-                prompt.prefill);
+  try {
+    ScopeGuard paramsGuard([&] { restore(); });
 
-  if (!evalResult.ok) {
-    QLOG_IF(
-        Priority::DEBUG,
-        "Inference was interrupted during prompt evaluation\n");
-    if (!evalResult.rollbackOk) {
-      resetState(false);
-      if (state_->cacheManager_.has_value()) {
-        state_->cacheManager_->invalidate();
+    const LlmContext::EvalMessageResult evalResult =
+        resolved.tools.empty()
+            ? state_->llmContext_->evalMessage(
+                  resolved.chatMsgs, resolved.isCacheLoaded, prompt.prefill)
+            : state_->llmContext_->evalMessageWithTools(
+                  resolved.chatMsgs,
+                  resolved.tools,
+                  resolved.isCacheLoaded,
+                  prompt.prefill);
+
+    if (!evalResult.ok) {
+      QLOG_IF(
+          Priority::DEBUG,
+          "Inference was interrupted during prompt evaluation\n");
+      if (!evalResult.rollbackOk) {
+        resetAndInvalidateActiveCache();
+      }
+      return out;
+    }
+
+    if (prompt.prefill) {
+      // On prefill, no logits are accessed so llama.cpp's synchronize() is
+      // never triggered. Force it here so t_p_eval_ms is committed to the perf
+      // context before the caller reads runtimeStats().
+      llama_synchronize(state_->llmContext_->getCtx());
+      shouldSaveCache = true;
+    } else {
+      std::ostringstream oss;
+      auto callback = prompt.outputCallback;
+      if (!prompt.outputCallback) {
+        callback = [&](const std::string& token) { oss << token; };
+      }
+
+      const LlmContext::GenerateResponseResult generationResult =
+          state_->llmContext_->generateResponse(callback);
+      if (!generationResult.ok) {
+        resetState();
+        std::string errorMsg = string_format("%s: context overflow\n", __func__);
+        throw qvac_errors::StatusError(
+            ADDON_ID, toString(ContextOverflow), errorMsg);
+      }
+
+      if (!prompt.outputCallback) {
+        out = oss.str();
+      }
+
+      if (generationResult.rollbackOk) {
+        shouldSaveCache = true;
+        shouldResetAfterInference = resolved.shouldResetAfterInference;
+      } else {
+        // The driver could not prove the live recurrent state was rolled back
+        // to the pre-request cursor. Skipping this prompt's save protects the
+        // file immediately, but the active cache session must also be dropped:
+        // otherwise a later same-key prompt could reuse dirty live state, or a
+        // cache-key transition could save that dirty state under the old key.
+        resetAndInvalidateActiveCache();
       }
     }
-    return out;
+  } catch (...) {
+    // Once `handleCache()` has activated or loaded a cache session, any thrown
+    // eval / generation failure must leave no active session behind. In
+    // particular, strict `remove_thinking_from_context` compaction failures
+    // throw after local rollback/wipe; keeping the old cacheKey active would
+    // let a later prompt reuse or auto-save that recovery state over the last
+    // known-good on-disk cache. Do not catch policy-validation failures before
+    // admission, or explicit save failures below after successful inference.
+    resetAndInvalidateActiveCache();
+    throw;
   }
 
-  if (prompt.prefill) {
-    // On prefill, no logits are accessed so llama.cpp's synchronize() is never
-    // triggered. Force it here so t_p_eval_ms is committed to the perf context
-    // before the caller reads runtimeStats().
-    llama_synchronize(state_->llmContext_->getCtx());
+  if (shouldSaveCache) {
     maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
-    return out;
   }
 
-  std::ostringstream oss;
-  auto callback = prompt.outputCallback;
-  if (!prompt.outputCallback) {
-    callback = [&](const std::string& token) { oss << token; };
-  }
-
-  const LlmContext::GenerateResponseResult generationResult =
-      state_->llmContext_->generateResponse(callback);
-  if (!generationResult.ok) {
-    resetState();
-    std::string errorMsg = string_format("%s: context overflow\n", __func__);
-    throw qvac_errors::StatusError(
-        ADDON_ID, toString(ContextOverflow), errorMsg);
-  }
-
-  if (!prompt.outputCallback) {
-    out = oss.str();
-  }
-
-  if (generationResult.rollbackOk) {
-    maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
-  } else {
-    // The driver could not prove the live recurrent state was rolled back
-    // to the pre-request cursor. Skipping this prompt's save protects the
-    // file immediately, but the active cache session must also be dropped:
-    // otherwise a later same-key prompt could reuse dirty live state, or a
-    // cache-key transition could save that dirty state under the old key.
-    resetState(false);
-    if (state_->cacheManager_.has_value()) {
-      state_->cacheManager_->invalidate();
-    }
-  }
-
-  if (resolved.shouldResetAfterInference && generationResult.rollbackOk) {
+  if (shouldResetAfterInference) {
     resetState(false);
   }
   return out;

@@ -202,10 +202,45 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
   out.spanStart = start;
   out.spanEnd = recordedEnd;
 
-  // Skip open (close never captured) or degenerate spans without
-  // touching the cache. This is the single validation backstop for
-  // all close-capture sites — none validate `end > start` themselves.
-  if (recordedEnd < 0 || recordedEnd <= start) {
+  // A missing close marker is only a no-op if the live cursor has already
+  // moved before the open span. Otherwise `[start, pos)` is still resident
+  // reasoning and must be removed or hard-failed under the strict cleanup
+  // contract.
+  const bool openEnded = recordedEnd < 0;
+  if (openEnded) {
+    if (start >= pos) {
+      return out;
+    }
+    if (needsRecurrentSnapshot_) {
+      QLOG_IF(
+          Priority::WARNING,
+          string_format(
+              "%s thinking-block compaction: recurrent path cannot compact "
+              "open reasoning span [%d, %d) without a captured close marker "
+              "(pos=%d, seqId=%d); wiping sequence and hard-failing so "
+              "reasoning does not remain in cache\n",
+              labelTag,
+              start,
+              pos,
+              pos,
+              seqId));
+      clearSeqOnFailure(ctx, seqId);
+      out.kind = Outcome::Kind::FailedKvWiped;
+      out.failureMessage = string_format(
+          "%s ReasoningBlockCompactor::compact: recurrent / hybrid "
+          "open reasoning span [%d, %d) has no captured close marker "
+          "(pos=%d, seqId=%d)",
+          labelTag,
+          start,
+          pos,
+          pos,
+          seqId);
+      return out;
+    }
+  } else if (recordedEnd <= start) {
+    // Degenerate spans have no resident reasoning range to remove. This is the
+    // single validation backstop for close-capture sites — none validate
+    // `end > start` themselves.
     return out;
   }
   // `recordedEnd > pos` means a tail-eraser (today: the tools_compact
@@ -267,7 +302,7 @@ ReasoningBlockCompactor::Outcome ReasoningBlockCompactor::compact(
       return out;
     }
   }
-  const llama_pos end = std::min(recordedEnd, pos);
+  const llama_pos end = openEnded ? pos : std::min(recordedEnd, pos);
 
   // Defence-in-depth: `setOpenSpan` already refuses the recurrent+
   // no-boundary path, and `snapshotAtPrefillBoundary` throws on

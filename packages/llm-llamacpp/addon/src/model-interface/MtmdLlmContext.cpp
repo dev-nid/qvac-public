@@ -1397,9 +1397,8 @@ void MtmdLlmContext::compactThinkSpan() {
     // Nothing to do: feature off, no span captured, degenerate span,
     // or a tail-eraser already removed the whole reasoning span before
     // compaction ran. Live memory still matches `current_`, so leave
-    // it alone. Partial-resident recurrent spans are not allowed to
-    // reach this branch; the compactor reports `FailedKvWiped`
-    // instead.
+    // it alone. Partial-resident or open-ended recurrent spans are not allowed
+    // to reach this branch; the compactor reports `FailedKvWiped` instead.
     break;
   case OutcomeKind::FailedKvIntact: {
     // Pure-attention `seq_rm + seq_add` rejection. Live KV was not
