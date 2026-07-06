@@ -1575,7 +1575,8 @@ bool TextLlmContext::loadCache(
       static_cast<llama_pos>(llama_memory_seq_token_count(mem, seqId_));
   const llama_pos metadataCacheTokens =
       tokenCount >= SESSION_METADATA_FIELD_COUNT
-          ? sessionTokens[static_cast<size_t>(SessionMetadataField::CacheTokens)]
+          ? sessionTokens[static_cast<size_t>(
+                SessionMetadataField::CacheTokens)]
           : metadataNPast;
   if (restoredCacheTokens != metadataCacheTokens) {
     throw qvac_errors::StatusError(

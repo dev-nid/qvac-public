@@ -2073,7 +2073,8 @@ bool MtmdLlmContext::loadCache(
     throw qvac_errors::StatusError(
         ADDON_ID,
         toString(UnableToLoadSessionFile),
-        "MtmdLlmContext::loadCache: llama memory is null after loading cache '" +
+        "MtmdLlmContext::loadCache: llama memory is null after loading cache "
+        "'" +
             cacheKey + "'");
   }
 
