@@ -38,8 +38,8 @@ bool isFileInitialized(const std::filesystem::path& path) {
 
 void throwUnsupportedRecurrentReasoningCompaction(
     const char* labelTag,
-    qvac_lib_inference_addon_llama::utils::
-        RecurrentReasoningBoundaryDecision decision) {
+    qvac_lib_inference_addon_llama::utils::RecurrentReasoningBoundaryDecision
+        decision) {
   throw qvac_errors::StatusError(
       ADDON_ID,
       toString(FailedToDecode),
@@ -1143,11 +1143,11 @@ TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
     return -1;
   }
   const auto decision = recurrentReasoningBoundaryDecision(
-          needsRecurrentSnapshot_,
-          removeThinkingFromContext_,
-          reasoningEnabled_ && params_.reasoning_budget != 0,
-          thinkingForcedOpen_,
-          reasoningState_.close_is_single_token);
+      needsRecurrentSnapshot_,
+      removeThinkingFromContext_,
+      reasoningEnabled_ && params_.reasoning_budget != 0,
+      thinkingForcedOpen_,
+      reasoningState_.close_is_single_token);
   switch (decision) {
   case RecurrentReasoningBoundaryDecision::Capture:
     break;
