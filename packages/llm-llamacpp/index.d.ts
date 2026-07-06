@@ -214,10 +214,17 @@ export interface GenerationParams {
    * capture, the pure-attention `seq_rm + seq_add` primitive, the
    * hybrid restore / replay step, or an unsupported multi-token
    * recurrent close marker — is surfaced to the caller as a
-   * `StatusError`. There is no
-   * soft-failure counter: if the feature is enabled and cache cleanup
-   * cannot complete, the request fails rather than delivering an
-   * answer with the reasoning span still resident in cache.
+   * `StatusError`. There is no soft-failure counter: if the feature is
+   * enabled and cache cleanup cannot complete, the final request result is
+   * failed rather than reported as a successful answer with the reasoning span
+   * still resident in cache.
+   *
+   * Streaming caveat: token callbacks (`outputCallback` / batch `onToken`) are
+   * invoked during generation, while reasoning-block compaction runs at
+   * end-of-generation. If compaction fails, streaming callers may already have
+   * received partial or complete text. Treat streamed text as tentative until
+   * the request completes successfully; non-streaming callers receive no
+   * successful returned answer on this failure path.
    *
    * Before throwing, the affected sequence is cleaned up so that the
    * next request on the same context starts from a coherent state:
