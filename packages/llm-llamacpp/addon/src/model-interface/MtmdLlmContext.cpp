@@ -12,6 +12,7 @@
 #include <llama/mtmd/mtmd-helper.h>
 #include <llama/mtmd/mtmd.h>
 
+#include "CacheManager.hpp"
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
 #include "MediaLoadOrder.hpp"
@@ -2067,6 +2068,42 @@ bool MtmdLlmContext::loadCache(
             "' exceeds current context size");
   }
 
+  auto* mem = llama_get_memory(modelCtx_.lctx);
+  if (mem == nullptr) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(UnableToLoadSessionFile),
+        "MtmdLlmContext::loadCache: llama memory is null after loading cache '" +
+            cacheKey + "'");
+  }
+
+  const llama_pos restoredNPast = llama_memory_seq_pos_max(mem, seqId_) + 1;
+  if (restoredNPast != getNPast()) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(UnableToLoadSessionFile),
+        string_format(
+            "MtmdLlmContext::loadCache: cache '%s' restored nPast=%d, but "
+            "metadata expected nPast=%d",
+            cacheKey.c_str(),
+            restoredNPast,
+            getNPast()));
+  }
+
+  const llama_pos restoredCacheTokens =
+      static_cast<llama_pos>(llama_memory_seq_token_count(mem, seqId_));
+  if (restoredCacheTokens != getCacheTokens()) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(UnableToLoadSessionFile),
+        string_format(
+            "MtmdLlmContext::loadCache: cache '%s' restored cacheTokens=%d, "
+            "but metadata expected cacheTokens=%d",
+            cacheKey.c_str(),
+            restoredCacheTokens,
+            getCacheTokens()));
+  }
+
   // Clamp discard to the per-slot window (ctxCeiling), not the physical
   // context, mirroring TextLlmContext::loadCache.
   const llama_pos window = ctxCeiling();
@@ -2076,9 +2113,7 @@ bool MtmdLlmContext::loadCache(
     shifter_.setDiscardBudget(configuredNDiscarded);
   }
 
-  if (auto* mem = llama_get_memory(modelCtx_.lctx); mem != nullptr) {
-    llama_memory_seq_rm(mem, seqId_, getNPast(), -1);
-  }
+  llama_memory_seq_rm(mem, seqId_, getNPast(), -1);
   restoredKvGuard.dismiss();
   return true;
 }
@@ -2095,18 +2130,22 @@ void MtmdLlmContext::saveCache(const std::string& cacheKey) const {
       static_cast<llama_token>(getFirstMsgTokens()),
       static_cast<llama_token>(getCacheTokens()),
       static_cast<llama_token>(getFirstMsgCacheTokens())};
+  const std::string tmpCacheKey = cacheKey + ".tmp";
   const auto savedBytes = llama_state_seq_save_file(
       modelCtx_.lctx,
-      cacheKey.c_str(),
+      tmpCacheKey.c_str(),
       seqId_,
       sessionTokens,
       SESSION_METADATA_FIELD_COUNT);
   if (savedBytes == 0) {
+    std::error_code ec;
+    std::filesystem::remove(tmpCacheKey, ec);
     throw qvac_errors::StatusError(
         ADDON_ID,
-        toString(InvalidInputFormat),
+        toString(UnableToSaveSessionFile),
         "MtmdLlmContext::saveCache: failed to save cache '" + cacheKey + "'");
   }
+  CacheManager::atomicPromoteFile(tmpCacheKey, cacheKey);
 }
 
 void MtmdLlmContext::snapshotPreRequestCursor() {

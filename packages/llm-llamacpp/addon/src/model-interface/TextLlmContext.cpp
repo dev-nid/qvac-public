@@ -10,6 +10,7 @@
 #include <inference-addon-cpp/Errors.hpp>
 #include <llama.h>
 
+#include "CacheManager.hpp"
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
 #include "addon/LlmErrors.hpp"
@@ -1570,6 +1571,24 @@ bool TextLlmContext::loadCache(
             metadataNPast));
   }
 
+  const llama_pos restoredCacheTokens =
+      static_cast<llama_pos>(llama_memory_seq_token_count(mem, seqId_));
+  const llama_pos metadataCacheTokens =
+      tokenCount >= SESSION_METADATA_FIELD_COUNT
+          ? sessionTokens[static_cast<size_t>(SessionMetadataField::CacheTokens)]
+          : metadataNPast;
+  if (restoredCacheTokens != metadataCacheTokens) {
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(UnableToLoadSessionFile),
+        string_format(
+            "TextLlmContext::loadCache: cache '%s' restored cacheTokens=%d, "
+            "but metadata expected cacheTokens=%d",
+            cacheKey.c_str(),
+            restoredCacheTokens,
+            metadataCacheTokens));
+  }
+
   nPast_ = metadataNPast;
   firstMsgTokens_ = metadataFirstMsgTokens;
   // Clamp discard to the per-slot window (ctxCeiling), not the physical
@@ -1597,18 +1616,22 @@ void TextLlmContext::saveCache(const std::string& cacheKey) const {
       static_cast<llama_token>(getFirstMsgTokens()),
       static_cast<llama_token>(getCacheTokens()),
       static_cast<llama_token>(getFirstMsgCacheTokens())};
+  const std::string tmpCacheKey = cacheKey + ".tmp";
   const auto savedBytes = llama_state_seq_save_file(
       modelCtx_.lctx,
-      cacheKey.c_str(),
+      tmpCacheKey.c_str(),
       seqId_,
       sessionTokens,
       SESSION_METADATA_FIELD_COUNT);
   if (savedBytes == 0) {
+    std::error_code ec;
+    std::filesystem::remove(tmpCacheKey, ec);
     throw qvac_errors::StatusError(
         ADDON_ID,
-        toString(InvalidInputFormat),
+        toString(UnableToSaveSessionFile),
         "TextLlmContext::saveCache: failed to save cache '" + cacheKey + "'");
   }
+  CacheManager::atomicPromoteFile(tmpCacheKey, cacheKey);
 }
 
 void TextLlmContext::snapshotPreRequestCursor() {

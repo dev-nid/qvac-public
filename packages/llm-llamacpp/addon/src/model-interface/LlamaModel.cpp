@@ -812,13 +812,21 @@ std::string LlamaModel::processPromptImpl(const Prompt& prompt) {
     // throw after local rollback/wipe; keeping the old cacheKey active would
     // let a later prompt reuse or auto-save that recovery state over the last
     // known-good on-disk cache. Do not catch policy-validation failures before
-    // admission, or explicit save failures below after successful inference.
+    // admission; explicit save failures below have their own cleanup gate.
     resetAndInvalidateActiveCache();
     throw;
   }
 
   if (shouldSaveCache) {
-    maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
+    try {
+      maybeSaveCacheToDisk(prompt.saveCacheToDisk, state_->cacheManager_);
+    } catch (...) {
+      // The request completed, but the active cache key could not be flushed.
+      // Drop both live state and the active cache session so the next prompt
+      // does not retry the same failing path or keep using an unsaved session.
+      resetAndInvalidateActiveCache();
+      throw;
+    }
   }
 
   if (shouldResetAfterInference) {

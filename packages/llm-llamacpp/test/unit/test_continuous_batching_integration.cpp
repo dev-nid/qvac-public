@@ -880,6 +880,8 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchSavesAndLoadsCache) {
   EXPECT_TRUE(outputs[1].empty());
   ASSERT_TRUE(fs::exists(cachePath));
   EXPECT_GT(fs::file_size(cachePath), 0u);
+  EXPECT_FALSE(fs::exists(cachePath.string() + ".tmp"))
+      << "batch save must promote the temp file and remove the sidecar";
 
   auto cachedFollowup = makePrompt("Say cached follow up.");
   cachedFollowup.cacheKey = cachePath.string();
@@ -890,6 +892,7 @@ TEST_F(ContinuousBatchingIntegrationTest, TwoPromptBatchSavesAndLoadsCache) {
   ASSERT_EQ(followupOutputs.size(), 2u);
   EXPECT_FALSE(followupOutputs[0].empty());
   EXPECT_FALSE(followupOutputs[1].empty());
+  EXPECT_FALSE(fs::exists(cachePath.string() + ".tmp"));
 
   fs::remove(cachePath);
 }
@@ -1415,8 +1418,9 @@ TEST_F(
         return llama_decode(ctx, batch);
       });
 
-  // cacheKey under a directory that does not exist: llama_state_seq_save_file
-  // cannot open it, so TextLlmContext::saveCache throws on the cancel path.
+  // cacheKey under a directory that does not exist: the atomic temp write
+  // cannot open cacheKey+".tmp", so TextLlmContext::saveCache throws on the
+  // cancel path.
   const fs::path unwritable = fs::temp_directory_path() /
                               ("no-such-dir-" + uniqueTestId()) / "cache.bin";
   ASSERT_FALSE(fs::exists(unwritable.parent_path()))

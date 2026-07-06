@@ -641,6 +641,102 @@ TEST_F(MtmdLlmContextTest, LoadCacheRollsBackRestoredKvOnPostRestoreFailure) {
   fs::remove(cachePath);
 }
 
+TEST_F(MtmdLlmContextTest, LoadCacheRejectsRestoredMemoryMetadataMismatch) {
+  if (!hasValidModel()) {
+    FAIL() << "Multimodal model or projection file not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  auto* base = LlamaModelTestPeer::llmContext(*model);
+  ASSERT_NE(base, nullptr);
+  auto* ctx = dynamic_cast<MtmdLlmContext*>(base);
+  ASSERT_NE(ctx, nullptr) << "single-prompt context for a VLM must be MTMD";
+  auto* lctx = model->getContext();
+  ASSERT_NE(lctx, nullptr);
+  const llama_seq_id seqId = ctx->getSeqId();
+
+  LlamaModel::Prompt prompt;
+  prompt.input = R"([{"role": "user", "content": "Hello"}])";
+  prompt.prefill = true;
+  ASSERT_NO_THROW(model->processPrompt(prompt));
+  ASSERT_GT(ctx->getNPast(), 0);
+  ASSERT_GT(ctx->getCacheTokens(), 0);
+
+  const llama_token nPast = static_cast<llama_token>(ctx->getNPast());
+  const llama_token firstMsgTokens =
+      static_cast<llama_token>(ctx->getFirstMsgTokens());
+  const llama_token cacheTokens =
+      static_cast<llama_token>(ctx->getCacheTokens());
+  const llama_token firstMsgCacheTokens =
+      static_cast<llama_token>(ctx->getFirstMsgCacheTokens());
+
+  const fs::path nPastMismatchPath =
+      fs::temp_directory_path() / "qvac-mtmd-loadcache-npast-mismatch.bin";
+  const fs::path cacheTokensMismatchPath =
+      fs::temp_directory_path() /
+      "qvac-mtmd-loadcache-cachetokens-mismatch.bin";
+  fs::remove(nPastMismatchPath);
+  fs::remove(cacheTokensMismatchPath);
+
+  const llama_token nPastMismatch[SESSION_METADATA_FIELD_COUNT] = {
+      static_cast<llama_token>(nPast + 1),
+      firstMsgTokens,
+      cacheTokens,
+      firstMsgCacheTokens};
+  ASSERT_GT(
+      llama_state_seq_save_file(
+          lctx,
+          nPastMismatchPath.string().c_str(),
+          seqId,
+          nPastMismatch,
+          SESSION_METADATA_FIELD_COUNT),
+      0u);
+
+  const llama_token cacheTokensMismatch[SESSION_METADATA_FIELD_COUNT] = {
+      nPast,
+      firstMsgTokens,
+      static_cast<llama_token>(cacheTokens + 1),
+      firstMsgCacheTokens};
+  ASSERT_GT(
+      llama_state_seq_save_file(
+          lctx,
+          cacheTokensMismatchPath.string().c_str(),
+          seqId,
+          cacheTokensMismatch,
+          SESSION_METADATA_FIELD_COUNT),
+      0u);
+
+  ctx->resetState(true);
+  auto* mem = llama_get_memory(lctx);
+  ASSERT_NE(mem, nullptr);
+  ASSERT_EQ(llama_memory_seq_token_count(mem, seqId), 0u);
+
+  EXPECT_THROW(
+      { (void)ctx->loadCache(nPastMismatchPath.string(), 0); },
+      qvac_errors::StatusError)
+      << "loadCache must reject metadata nPast that differs from live KV";
+  EXPECT_EQ(llama_memory_seq_token_count(mem, seqId), 0u)
+      << "rejected nPast mismatch must clear restored KV cells";
+  EXPECT_EQ(ctx->getNPast(), 0);
+  EXPECT_EQ(ctx->getCacheTokens(), 0);
+
+  EXPECT_THROW(
+      { (void)ctx->loadCache(cacheTokensMismatchPath.string(), 0); },
+      qvac_errors::StatusError)
+      << "loadCache must reject metadata cacheTokens that differs from live KV";
+  EXPECT_EQ(llama_memory_seq_token_count(mem, seqId), 0u)
+      << "rejected cacheTokens mismatch must clear restored KV cells";
+  EXPECT_EQ(ctx->getNPast(), 0);
+  EXPECT_EQ(ctx->getCacheTokens(), 0);
+
+  fs::remove(nPastMismatchPath);
+  fs::remove(cacheTokensMismatchPath);
+}
+
 TEST_F(MtmdLlmContextTest, InvalidMedia) {
   if (!hasValidModel()) {
     FAIL() << "Multimodal model or projection file not found";

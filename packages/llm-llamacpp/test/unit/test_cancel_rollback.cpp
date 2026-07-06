@@ -1492,6 +1492,54 @@ TEST(
 
 TEST(
     TextLlmContextCancelDuringGenerationTest,
+    ExplicitSaveFailureInvalidatesActiveCacheSession) {
+  const std::string modelPath = qwen3PureAttentionModelPath();
+  if (!fs::exists(modelPath)) {
+    GTEST_SKIP() << "Qwen3-0.6B pure-attention model not found";
+  }
+
+  std::unordered_map<std::string, std::string> config;
+  config["device"] = test_common::getTestDevice();
+  config["ctx_size"] = "4096";
+  config["gpu_layers"] = test_common::getTestGpuLayers();
+  config["n_predict"] = "8";
+  config["backendsDir"] = test_common::getTestBackendsDir().string();
+
+  std::string mp = modelPath;
+  std::string proj;
+  auto model = std::make_unique<LlamaModel>(
+      std::move(mp), std::move(proj), std::move(config));
+  model->waitForLoadInitialization();
+  ASSERT_TRUE(model->isLoaded());
+
+  const fs::path missingParent =
+      fs::temp_directory_path() /
+      ("explicit-save-failure-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()));
+  const fs::path badCachePath = missingParent / "cache.ggsq";
+  ASSERT_FALSE(fs::exists(missingParent))
+      << "precondition: missing parent directory forces saveCache failure";
+
+  LlamaModel::Prompt failing;
+  failing.input = R"([{"role":"user","content":"This save should fail."}])";
+  failing.cacheKey = badCachePath.string();
+  failing.saveCacheToDisk = true;
+  failing.generationParams.remove_thinking_from_context = false;
+  EXPECT_THROW(model->processPrompt(failing), qvac_errors::StatusError);
+  EXPECT_FALSE(fs::exists(badCachePath));
+
+  LlamaModel::Prompt uncached;
+  uncached.input =
+      R"([{"role":"user","content":"Run after explicit save failure."}])";
+  uncached.generationParams.remove_thinking_from_context = false;
+  ASSERT_NO_THROW(model->processPrompt(uncached))
+      << "explicit save failure must invalidate the active cache session; "
+         "otherwise a later prompt without cacheKey retries the stale save";
+}
+
+TEST(
+    TextLlmContextCancelDuringGenerationTest,
     SinglePromptOpenReasoningSpanFailureSkipsCacheSave) {
   const std::string modelPath = qwen3PureAttentionModelPath();
   if (!fs::exists(modelPath)) {
