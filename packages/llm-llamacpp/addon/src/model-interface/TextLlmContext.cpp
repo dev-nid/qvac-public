@@ -815,7 +815,9 @@ LlmContext::GenerateResponseResult TextLlmContext::generateResponse(
     if (stopGeneration_.load()) {
       stopGeneration_.store(false);
       return {
-          .ok = true, .cancelled = true, .rollbackOk = onCancel(outputCallback)};
+          .ok = true,
+          .cancelled = true,
+          .rollbackOk = onCancel(outputCallback)};
     }
 
     ++generatedAfterAccept;

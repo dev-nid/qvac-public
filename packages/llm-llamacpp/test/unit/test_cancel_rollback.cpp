@@ -1023,7 +1023,8 @@ TEST(
   uncached.input = R"([{"role":"user","content":"Run after failed cancel."}])";
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
-  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  const std::vector<uint8_t> afterUncachedTransition =
+      readBinaryFile(cachePath);
   EXPECT_EQ(afterUncachedTransition, before)
       << "failed rollback must also invalidate the active cache session; "
          "otherwise a later prompt without cacheKey saves dirty live state "
@@ -1086,8 +1087,7 @@ TEST(
   }
 
   LlamaModel::Prompt cancellable;
-  cancellable.input =
-      R"([{"role":"user","content":")" + longBody + R"("}])";
+  cancellable.input = R"([{"role":"user","content":")" + longBody + R"("}])";
   cancellable.prefill = true;
   cancellable.cacheKey = cachePath.string();
   cancellable.saveCacheToDisk = true;
@@ -1122,7 +1122,8 @@ TEST(
       R"([{"role":"user","content":"Run after failed prefill cancel."}])";
   ASSERT_NO_THROW(model->processPrompt(uncached));
 
-  const std::vector<uint8_t> afterUncachedTransition = readBinaryFile(cachePath);
+  const std::vector<uint8_t> afterUncachedTransition =
+      readBinaryFile(cachePath);
   EXPECT_EQ(afterUncachedTransition, before)
       << "prefill rollback failure must invalidate the active cache session; "
          "otherwise a later prompt without cacheKey saves dirty live state "
