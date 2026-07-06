@@ -70,11 +70,9 @@ TEST(RuntimeStatsRates, MixedStepSplitsTimeAndTokensProportionally) {
       numActiveSequences2, prefillTokens2, decodeTokens2, milliseconds(30));
 
   // Prefill rate: (100 + 1) tok / (50 + 7.5) ms = 101000 / 57.5.
-  EXPECT_DOUBLE_EQ(
-      stats.prefillTokensPerSecond(), 1000.0 * 101.0 / 57.5);
+  EXPECT_DOUBLE_EQ(stats.prefillTokensPerSecond(), 1000.0 * 101.0 / 57.5);
   // Decode rate: 3 tok / 22.5 ms = 3000 / 22.5.
-  EXPECT_DOUBLE_EQ(
-      stats.decodeTokensPerSecond(), 1000.0 * 3.0 / 22.5);
+  EXPECT_DOUBLE_EQ(stats.decodeTokensPerSecond(), 1000.0 * 3.0 / 22.5);
 }
 
 TEST(RuntimeStatsRates, ResetClearsRates) {

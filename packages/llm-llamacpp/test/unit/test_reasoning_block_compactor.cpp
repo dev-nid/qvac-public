@@ -381,7 +381,8 @@ TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpWhenReasoningDisabled) {
   EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
 }
 
-TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpForPureAttentionModels) {
+TEST(
+    ReasoningBlockCompactorReplaySeed, PreReasoningNoOpForPureAttentionModels) {
   // Pure attention uses `seq_rm + seq_add` at compact time and never
   // consumes the replay buffer, so pre-reasoning seeding would be dead
   // state exactly like the close-marker seed path.
@@ -393,7 +394,9 @@ TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpForPureAttentionModels) 
   EXPECT_EQ(fx.rollback.postReasoningTokenCount(), 0u);
 }
 
-TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpWhenBoundaryNotCaptured) {
+TEST(
+    ReasoningBlockCompactorReplaySeed,
+    PreReasoningNoOpWhenBoundaryNotCaptured) {
   // Snapshot never captured (e.g. capture underflowed before generation
   // started). Accumulating tokens in the replay buffer would be dead
   // state — `compact()` cannot restore without a boundary.
@@ -445,9 +448,7 @@ TEST(
   EXPECT_EQ(fx.rollback.postReasoningTokens()[3], 100);
 }
 
-TEST(
-    ReasoningBlockCompactorReplaySeed,
-    PreReasoningNoOpAfterOpenSpanRecorded) {
+TEST(ReasoningBlockCompactorReplaySeed, PreReasoningNoOpAfterOpenSpanRecorded) {
   // Full-lifecycle regression: the caller invokes
   // `recordPreReasoningToken` for every sampled token where
   // `reasoningState_.inside_reasoning == false`. That predicate is
@@ -1030,8 +1031,7 @@ TEST(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/20, "[Test]");
   fx.compactor.setContextSliderOpsForTesting(nullptr);
 
-  EXPECT_EQ(
-      outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
+  EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::FailedKvWiped)
       << "recurrent partial-resident span must hard-fail instead of "
          "leaking resident reasoning tokens";
   EXPECT_NE(outcome.failureMessage.find("partial-resident"), std::string::npos);

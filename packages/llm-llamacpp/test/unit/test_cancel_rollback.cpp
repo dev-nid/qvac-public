@@ -470,9 +470,8 @@ TEST_F(
 
   bool rollbackOk = false;
   EXPECT_NO_THROW(rollbackOk = driver.onCancel([](const std::string&) {}));
-  EXPECT_TRUE(rollbackOk)
-      << "pure-attention onCancel must report rollback-ok "
-         "(no recurrent restore involved)";
+  EXPECT_TRUE(rollbackOk) << "pure-attention onCancel must report rollback-ok "
+                             "(no recurrent restore involved)";
 
   EXPECT_EQ(driver.getNPast(), preRequestNPast)
       << "onCancel on pure-attention must roll the cache back to the "

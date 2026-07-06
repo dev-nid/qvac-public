@@ -215,7 +215,8 @@ TEST_F(ReasoningUtilsTest, UpdateBufferStaysOutsideForUnrelatedContent) {
 // on which that fix relies; if the detector ever moves to matching
 // the canonical close directly and the drivers regress to seeding
 // `tokenId`, one of the two must change together.
-TEST_F(ReasoningUtilsTest, UpdateBufferFlipDefersToTrailingPaddingOnPaddedClose) {
+TEST_F(
+    ReasoningUtilsTest, UpdateBufferFlipDefersToTrailingPaddingOnPaddedClose) {
   ReasoningState state;
   state.tags = {.open = "<think>", .close = "\n</think>\n\n"};
   state.inside_reasoning = true;
