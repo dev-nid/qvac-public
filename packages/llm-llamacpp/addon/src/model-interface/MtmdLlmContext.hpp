@@ -335,10 +335,11 @@ private:
   void recordPostReasoningTokenIfActive(llama_token tokenId);
 
   // Snapshot the full sequence state at end-of-prefill on memory
-  // modules that don't support partial-tail erasure. No-op unless the
-  // template force-opened reasoning during prefill; generated-opener
-  // recurrent turns are left uncompacted rather than replaying a close
-  // marker against a prefix that never saw the opener.
+  // modules that don't support partial-tail erasure. No-op unless
+  // recurrent snapshot compaction is relevant for this request. When
+  // `remove_thinking_from_context` is enabled on a recurrent / hybrid
+  // model, unsupported template shapes throw instead of silently
+  // preserving reasoning in cache.
   void snapshotForRecurrentRollback();
 
   // Cancel-during-generation cleanup. On recurrent / hybrid memory,
@@ -412,6 +413,16 @@ private:
   // snapshot + replay path in `compactThinkSpan`. See
   // `TextLlmContext::needsRecurrentSnapshot_` for the full rationale.
   bool needsRecurrentSnapshot_ = false;
+
+  // Tracks whether the currently-prepared prefill is a cache-warm
+  // (prefill-only) request. Captured from `preparePrefill` on the
+  // batch path and `evalMessageWithTools` on the single-prompt path,
+  // then consulted by `snapshotForRecurrentRollback`: prefill-only
+  // requests never enter generation and cannot emit reasoning tokens,
+  // so the hard-fail contract for unsupported hybrid template shapes
+  // does not apply. See `TextLlmContext::isPrefillOnlyRequest_` for
+  // the full rationale.
+  bool isPrefillOnlyRequest_ = false;
 
   // Per-request toggle for the post-generation thinking-block KV
   // cache compaction. Default-on (opt-out via `generationParams` with

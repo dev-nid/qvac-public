@@ -66,11 +66,11 @@ void ReasoningBlockCompactor::setOpenSpan(llama_pos start) {
     return;
   }
   // Recurrent / hybrid compaction requires an end-of-prefill boundary
-  // snapshot to restore against. `ReasoningSnapshotPolicy` skips that
-  // snapshot for generated-opener templates (PR #2813), so opening a
-  // span here on the recurrent+no-boundary path would drive `compact()`
-  // into its defensive `FailedKvWiped` branch. Skip the span instead,
-  // matching the "generated-opener recurrent = no-op" contract.
+  // snapshot to restore against. `ReasoningSnapshotPolicy` now makes
+  // unsupported recurrent templates hard-fail before generation, so this
+  // guard is only a defensive backstop for future callers that bypass the
+  // policy and would otherwise drive `compact()` into its no-boundary
+  // `FailedKvWiped` branch.
   if (needsRecurrentSnapshot_ && !rollback_.hasReasoningBoundary()) {
     return;
   }

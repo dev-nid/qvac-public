@@ -292,26 +292,25 @@ private:
   // pause and snapshot the sequence state for the recurrent rollback
   // path. Returns the sentinel `-1` when no snapshot is needed for
   // this inference (memory module supports shift, feature disabled,
-  // reasoning channel not recognised, or the template did not
-  // force-open reasoning during prefill). Snapshots at END of prefill
-  // (boundary == `prefillLen`) only when the forced opener is already
-  // in the cache, so the restored recurrent state stays structurally
-  // balanced after replay.
+  // prefill-only request, or reasoning channel not active). Throws when
+  // the feature is enabled for a recurrent / hybrid generation request
+  // but the template does not satisfy the snapshot + replay
+  // preconditions. Snapshots at END of prefill (boundary ==
+  // `prefillLen`) only when the forced opener is already in the cache,
+  // so the restored recurrent state stays structurally balanced after
+  // replay.
   [[nodiscard]] llama_pos
   computeRecurrentSnapshotBoundary(llama_pos prefillLen) const;
 
   // Takes a full-state snapshot of `seqId_` at the current `nPast_`
-  // and stores it in `rollbackState_`. No-op unless the template
-  // force-opened reasoning during prefill; generated-opener recurrent
-  // turns are left uncompacted rather than replaying a close marker
-  // against a prefix that never saw the opener. Under the uniform
-  // hard-fail contract for `remove_thinking_from_context`, snapshot
-  // capture failure propagates as a `qvac_errors::StatusError` from
-  // `ReasoningBlockCompactor::snapshotAtPrefillBoundary`. The caller
-  // is responsible for catching that throw, restoring its pre-prompt
-  // checkpoint via `restorePrefillEntry`, resetting local positional
-  // accounting, and re-throwing so no saveCache path can persist a
-  // cache whose header no longer matches live memory.
+  // and stores it in `rollbackState_`. No-op unless recurrent snapshot
+  // compaction is relevant for this request. Under the uniform
+  // hard-fail contract for `remove_thinking_from_context`, unsupported
+  // recurrent template shapes and snapshot capture failures propagate
+  // as `qvac_errors::StatusError`; the wrapper restores its pre-prompt
+  // checkpoint via `restorePrefillEntry`, resets local positional
+  // accounting, and re-throws so no saveCache path can persist a cache
+  // whose header no longer matches live memory.
   void snapshotForRecurrentRollback();
 
   ToolsCompactController& tools_;
@@ -381,6 +380,16 @@ private:
   // Pure-attention models keep the existing
   // `seq_rm + seq_add` path untouched.
   bool needsRecurrentSnapshot_ = false;
+
+  // Tracks whether the currently-prepared prefill is a cache-warm
+  // (prefill-only) request. Captured in `preparePrefill` from the
+  // scheduler / single-prompt caller and consulted by the recurrent
+  // reasoning snapshot path: prefill-only requests never enter
+  // generation and cannot emit reasoning tokens, so the hard-fail
+  // contract for unsupported hybrid template shapes does not apply.
+  // Prevents cache-warm calls from failing on hybrid models that
+  // would only fail at generation time.
+  bool isPrefillOnlyRequest_ = false;
 
   // Shared rollback state for recurrent / hybrid SSM models. Owns the
   // prefill-entry snapshot (cancel during prefill), the end-of-prefill

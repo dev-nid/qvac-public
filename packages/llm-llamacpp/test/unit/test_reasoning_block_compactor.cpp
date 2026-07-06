@@ -14,6 +14,10 @@
 using qvac_lib_inference_addon_llama::ReasoningBlockCompactor;
 using qvac_lib_inference_addon_llama::utils::ReasoningRollbackState;
 using qvac_lib_inference_addon_llama::utils::
+    recurrentReasoningBoundaryDecision;
+using qvac_lib_inference_addon_llama::utils::
+    RecurrentReasoningBoundaryDecision;
+using qvac_lib_inference_addon_llama::utils::
     shouldCaptureRecurrentReasoningBoundary;
 
 // Unit coverage for the hybrid / recurrent close-marker replay seam.
@@ -33,18 +37,36 @@ TEST(ReasoningSnapshotPolicy, CapturesOnlyForForcedOpenRecurrentReasoning) {
       /*reasoningEnabled=*/true,
       /*thinkingForcedOpen=*/true,
       /*closeMarkerSingleToken=*/true));
+  EXPECT_EQ(
+      recurrentReasoningBoundaryDecision(
+          /*needsRecurrentSnapshot=*/true,
+          /*removeThinkingFromContext=*/true,
+          /*reasoningEnabled=*/true,
+          /*thinkingForcedOpen=*/true,
+          /*closeMarkerSingleToken=*/true),
+      RecurrentReasoningBoundaryDecision::Capture);
 }
 
-TEST(ReasoningSnapshotPolicy, SkipsGeneratedOpenRecurrentReasoning) {
+TEST(ReasoningSnapshotPolicy, RejectsGeneratedOpenRecurrentReasoning) {
   // Generated-opener recurrent turns cannot use an end-of-prefill
   // snapshot: the restored prefix would not contain `<think>`, so
-  // replaying `</think>` would poison the next recurrent state.
+  // replaying `</think>` would poison the next recurrent state. The
+  // caller must hard-fail when the feature is enabled instead of
+  // silently preserving reasoning in cache.
   EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
       /*thinkingForcedOpen=*/false,
       /*closeMarkerSingleToken=*/true));
+  EXPECT_EQ(
+      recurrentReasoningBoundaryDecision(
+          /*needsRecurrentSnapshot=*/true,
+          /*removeThinkingFromContext=*/true,
+          /*reasoningEnabled=*/true,
+          /*thinkingForcedOpen=*/false,
+          /*closeMarkerSingleToken=*/true),
+      RecurrentReasoningBoundaryDecision::UnsupportedGeneratedOpener);
 }
 
 TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
@@ -73,15 +95,23 @@ TEST(ReasoningSnapshotPolicy, SkipsWhenFeatureOrReasoningGateIsClosed) {
 // the close tag tokenises to more than one piece, that seed captures
 // only the tail piece and the restored SSM state ends with an unbalanced
 // `<think>` opener. The policy MUST reject the boundary snapshot in that
-// case so `remove_thinking_from_context` degrades to leaving reasoning
-// tokens in the cache instead of silently corrupting recurrent state.
-TEST(ReasoningSnapshotPolicy, SkipsWhenCloseMarkerIsMultiToken) {
+// case so `remove_thinking_from_context` hard-fails instead of leaving
+// reasoning tokens in cache or silently corrupting recurrent state.
+TEST(ReasoningSnapshotPolicy, RejectsWhenCloseMarkerIsMultiToken) {
   EXPECT_FALSE(shouldCaptureRecurrentReasoningBoundary(
       /*needsRecurrentSnapshot=*/true,
       /*removeThinkingFromContext=*/true,
       /*reasoningEnabled=*/true,
       /*thinkingForcedOpen=*/true,
       /*closeMarkerSingleToken=*/false));
+  EXPECT_EQ(
+      recurrentReasoningBoundaryDecision(
+          /*needsRecurrentSnapshot=*/true,
+          /*removeThinkingFromContext=*/true,
+          /*reasoningEnabled=*/true,
+          /*thinkingForcedOpen=*/true,
+          /*closeMarkerSingleToken=*/false),
+      RecurrentReasoningBoundaryDecision::UnsupportedMultiTokenClose);
 }
 
 TEST(ReasoningRollbackStateAppend, AppendsRegardlessOfCaptureFlag) {
@@ -477,15 +507,15 @@ TEST(
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);
 }
 
-// Generated-opener recurrent regression (PR #2813 review): a hybrid
-// model with no boundary snapshot (template does not force-open
-// `<think>`, so `ReasoningSnapshotPolicy` skipped the snapshot) whose
-// model then emits `<think>...</think>` during decode must not open a
-// span — otherwise `compact()` hits its defensive no-boundary branch
-// and wipes the sequence instead of cleanly no-oping.
+// Defensive no-boundary regression: production callers now hard-fail
+// unsupported generated-opener recurrent templates before generation.
+// If a future caller bypasses `ReasoningSnapshotPolicy` and reaches the
+// compactor with recurrent memory but no boundary snapshot, `setOpenSpan`
+// must still refuse to record a span so `compact()` does not wipe the
+// sequence through its defensive no-boundary branch.
 TEST(
     ReasoningBlockCompactorFailureStats,
-    HybridGeneratedOpenerRecurrentSpanSkipsCompactionAsNoOp) {
+    RecurrentNoBoundarySpanSkipsCompactionAsDefensiveNoOp) {
   CompactorFixture fx;
   fx.compactor.setRemoveThinkingFromContext(true);
   fx.compactor.setReasoningEnabled(true);
@@ -504,7 +534,7 @@ TEST(
   const auto outcome = fx.compactor.compact(
       /*ctx=*/nullptr, /*seqId=*/0, /*pos=*/25, "[Test]");
   EXPECT_EQ(outcome.kind, ReasoningBlockCompactor::Outcome::Kind::NoOp)
-      << "generated-opener recurrent compaction must be a clean no-op, "
+      << "recurrent no-boundary defensive path must be a clean no-op, "
          "not FailedKvWiped";
   EXPECT_TRUE(outcome.failureMessage.empty());
   EXPECT_EQ(fx.compactor.blockDiscards(), 0);

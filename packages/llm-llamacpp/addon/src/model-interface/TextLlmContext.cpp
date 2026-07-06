@@ -36,6 +36,23 @@ bool isFileInitialized(const std::filesystem::path& path) {
   return !errorCode && size != 0;
 }
 
+void throwUnsupportedRecurrentReasoningCompaction(
+    const char* labelTag,
+    qvac_lib_inference_addon_llama::utils::
+        RecurrentReasoningBoundaryDecision decision) {
+  throw qvac_errors::StatusError(
+      ADDON_ID,
+      toString(FailedToDecode),
+      string_format(
+          "%s remove_thinking_from_context is enabled for a hybrid/recurrent "
+          "model, but recurrent reasoning compaction requires a chat template "
+          "that force-opens reasoning during prefill and a single-token close "
+          "marker; unsupported because %s",
+          labelTag,
+          qvac_lib_inference_addon_llama::utils::
+              recurrentReasoningBoundaryFailureReason(decision)));
+}
+
 } // namespace
 
 // NOLINTNEXTLINE(readability-identifier-naming,readability-function-cognitive-complexity)
@@ -585,6 +602,11 @@ PrefillPlan TextLlmContext::preparePrefill(
         "TextLlmContext::preparePrefill: media requires a multimodal model");
   }
 
+  // Set BEFORE `tokenizeChat` so `configureReasoningTags` can suppress
+  // the "will hard-fail" preemptive warning for cache-warm requests that
+  // will never enter generation.
+  isPrefillOnlyRequest_ = isPrefillOnlyRequest;
+
   std::vector<llama_token> inputTokens;
   tokenizeChat(chatMsgs, tools, inputTokens, isCacheLoaded);
 
@@ -666,14 +688,15 @@ void TextLlmContext::syncPosition(llama_pos currentPos) { nPast_ = currentPos; }
 void TextLlmContext::onPrefillComplete(
     llama_pos currentPos, size_t prefillTokenCount) {
   nPast_ = currentPos;
-  // Unified end-of-prefill snapshot for recurrent / hybrid models.
-  // Both prefill drivers — the single-prompt loop in
-  // `evalMessageWithTools` and `ContinuousBatchScheduler::stepLocked`
+  // Unified end-of-prefill snapshot point for recurrent / hybrid
+  // generation requests. Both prefill drivers — the single-prompt loop
+  // in `evalMessageWithTools` and `ContinuousBatchScheduler::stepLocked`
   // — funnel through here once the final prefill chunk is decoded, so
-  // taking the snapshot here makes the rollback path work uniformly
-  // for both. Idempotent (the underlying capture early-returns when a
-  // boundary snapshot already exists) and a no-op when feature gates
-  // are off, so it's safe to call unconditionally.
+  // taking the snapshot here makes the rollback path work uniformly for
+  // both. Idempotent (the underlying capture early-returns when a
+  // boundary snapshot already exists) and a no-op when feature gates are
+  // off or this is a prefill-only cache-warm request, so it's safe to
+  // call unconditionally.
   snapshotForRecurrentRollback();
   if (pendingBatchFirstMsg_) {
     firstMsgTokens_ = nPast_;
@@ -689,8 +712,9 @@ void TextLlmContext::onPrefillComplete(
   // single-prompt and continuous-batching paths).
   //
   // NOTE: do NOT reset `rollbackState_`'s reasoning-boundary snapshot
-  // or post-reasoning buffers here — the snapshot was just taken above
-  // and wiping it would render the recurrent-rollback path dead.
+  // or post-reasoning buffers here — generation requests may have just
+  // taken the snapshot above, and wiping it would render the recurrent-
+  // rollback path dead.
   // Lifecycle: single-prompt path calls `rollbackState_.reset()` at
   // the start of `evalMessageWithTools`; the continuous-batching
   // scheduler constructs a fresh driver per slot so the state starts
@@ -1081,16 +1105,18 @@ void TextLlmContext::configureReasoningTags(
   if (reasoningInitOk) {
     reasoningEnabled_ = true;
     compactor_.setReasoningEnabled(true);
+    const bool reasoningCompactionActive = params_.reasoning_budget != 0;
     if (needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-        thinkingForcedOpen_ && !reasoningState_.close_is_single_token) {
+        reasoningCompactionActive && !isPrefillOnlyRequest_ &&
+        (!thinkingForcedOpen_ || !reasoningState_.close_is_single_token)) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
-              "[TextLlm] recurrent reasoning-boundary snapshot will be "
-              "skipped: close marker '%s' tokenises to more than one "
-              "token under this vocab; remove_thinking_from_context "
-              "cannot compact reasoning on this model without invalidating "
-              "recurrent state\n",
+              "[TextLlm] recurrent reasoning compaction will hard-fail if "
+              "this request emits reasoning: remove_thinking_from_context is "
+              "enabled on a hybrid/recurrent model, but the template must "
+              "force-open reasoning during prefill and close marker '%s' "
+              "must tokenise to one token\n",
               reasoningTags->close.c_str()));
     }
     return;
@@ -1107,13 +1133,29 @@ void TextLlmContext::configureReasoningTags(
 
 llama_pos
 TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
-  if (!shouldCaptureRecurrentReasoningBoundary(
+  // Prefill-only (cache-warm) requests never enter generation and
+  // cannot emit reasoning tokens, so the hard-fail contract for
+  // unsupported hybrid template shapes does not apply. Short-circuit
+  // to the "no boundary" sentinel before consulting the policy so a
+  // cache warm on a non-conforming hybrid model succeeds instead of
+  // failing on preconditions that could only matter at decode time.
+  if (isPrefillOnlyRequest_) {
+    return -1;
+  }
+  const auto decision = recurrentReasoningBoundaryDecision(
           needsRecurrentSnapshot_,
           removeThinkingFromContext_,
-          reasoningEnabled_,
+          reasoningEnabled_ && params_.reasoning_budget != 0,
           thinkingForcedOpen_,
-          reasoningState_.close_is_single_token)) {
+          reasoningState_.close_is_single_token);
+  switch (decision) {
+  case RecurrentReasoningBoundaryDecision::Capture:
+    break;
+  case RecurrentReasoningBoundaryDecision::Disabled:
     return -1;
+  case RecurrentReasoningBoundaryDecision::UnsupportedGeneratedOpener:
+  case RecurrentReasoningBoundaryDecision::UnsupportedMultiTokenClose:
+    throwUnsupportedRecurrentReasoningCompaction("[TextLlm]", decision);
   }
   // Snapshot at the END of prefill only after the chat template
   // force-opened `<think>` and decoded that opener into the cache.
@@ -1133,10 +1175,10 @@ TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
   //
   // Generated-opener templates are different: the end-of-prefill
   // snapshot does not contain `<think>`, so replaying a close marker
-  // after restore would produce `prompt + </think> + answer`. We skip
-  // recurrent compaction for those turns until there is a dedicated
-  // generated-opener strategy. Pure-attention models keep the existing
-  // `seq_rm` path, unaffected.
+  // after restore would produce `prompt + </think> + answer`. Under the
+  // strict default-on contract, the decision above hard-fails those
+  // recurrent turns instead of silently preserving reasoning in cache.
+  // Pure-attention models keep the existing `seq_rm` path, unaffected.
   const llama_pos boundary = prefillLen;
   // Degenerate templates whose entire prefill IS the forced opener
   // give a boundary of 0; snapshotting at nPast_ == 0 is a valid
@@ -1149,15 +1191,28 @@ TextLlmContext::computeRecurrentSnapshotBoundary(llama_pos prefillLen) const {
 }
 
 void TextLlmContext::snapshotForRecurrentRollback() {
-  if (!shouldCaptureRecurrentReasoningBoundary(
-          needsRecurrentSnapshot_,
-          removeThinkingFromContext_,
-          reasoningEnabled_,
-          thinkingForcedOpen_,
-          reasoningState_.close_is_single_token)) {
+  // Skip the boundary capture entirely on prefill-only (cache-warm)
+  // requests: no generation follows, so there is no reasoning tail
+  // that could ever be compacted or replayed. Matches the guard in
+  // `computeRecurrentSnapshotBoundary` so the batch path (which
+  // reaches this method via `onPrefillComplete`) and the single-
+  // prompt path stay consistent.
+  if (isPrefillOnlyRequest_) {
+    return;
+  }
+  const auto decision = recurrentReasoningBoundaryDecision(
+      needsRecurrentSnapshot_,
+      removeThinkingFromContext_,
+      reasoningEnabled_ && params_.reasoning_budget != 0,
+      thinkingForcedOpen_,
+      reasoningState_.close_is_single_token);
+  if (decision == RecurrentReasoningBoundaryDecision::Disabled) {
     return;
   }
   try {
+    if (decision != RecurrentReasoningBoundaryDecision::Capture) {
+      throwUnsupportedRecurrentReasoningCompaction("[TextLlm]", decision);
+    }
     compactor_.snapshotAtPrefillBoundary(
         modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
   } catch (const qvac_errors::StatusError&) {
@@ -1309,16 +1364,23 @@ TextLlmContext::takeUserVisiblePerfSnapshot() {
 
 void TextLlmContext::setRemoveThinkingFromContext(bool value) {
   // Recurrent / hybrid SSM models (Qwen3.5, Qwen3-Next, Jamba, ...) are
-  // supported via the snapshot + replay path in `compactThinkSpan`:
-  // a full-state snapshot is captured at end-of-prefill, restored at
-  // end-of-generation, and the post-reasoning tail is replayed through
-  // `llama_decode` so both KV halves stay consistent.
+  // supported via the snapshot + replay path in `compactThinkSpan` when
+  // the template force-opens reasoning during prefill and the close
+  // marker is a single token: a full-state snapshot is captured at
+  // end-of-prefill, restored at end-of-generation, and the close marker
+  // plus post-reasoning tail are replayed through `llama_decode` so
+  // both KV halves stay consistent.
   //
   // Uniform hard-fail contract (PR #2813): when the feature is on,
   // ANY inability to remove the reasoning span from cache surfaces to
   // the caller as `qvac_errors::StatusError`, thrown from
   // `compactThinkSpan` after local rollback so both driver metadata
   // and live KV agree on the recovery cursor:
+  //   - Unsupported recurrent template shape (generated opener or
+  //     multi-token close marker) — thrown from
+  //     `snapshotForRecurrentRollback`; the wrapper restores the
+  //     pre-prompt checkpoint (or wipes the sequence and resets
+  //     positional accounting on restore underflow), and rethrows.
   //   - Prefill-boundary snapshot capture failure — thrown from
   //     `ReasoningBlockCompactor::snapshotAtPrefillBoundary`; the
   //     `snapshotForRecurrentRollback` wrapper catches, restores the

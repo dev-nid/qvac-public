@@ -36,6 +36,20 @@ bool isFileInitialized(const std::filesystem::path& path) {
   const auto size = std::filesystem::file_size(path, errorCode);
   return !errorCode && size != 0;
 }
+
+void throwUnsupportedRecurrentReasoningCompaction(
+    const char* labelTag, RecurrentReasoningBoundaryDecision decision) {
+  throw qvac_errors::StatusError(
+      ADDON_ID,
+      toString(FailedToDecode),
+      string_format(
+          "%s remove_thinking_from_context is enabled for a hybrid/recurrent "
+          "model, but recurrent reasoning compaction requires a chat template "
+          "that force-opens reasoning during prefill and a single-token close "
+          "marker; unsupported because %s",
+          labelTag,
+          recurrentReasoningBoundaryFailureReason(decision)));
+}
 } // namespace
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -458,6 +472,12 @@ bool MtmdLlmContext::evalMessageWithTools(
   // `!empty()` early-return.
   rollbackState_.reset();
   forcedTokens_.clear();
+  // Set BEFORE `tokenizeChat` so `configureReasoningTags` can suppress
+  // the "will hard-fail" preemptive warning for cache-warm requests that
+  // will never enter generation. Also consulted by
+  // `snapshotForRecurrentRollback` to skip the boundary capture on
+  // prefill-only turns.
+  isPrefillOnlyRequest_ = prefill;
 
   // Drop any stale user-visible perf snapshot from a prior turn so this
   // inference's `runtimeStats()` read sees either the new snapshot
@@ -995,14 +1015,20 @@ bool MtmdLlmContext::generateResponse(
 std::function<void()>
 MtmdLlmContext::applyGenerationParams(const GenerationParams& overrides) {
   // Hybrid / fully-recurrent models (Qwen3.5, Qwen3-Next, Jamba, ...)
-  // are supported via the snapshot + replay path in `compactThinkSpan`;
-  // no pre-flight rejection is needed here.
+  // are supported via the snapshot + replay path in `compactThinkSpan`
+  // when the template force-opens reasoning during prefill and the
+  // close marker is a single token.
   //
   // Uniform hard-fail contract (PR #2813): when
   // `remove_thinking_from_context` is on, ANY inability to remove the
   // reasoning span from cache surfaces as `qvac_errors::StatusError`,
   // thrown from `compactThinkSpan` after local rollback so both
   // driver metadata and live KV agree on the recovery cursor:
+  //   - Unsupported recurrent template shape (generated opener or
+  //     multi-token close marker): thrown from
+  //     `snapshotForRecurrentRollback`; the wrapper restores the
+  //     pre-prompt checkpoint (or wipes the sequence on restore
+  //     underflow), resets local positional accounting, and re-throws.
   //   - Prefill-boundary snapshot capture failure: thrown from
   //     `ReasoningBlockCompactor::snapshotAtPrefillBoundary`; the
   //     `snapshotForRecurrentRollback` wrapper here restores the
@@ -1166,16 +1192,18 @@ void MtmdLlmContext::configureReasoningTags(
   if (reasoningInitOk) {
     reasoningEnabled_ = true;
     compactor_.setReasoningEnabled(true);
+    const bool reasoningCompactionActive = params_.reasoning_budget != 0;
     if (needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-        thinkingForcedOpen_ && !reasoningState_.close_is_single_token) {
+        reasoningCompactionActive && !isPrefillOnlyRequest_ &&
+        (!thinkingForcedOpen_ || !reasoningState_.close_is_single_token)) {
       QLOG_IF(
           Priority::WARNING,
           string_format(
-              "[MtmdLlm] recurrent reasoning-boundary snapshot will be "
-              "skipped: close marker '%s' tokenises to more than one "
-              "token under this vocab; remove_thinking_from_context "
-              "cannot compact reasoning on this model without invalidating "
-              "recurrent state\n",
+              "[MtmdLlm] recurrent reasoning compaction will hard-fail if "
+              "this request emits reasoning: remove_thinking_from_context is "
+              "enabled on a hybrid/recurrent model, but the template must "
+              "force-open reasoning during prefill and close marker '%s' "
+              "must tokenise to one token\n",
               reasoningTags->close.c_str()));
     }
     return;
@@ -1194,12 +1222,21 @@ void MtmdLlmContext::setOpenThinkSpan(llama_pos start) {
 }
 
 void MtmdLlmContext::snapshotForRecurrentRollback() {
-  if (!shouldCaptureRecurrentReasoningBoundary(
-          needsRecurrentSnapshot_,
-          removeThinkingFromContext_,
-          reasoningEnabled_,
-          thinkingForcedOpen_,
-          reasoningState_.close_is_single_token)) {
+  // Prefill-only (cache-warm) requests never enter generation and
+  // cannot emit reasoning tokens, so the hard-fail contract for
+  // unsupported hybrid template shapes does not apply. Skip the
+  // boundary capture entirely before consulting the policy so a cache
+  // warm on a non-conforming hybrid model succeeds.
+  if (isPrefillOnlyRequest_) {
+    return;
+  }
+  const auto decision = recurrentReasoningBoundaryDecision(
+      needsRecurrentSnapshot_,
+      removeThinkingFromContext_,
+      reasoningEnabled_ && params_.reasoning_budget != 0,
+      thinkingForcedOpen_,
+      reasoningState_.close_is_single_token);
+  if (decision == RecurrentReasoningBoundaryDecision::Disabled) {
     return;
   }
   // Multimodal prefill decodes chunks (images + text) one at a time
@@ -1207,9 +1244,13 @@ void MtmdLlmContext::snapshotForRecurrentRollback() {
   // anchor is the completed prefill state. For forced-open templates
   // this leaves the opener in the restored prefix — a small accepted
   // residue compared to the reasoning body. Generated-opener templates
-  // are skipped by the gate above because the completed prefill state
-  // has no matching opener for the replayed close marker.
+  // have no matching opener in the completed prefill state for the
+  // replayed close marker, so the strict default-on contract hard-fails
+  // them below instead of silently preserving reasoning in cache.
   try {
+    if (decision != RecurrentReasoningBoundaryDecision::Capture) {
+      throwUnsupportedRecurrentReasoningCompaction("[MtmdLlm]", decision);
+    }
     compactor_.snapshotAtPrefillBoundary(
         modelCtx_.lctx, seqId_, current_.pos, "[MtmdLlm]");
   } catch (const qvac_errors::StatusError&) {
@@ -1512,6 +1553,12 @@ PrefillPlan MtmdLlmContext::preparePrefill(
     const std::vector<std::vector<uint8_t>>& media,
     const std::vector<PlannedMedia>& mediaPlan, bool isCacheLoaded,
     bool isPrefillOnlyRequest) {
+  // Set BEFORE `tokenizeChat` so `configureReasoningTags` can suppress
+  // the "will hard-fail" preemptive warning for cache-warm requests that
+  // will never enter generation. Also consulted by
+  // `snapshotForRecurrentRollback` (fired later via `onPrefillComplete`)
+  // to skip the boundary capture on prefill-only turns.
+  isPrefillOnlyRequest_ = isPrefillOnlyRequest;
   resetMedia();
   validateByteBufferCount(mediaPlan, media.size());
   // Load media in prompt-marker order: byte buffers consume the next hoisted
@@ -1672,10 +1719,11 @@ void MtmdLlmContext::onPrefillComplete(
   // Trailing text advances positions and KV cells 1:1; media cells were
   // already accounted by evalMediaSegment.
   advanceTextSpan(currentPos);
-  // Unified end-of-prefill snapshot for recurrent / hybrid models. Both
-  // single-prompt prefill and the continuous scheduler now route through the
-  // same compactor lifecycle; the capture is idempotent and a no-op when gates
-  // are off.
+  // Unified end-of-prefill snapshot point for recurrent / hybrid
+  // generation requests. Both single-prompt prefill and the continuous
+  // scheduler now route through the same compactor lifecycle; the
+  // capture is idempotent and a no-op when gates are off or this is a
+  // prefill-only cache-warm request.
   snapshotForRecurrentRollback();
   if (pendingBatchFirstMsg_) {
     protectedPrefix_ = current_;
@@ -1690,8 +1738,8 @@ void MtmdLlmContext::onPrefillComplete(
 
   // Reset per-inference reasoning detection state shared by the single-prompt
   // and continuous-batching paths. Do not clear rollbackState_'s boundary
-  // snapshot here; it was just captured above and is consumed by
-  // compactThinkSpan().
+  // snapshot here; generation requests may have just captured it above,
+  // and it is consumed by compactThinkSpan().
   forcedTokens_.clear();
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
