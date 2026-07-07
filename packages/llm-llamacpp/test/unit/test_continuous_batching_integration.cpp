@@ -2147,7 +2147,18 @@ TEST_F(ContinuousBatchingIntegrationTest, BatchMtmdMRopeCacheRoundTrip) {
 /// `parallel > 1`. Two media prompts are submitted so the regression covers
 /// multiple MTMD slots coexisting in the scheduler, not just the scheduler path
 /// for a single slot.
+///
+/// Platform gate: mirrors `TwoPromptBatchQwen35HybridDropsThinkBlocks`. Linux
+/// and Windows CI runners do not reliably close Qwen3.5's reasoning span under
+/// greedy CPU decode; with the strict compaction contract that correctly
+/// hard-fails before this test can reach its post-run skip. Keep this
+/// end-to-end closed-span assertion on Apple Silicon, where the fixture is
+/// deterministic enough for the compactor to fire.
 TEST_F(ContinuousBatchingIntegrationTest, BatchMtmdQwen35DropsThinkBlocks) {
+#if !(defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__)))
+  GTEST_SKIP() << "Qwen3.5 MTMD closed `</think>` is not deterministic on "
+                  "non-Apple-Silicon CI runners (CPU backend); see comment.";
+#endif
   const std::string vlmPath =
       test_common::BaseTestModelPath::get("Qwen3.5-0.8B-Q8_0.gguf");
   const std::string mmprojPath =
