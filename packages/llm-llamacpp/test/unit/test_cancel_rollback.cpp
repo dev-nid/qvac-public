@@ -773,9 +773,7 @@ TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
 
   // Recovery: the model must accept another inference cleanly.
   LlamaModel::Prompt recovery = makeMtmdRecoveryPrompt();
-  EXPECT_NO_THROW({
-    (void)model->processPrompt(recovery);
-  });
+  EXPECT_NO_THROW({ (void)model->processPrompt(recovery); });
 }
 
 // TODO #2 coverage: cancel a hybrid multimodal prefill AFTER an image
@@ -845,9 +843,7 @@ TEST_F(
   // Recovery: the model must accept another inference (with or without
   // an image) cleanly on the rolled-back cache.
   LlamaModel::Prompt recovery = makeMtmdRecoveryPrompt();
-  EXPECT_NO_THROW({
-    (void)model->processPrompt(recovery);
-  });
+  EXPECT_NO_THROW({ (void)model->processPrompt(recovery); });
 }
 
 // Same recovery property on a pure-attention multimodal model (SmolVLM).
@@ -894,9 +890,7 @@ TEST_F(
   worker.join();
 
   LlamaModel::Prompt recovery = makeMtmdRecoveryPrompt();
-  EXPECT_NO_THROW({
-    (void)model->processPrompt(recovery);
-  });
+  EXPECT_NO_THROW({ (void)model->processPrompt(recovery); });
 }
 
 // ============================================================================
