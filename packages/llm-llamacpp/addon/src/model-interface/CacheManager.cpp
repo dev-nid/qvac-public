@@ -82,6 +82,16 @@ bool CacheManager::isFileInitialized(const std::filesystem::path& path) {
   return size != 0;
 }
 
+bool CacheManager::isFileMissingOrEmpty(const std::filesystem::path& path) {
+  std::error_code errorCode;
+  auto size = std::filesystem::file_size(path, errorCode);
+  if (!errorCode) {
+    return size == 0;
+  }
+  return errorCode == std::errc::no_such_file_or_directory ||
+         errorCode == std::errc::not_a_directory;
+}
+
 bool CacheManager::isParentDirectoryMissing(const std::filesystem::path& path) {
   const auto parent = path.parent_path();
   if (parent.empty()) {
@@ -329,9 +339,10 @@ bool CacheManager::discardActiveCacheIfBackingStoreMissing() {
   if (!hasActiveCache()) {
     return false;
   }
-  const bool parentMissing = isParentDirectoryMissing(sessionPath_);
+  const bool parentMissing =
+      activeCacheSavedToDisk_ && isParentDirectoryMissing(sessionPath_);
   const bool persistedFileMissing =
-      activeCacheSavedToDisk_ && !isFileInitialized(sessionPath_);
+      activeCacheSavedToDisk_ && isFileMissingOrEmpty(sessionPath_);
   if (!parentMissing && !persistedFileMissing) {
     return false;
   }
@@ -339,7 +350,8 @@ bool CacheManager::discardActiveCacheIfBackingStoreMissing() {
   QLOG_IF(
       Priority::DEBUG,
       string_format(
-          "%s: active cache parent was removed, dropping stale cache '%s'\n",
+          "%s: active cache backing store was removed, dropping stale cache "
+          "'%s'\n",
           __func__,
           sessionPath_.c_str()));
   resetStateCallback_(true);

@@ -888,6 +888,122 @@ TEST_F(CacheManagementTest, ClearAfterCacheDirectoryDeletedDisablesCache) {
   EXPECT_FALSE(fs::exists(session2_path));
 }
 
+TEST_F(CacheManagementTest, UnsavedMissingParentSwitchStillThrows) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  const fs::path bad_cache_dir_a =
+      fs::temp_directory_path() / "qvac_test_no_such_dir_a";
+  const fs::path bad_cache_dir_b =
+      fs::temp_directory_path() / "qvac_test_no_such_dir_b";
+  const std::string bad_path_a = (bad_cache_dir_a / "session.bin").string();
+  const std::string bad_path_b = (bad_cache_dir_b / "session.bin").string();
+
+  fs::remove_all(bad_cache_dir_a);
+  fs::remove_all(bad_cache_dir_b);
+
+  // This registers an active RAM-only cache path without ever writing a backing
+  // file. A missing parent is therefore still a bad save path, not an
+  // externally deleted persisted cache.
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_a, false);
+  });
+
+  try {
+    processPromptWithCacheOptions(
+        model, R"([{"role": "user", "content": "hi"}])", bad_path_b, false);
+    FAIL() << "expected UnableToSaveSessionFile throw";
+  } catch (const qvac_errors::StatusError& e) {
+    EXPECT_NE(
+        std::string(e.codeString()).find("UnableToSaveSessionFile"),
+        std::string::npos);
+  }
+
+  EXPECT_FALSE(fs::exists(bad_cache_dir_a));
+  EXPECT_FALSE(fs::exists(bad_cache_dir_b));
+}
+
+TEST_F(CacheManagementTest, UnsavedMissingParentClearStillThrows) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  const fs::path bad_cache_dir =
+      fs::temp_directory_path() / "qvac_test_no_such_dir_clear";
+  const std::string bad_path = (bad_cache_dir / "session.bin").string();
+
+  fs::remove_all(bad_cache_dir);
+
+  // This registers an active RAM-only cache path without ever writing a backing
+  // file. Clearing the cache must still surface the failed flush.
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model, R"([{"role": "user", "content": "hi"}])", bad_path, false);
+  });
+
+  try {
+    processPromptString(model, R"([{"role": "user", "content": "hi"}])");
+    FAIL() << "expected UnableToSaveSessionFile throw";
+  } catch (const qvac_errors::StatusError& e) {
+    EXPECT_NE(
+        std::string(e.codeString()).find("UnableToSaveSessionFile"),
+        std::string::npos);
+  }
+
+  EXPECT_FALSE(fs::exists(bad_cache_dir));
+}
+
+TEST_F(CacheManagementTest, PersistedCachePathReplacedByDirectoryStillThrows) {
+  if (!hasValidModel()) {
+    FAIL() << "Test model not found";
+  }
+
+  auto model = createModel();
+  if (!model) {
+    FAIL() << "Model failed to load";
+  }
+
+  EXPECT_NO_THROW({
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What is bitcoin? Answer shortly."}])",
+        session1_path,
+        true);
+  });
+  ASSERT_TRUE(fs::exists(session1_path));
+
+  fs::remove(session1_path);
+  fs::create_directory(session1_path);
+
+  try {
+    processPromptWithCacheOptions(
+        model,
+        R"([{"role": "user", "content": "What is ethereum? Answer shortly."}])",
+        session2_path,
+        false);
+    FAIL() << "expected UnableToSaveSessionFile throw";
+  } catch (const qvac_errors::StatusError& e) {
+    EXPECT_NE(
+        std::string(e.codeString()).find("UnableToSaveSessionFile"),
+        std::string::npos);
+  }
+
+  EXPECT_TRUE(fs::is_directory(session1_path));
+  EXPECT_FALSE(fs::exists(session2_path));
+}
+
 TEST_F(CacheManagementTest, HandleCacheSwitchFailureInvalidatesState) {
   if (!hasValidModel()) {
     FAIL() << "Test model not found";

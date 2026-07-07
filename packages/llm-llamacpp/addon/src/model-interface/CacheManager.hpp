@@ -52,6 +52,7 @@ private:
   void writeCacheFile(const std::string& path);
   static void atomicPromoteFile(const std::string& from, const std::string& to);
   static bool isFileInitialized(const std::filesystem::path& path);
+  static bool isFileMissingOrEmpty(const std::filesystem::path& path);
   static bool isParentDirectoryMissing(const std::filesystem::path& path);
 
   LlmContext* llmContext_;
