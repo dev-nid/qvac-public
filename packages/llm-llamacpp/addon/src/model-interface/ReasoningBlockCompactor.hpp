@@ -7,9 +7,8 @@
 
 #include <llama.h>
 
-#include "ContextSlider.hpp"
-
 #include "../utils/ReasoningRollbackState.hpp"
+#include "ContextSlider.hpp"
 #include "ToolsCompactController.hpp"
 
 namespace qvac_lib_inference_addon_llama {
