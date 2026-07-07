@@ -45,12 +45,12 @@ public:
   bool isCacheDisabled() const;
   bool hasActiveCache() const;
   bool wasCacheUsedInLastPrompt() const;
+  static void atomicPromoteFile(const std::string& from, const std::string& to);
 
 private:
   void saveActiveCacheForTransition();
   bool discardActiveCacheIfBackingStoreMissing();
   void writeCacheFile(const std::string& path);
-  static void atomicPromoteFile(const std::string& from, const std::string& to);
   static bool isFileInitialized(const std::filesystem::path& path);
   static bool isFileMissingOrEmpty(const std::filesystem::path& path);
   static bool isParentDirectoryMissing(const std::filesystem::path& path);
