@@ -546,24 +546,22 @@ TEST_F(
 
   // Turn 1 (small opener) keeps `firstMsgTokens_` modest so turn 3's
   // slide budget is not dominated by the protected prefix.
-  const LlmContext::EvalMessageResult turn1Result =
-      driver.evalMessageWithTools(
-          {makeMsg("user", "Hi")},
-          {},
-          /*isCacheLoaded=*/false,
-          /*prefill=*/true);
+  const LlmContext::EvalMessageResult turn1Result = driver.evalMessageWithTools(
+      {makeMsg("user", "Hi")},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true);
   ASSERT_TRUE(turn1Result.ok);
   EXPECT_FALSE(turn1Result.cancelled);
   EXPECT_TRUE(turn1Result.rollbackOk);
 
   // Turn 2 fills context toward the ceiling (~350 tokens on Qwen3).
   const std::string bulk = repeat("The quick brown fox jumps. ", /*times=*/65);
-  const LlmContext::EvalMessageResult turn2Result =
-      driver.evalMessageWithTools(
-          {makeMsg("user", bulk)},
-          {},
-          /*isCacheLoaded=*/false,
-          /*prefill=*/true);
+  const LlmContext::EvalMessageResult turn2Result = driver.evalMessageWithTools(
+      {makeMsg("user", bulk)},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true);
   ASSERT_TRUE(turn2Result.ok);
   EXPECT_FALSE(turn2Result.cancelled);
   EXPECT_TRUE(turn2Result.rollbackOk);
@@ -582,12 +580,11 @@ TEST_F(
   // Turn 3 sized so `preRequestNPast + nTokens > ctx_size` forces
   // `trySlidePrefill` to run before decode.
   const std::string overflow = repeat("Please describe. ", /*times=*/50);
-  const LlmContext::EvalMessageResult turn3Result =
-      driver.evalMessageWithTools(
-          {makeMsg("user", overflow)},
-          {},
-          /*isCacheLoaded=*/false,
-          /*prefill=*/true);
+  const LlmContext::EvalMessageResult turn3Result = driver.evalMessageWithTools(
+      {makeMsg("user", overflow)},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true);
   ASSERT_TRUE(turn3Result.ok);
   EXPECT_FALSE(turn3Result.cancelled);
   EXPECT_TRUE(turn3Result.rollbackOk);
@@ -618,10 +615,10 @@ TEST_F(
 
   const LlmContext::EvalMessageResult recoveryResult =
       driver.evalMessageWithTools(
-      {makeMsg("user", "Recovery ping")},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true);
+          {makeMsg("user", "Recovery ping")},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
   EXPECT_TRUE(recoveryResult.ok)
       << "post-cancel prefill must succeed on the rolled-back cache";
   EXPECT_FALSE(recoveryResult.cancelled);
@@ -692,9 +689,8 @@ TEST_F(
   TextLlmContext driver(params, shared, tools, /*seqId=*/0);
 
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  const LlmContext::EvalMessageResult evalResult =
-      driver.evalMessageWithTools(
-          chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
+  const LlmContext::EvalMessageResult evalResult = driver.evalMessageWithTools(
+      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
   ASSERT_TRUE(evalResult.ok);
   EXPECT_FALSE(evalResult.cancelled);
   EXPECT_TRUE(evalResult.rollbackOk);
@@ -1386,9 +1382,8 @@ TEST_F(
   // Turn 1 (warm baseline). This is the "prior turn's leftover state"
   // that a next-turn compaction failure MUST NOT corrupt.
   std::vector<common_chat_msg> turn1 = {makeMsg("user", "Hi there")};
-  const LlmContext::EvalMessageResult turn1Result =
-      driver.evalMessageWithTools(
-          turn1, {}, /*isCacheLoaded=*/false, /*prefill=*/true);
+  const LlmContext::EvalMessageResult turn1Result = driver.evalMessageWithTools(
+      turn1, {}, /*isCacheLoaded=*/false, /*prefill=*/true);
   ASSERT_TRUE(turn1Result.ok);
   EXPECT_FALSE(turn1Result.cancelled);
   EXPECT_TRUE(turn1Result.rollbackOk);
@@ -1404,12 +1399,11 @@ TEST_F(
   // calls `snapshotPreRequestCursor` at entry, so `preRequestNPast_` is
   // pinned at the post-turn-1 cursor before the prefill advances
   // `nPast_` further.
-  const LlmContext::EvalMessageResult turn2Result =
-      driver.evalMessageWithTools(
-          {makeMsg("user", "How are you?")},
-          {},
-          /*isCacheLoaded=*/false,
-          /*prefill=*/true);
+  const LlmContext::EvalMessageResult turn2Result = driver.evalMessageWithTools(
+      {makeMsg("user", "How are you?")},
+      {},
+      /*isCacheLoaded=*/false,
+      /*prefill=*/true);
   ASSERT_TRUE(turn2Result.ok);
   EXPECT_FALSE(turn2Result.cancelled);
   EXPECT_TRUE(turn2Result.rollbackOk);
@@ -1461,10 +1455,10 @@ TEST_F(
   // the pre-request baseline that we just rolled back to.
   const LlmContext::EvalMessageResult recoveryResult =
       driver.evalMessageWithTools(
-      {makeMsg("user", "Are you working?")},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true);
+          {makeMsg("user", "Are you working?")},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
   EXPECT_TRUE(recoveryResult.ok)
       << "post-recovery prefill must succeed on the rolled-back cache";
   EXPECT_FALSE(recoveryResult.cancelled);
