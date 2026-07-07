@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -732,7 +733,7 @@ TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
   recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
-    EXPECT_GE(output.length(), 0);
+    EXPECT_GT(output.length(), 0u);
   });
 }
 
@@ -807,7 +808,7 @@ TEST_F(
   recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
-    EXPECT_GE(output.length(), 0);
+    EXPECT_GT(output.length(), 0u);
   });
 }
 
@@ -858,7 +859,7 @@ TEST_F(
   recovery.input = R"([{"role":"user","content":"Hi"}])";
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
-    EXPECT_GE(output.length(), 0);
+    EXPECT_GT(output.length(), 0u);
   });
 }
 
@@ -872,9 +873,9 @@ TEST_F(
 // generation-cancel restore path (`TextLlmContext::onCancel` with a real
 // in-flight generation).
 //
-// Test is timing-sensitive — uses retries with a non-trivial n_predict so
-// the worker thread reliably wins the race to set `stopGeneration_`
-// inside the generation loop on slow machines.
+// Test is timing-sensitive: retry with a fresh context and issue cancel from
+// the streaming callback after generated output starts. That avoids accepting a
+// run where the decode completed before the cancel signal reached the context.
 TEST(
     TextLlmContextCancelDuringGenerationTest, HybridModelSurvivesMidGenCancel) {
   const std::string modelPath =
@@ -883,66 +884,100 @@ TEST(
     GTEST_SKIP() << "Qwen3.5 hybrid model not found";
   }
 
-  std::unordered_map<std::string, std::string> config;
-  config["device"] = test_common::getTestDevice();
-  config["ctx_size"] = "4096";
-  config["gpu_layers"] = test_common::getTestGpuLayers();
-  config["n_predict"] = "128"; // long enough to cancel mid-flight
-  config["backendsDir"] = test_common::getTestBackendsDir().string();
+  constexpr int kMaxAttempts = 3;
+  for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+    std::unordered_map<std::string, std::string> config;
+    config["device"] = test_common::getTestDevice();
+    config["ctx_size"] = "4096";
+    config["gpu_layers"] = test_common::getTestGpuLayers();
+    config["n_predict"] = "256"; // long enough to cancel mid-flight
+    config["backendsDir"] = test_common::getTestBackendsDir().string();
 
-  std::string mp = modelPath;
-  std::string proj;
-  auto model = std::make_unique<LlamaModel>(
-      std::move(mp), std::move(proj), std::move(config));
-  model->waitForLoadInitialization();
-  ASSERT_TRUE(model->isLoaded());
+    std::string mp = modelPath;
+    std::string proj;
+    auto model = std::make_unique<LlamaModel>(
+        std::move(mp), std::move(proj), std::move(config));
+    model->waitForLoadInitialization();
+    ASSERT_TRUE(model->isLoaded());
+    LlmContext* baseCtx = LlamaModelTestPeer::llmContext(*model);
+    ASSERT_NE(baseCtx, nullptr);
 
-  LlamaModel::Prompt longPrompt;
-  longPrompt.input = R"([
-    {"role":"user","content":"Write a long story about a dragon."}
-  ])";
-  // `remove_thinking_from_context` does NOT gate the cancel-restore
-  // path anymore — that path now uses the `prefillEntry` snapshot,
-  // which is captured unconditionally for hybrid / recurrent models.
-  // We leave the flag enabled so this test also exercises the
-  // `reasoningBoundary` capture lifecycle alongside the cancel path,
-  // catching regressions where the two snapshots interfere with each
-  // other.
-  longPrompt.generationParams.remove_thinking_from_context = true;
+    std::atomic<bool> cancelIssued{false};
+    std::atomic<unsigned> callbackCount{0};
+    std::exception_ptr generationError;
 
-  std::atomic<bool> generationDone{false};
-  std::thread gen([&] {
-    try {
-      model->processPrompt(longPrompt);
-    } catch (...) {
-      // Cancel may surface as a status error on some paths; treat as
-      // a clean cancel for the purposes of this test.
+    LlamaModel::Prompt longPrompt;
+    longPrompt.input = R"([
+      {"role":"user","content":"Write a long story about a dragon."}
+    ])";
+    // `remove_thinking_from_context` does NOT gate the cancel-restore
+    // path anymore — that path now uses the `prefillEntry` snapshot,
+    // which is captured unconditionally for hybrid / recurrent models.
+    // We leave the flag enabled so this test also exercises the
+    // `reasoningBoundary` capture lifecycle alongside the cancel path,
+    // catching regressions where the two snapshots interfere with each
+    // other.
+    longPrompt.generationParams.remove_thinking_from_context = true;
+    longPrompt.outputCallback = [&](const std::string&) {
+      const unsigned seen = callbackCount.fetch_add(1) + 1;
+      if (seen >= 2 && !cancelIssued.exchange(true)) {
+        baseCtx->stop();
+      }
+    };
+
+    std::atomic<bool> generationDone{false};
+    std::thread gen([&] {
+      try {
+        model->processPrompt(longPrompt);
+      } catch (...) {
+        generationError = std::current_exception();
+      }
+      generationDone.store(true);
+    });
+
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!generationDone.load() &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    generationDone.store(true);
-  });
+    ASSERT_TRUE(generationDone.load())
+        << "model did not unwind within 15s of callback cancel attempt "
+        << attempt;
+    gen.join();
 
-  // Give the worker a brief head start so it reaches the generation loop.
-  std::this_thread::sleep_for(std::chrono::milliseconds(150));
-  EXPECT_NO_THROW(model->cancel());
+    if (!cancelIssued.load()) {
+      continue;
+    }
 
-  // Wait for the worker to observe the cancel and unwind.
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (!generationDone.load() &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (generationError != nullptr) {
+      try {
+        std::rethrow_exception(generationError);
+      } catch (const std::exception& ex) {
+        FAIL() << "generation threw after callback cancel on attempt "
+               << attempt << ": " << ex.what();
+      } catch (...) {
+        FAIL() << "generation threw non-std exception after callback cancel on "
+                  "attempt "
+               << attempt;
+      }
+    }
+
+    ASSERT_GE(callbackCount.load(), 2u)
+        << "cancel must be issued after generated output has started";
+
+    // Recovery: subsequent inference must succeed on the cancelled context.
+    LlamaModel::Prompt shortPrompt;
+    shortPrompt.input = R"([{"role":"user","content":"Hi"}])";
+    shortPrompt.generationParams.remove_thinking_from_context = false;
+    EXPECT_NO_THROW({
+      std::string output = model->processPrompt(shortPrompt);
+      EXPECT_GT(output.length(), 0u);
+    });
+    return;
   }
-  ASSERT_TRUE(generationDone.load())
-      << "model did not unwind within 10s of cancel";
-  gen.join();
-
-  // Recovery: subsequent inference must succeed on the cancelled context.
-  LlamaModel::Prompt shortPrompt;
-  shortPrompt.input = R"([{"role":"user","content":"Hi"}])";
-  shortPrompt.generationParams.remove_thinking_from_context = false;
-  EXPECT_NO_THROW({
-    std::string output = model->processPrompt(shortPrompt);
-    EXPECT_GE(output.length(), 0);
-  });
+  FAIL() << "generation finished before callback-triggered cancel across "
+         << kMaxAttempts << " attempts";
 }
 
 TEST(
@@ -1226,7 +1261,7 @@ TEST(
   recovery.generationParams.remove_thinking_from_context = false;
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
-    EXPECT_GE(output.length(), 0);
+    EXPECT_GT(output.length(), 0u);
   });
 }
 

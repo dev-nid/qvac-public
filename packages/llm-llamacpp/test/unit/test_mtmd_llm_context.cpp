@@ -486,6 +486,14 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
 
   auto model = createQwen35Model();
   ASSERT_NE(model, nullptr) << "Qwen3.5 multimodal model failed to load";
+  auto* base = LlamaModelTestPeer::llmContext(*model);
+  ASSERT_NE(base, nullptr);
+  auto* ctx = dynamic_cast<MtmdLlmContext*>(base);
+  ASSERT_NE(ctx, nullptr) << "single-prompt context for Qwen3.5 VLM must be MTMD";
+
+  const fs::path cachePath =
+      fs::temp_directory_path() / "qvac-qwen35-mtmd-thinking-compaction.bin";
+  fs::remove(cachePath);
 
   LlamaModel::Prompt prompt;
   // Binary-answer prompt: encourages the model to close reasoning quickly
@@ -496,6 +504,8 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
       R"([{"role": "system", "content": "Answer with just one word: yes or no."},)"
       R"( {"role": "user", "type": "media", "content": ""},)"
       R"( {"role": "user", "content": "Is there fruit in this image?"}])";
+  prompt.cacheKey = cachePath.string();
+  prompt.saveCacheToDisk = true;
   prompt.media.push_back(readBinaryFile(imagePath));
   prompt.generationParams.remove_thinking_from_context = true;
 
@@ -506,8 +516,21 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
 
   const auto stats = model->runtimeStats();
   const double discards = getStatValue(stats, "thinkingBlockDiscards");
+  auto* mem = llama_get_memory(model->getContext());
+  ASSERT_NE(mem, nullptr);
+  const llama_seq_id seqId = ctx->getSeqId();
+  const llama_pos posMax = llama_memory_seq_pos_max(mem, seqId);
+  const auto sequenceCells =
+      static_cast<llama_pos>(llama_memory_seq_token_count(mem, seqId));
   SCOPED_TRACE(
       "thinkingBlockDiscards=" + std::to_string(discards) +
+      ", nPast=" + std::to_string(ctx->getNPast()) +
+      ", cacheTokens=" + std::to_string(ctx->getCacheTokens()) +
+      ", firstMsgTokens=" + std::to_string(ctx->getFirstMsgTokens()) +
+      ", firstMsgCacheTokens=" +
+      std::to_string(ctx->getFirstMsgCacheTokens()) +
+      ", seqPosMax=" + std::to_string(posMax) +
+      ", sequenceCells=" + std::to_string(sequenceCells) +
       ", output (first 200 chars): " + output.substr(0, 200));
 
   // Under the uniform hard-fail contract, any compaction failure
@@ -515,22 +538,30 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
   // have thrown `qvac_errors::StatusError` from `processPrompt` and
   // failed the `ASSERT_NO_THROW` above. Reaching this point means the
   // compaction path completed cleanly.
-
-  // The compactor only fires once `</think>` lands in the cache. If the
-  // model gets stuck inside reasoning (no close marker within
-  // `n_predict`), there is nothing to compact — that's a model-output
-  // shape, not a compaction bug. Skip the discard assertion in that case
-  // so the test does not become flaky on prompt-dependent behaviour
-  // (mirrors gemma4.test.js's reasoning-channel detection).
-  const bool reasoningClosed = output.find("</think>") != std::string::npos;
-  if (!reasoningClosed) {
-    GTEST_SKIP() << "Qwen3.5 multimodal did not close </think> within "
-                    "n_predict=1024 — discard assertion skipped "
-                    "(failure-counter check above already ran)";
-  }
+  ASSERT_NE(output.find("</think>"), std::string::npos)
+      << "this test must reach a closed reasoning span; otherwise it does not "
+         "exercise MTMD compaction bookkeeping";
   EXPECT_GE(discards, 1.0)
       << "Qwen3.5 multimodal with remove_thinking_from_context=true "
          "must compact at least one thinking block once </think> lands";
+  EXPECT_GT(sequenceCells, 0)
+      << "cacheKey must keep compacted MTMD memory resident for bookkeeping "
+         "assertions";
+  EXPECT_GT(ctx->getNPast(), 0)
+      << "context must not have reset before post-compaction bookkeeping "
+         "assertions";
+  EXPECT_GT(ctx->getCacheTokens(), 0)
+      << "cache token bookkeeping must remain resident after compaction";
+  EXPECT_EQ(ctx->getCacheTokens(), sequenceCells)
+      << "MTMD cacheTokens must be refreshed from llama memory after compaction";
+  EXPECT_EQ(ctx->getNPast(), posMax + 1)
+      << "MTMD current_.pos must match the compacted sequence cursor";
+  EXPECT_LE(ctx->getFirstMsgTokens(), ctx->getNPast())
+      << "protected text prefix must not extend beyond compacted position";
+  EXPECT_LE(ctx->getFirstMsgCacheTokens(), ctx->getCacheTokens())
+      << "protected cache prefix must not extend beyond compacted KV cells";
+
+  fs::remove(cachePath);
 }
 
 TEST_F(MtmdLlmContextTest, ProcessWithSessionCache) {

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -152,6 +153,16 @@ bool replayTokensThroughDecoder(
     ::llama_context* lctx, llama_seq_id seqId,
     const std::vector<llama_token>& tokens, llama_pos startPos,
     bool outputLogitsForLast = false);
+
+using ReplayDecodeFunc = std::function<int(::llama_context*, llama_batch)>;
+
+// Test seam for replay chunking and failure propagation. Production callers
+// should use `replayTokensThroughDecoder`, which derives the chunk size from the
+// live context and decodes with llama.cpp directly.
+bool replayTokensThroughDecoderForTesting(
+    ::llama_context* lctx, llama_seq_id seqId,
+    const std::vector<llama_token>& tokens, llama_pos startPos,
+    bool outputLogitsForLast, int32_t chunkSize, ReplayDecodeFunc decodeFunc);
 
 } // namespace utils
 } // namespace qvac_lib_inference_addon_llama

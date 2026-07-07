@@ -17,6 +17,7 @@
 #include "common/common.h"
 #include "common/log.h"
 #include "inference-addon-cpp/Logger.hpp"
+#include "ReasoningRecoveryHelpers.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
 #include "utils/ReasoningSnapshotPolicy.hpp"
@@ -26,6 +27,7 @@
 
 using namespace qvac_lib_inference_addon_llama;
 using namespace qvac_lib_inference_addon_llama::errors;
+using namespace qvac_lib_inference_addon_llama::reasoning_recovery;
 using namespace qvac_lib_inference_addon_cpp::logger;
 using namespace qvac_lib_inference_addon_llama::utils;
 
@@ -35,22 +37,6 @@ bool isFileInitialized(const std::filesystem::path& path) {
   std::error_code errorCode;
   const auto size = std::filesystem::file_size(path, errorCode);
   return !errorCode && size != 0;
-}
-
-void throwUnsupportedRecurrentReasoningCompaction(
-    const char* labelTag,
-    qvac_lib_inference_addon_llama::utils::RecurrentReasoningBoundaryDecision
-        decision) {
-  throw qvac_errors::StatusError(
-      ADDON_ID,
-      toString(FailedToDecode),
-      string_format(
-          "%s remove_thinking_from_context is enabled for a hybrid/recurrent "
-          "model, but recurrent reasoning compaction requires a single-token "
-          "reasoning close marker; unsupported because %s",
-          labelTag,
-          qvac_lib_inference_addon_llama::utils::
-              recurrentReasoningBoundaryFailureReason(decision)));
 }
 
 } // namespace
@@ -1072,63 +1058,24 @@ bool TextLlmContext::onCancel(
   // the cache.
   flushPendingUtf8ToCallback(outputCallback);
 
-  bool rollbackOk = true;
-  if (needsRecurrentSnapshot_) {
-    // Recurrent / hybrid: partial `seq_rm` is rejected by recurrent
-    // memory, so the only rollback option is a full-state restore.
-    if (rollbackState_.hasPrefillEntry()) {
-      const llama_pos restoredNPast = rollbackState_.prefillEntryNPast();
-      if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
-        nPast_ = restoredNPast;
-      } else {
-        // Recurrent full-state restore refused: live memory may still
-        // hold the cancelled request's peak state. Force metadata back
-        // to the pre-request cursor so `getNPast()` / stats stay honest,
-        // and signal failure to the caller so the scheduler skips
-        // `saveCache` for this slot — persisting the peak state would
-        // let the cancelled request leak into the on-disk cache and
-        // survive across reloads. Sequence-level wipe is left to the
-        // scheduler's post-teardown `clearSeqKv`.
-        QLOG_IF(
-            Priority::WARNING,
-            string_format(
-                "[TextLlm] prefillEntry restore failed on cancel "
-                "(snapshotNPast=%d, nPast=%d, seqId=%d); scheduler must "
-                "skip saveCache to preserve last known-good on-disk cache\n",
-                restoredNPast,
-                nPast_,
-                seqId_));
-        nPast_ = restoredNPast;
-        rollbackOk = false;
-      }
-    } else if (nPast_ > preRequestNPast_) {
-      // No prefill-entry snapshot is available (capture at admission was
-      // refused or the anchor was never taken), yet the driver has since
-      // advanced past the pre-request cursor. There is no way to roll
-      // the recurrent state back — partial `seq_rm` is rejected on
-      // recurrent memory — so force metadata back to the pre-request
-      // cursor for honest stats and signal failure so the scheduler
-      // skips `saveCache`, preserving the last known-good on-disk cache.
-      QLOG_IF(
-          Priority::WARNING,
-          string_format(
-              "[TextLlm] cancel with no prefill-entry snapshot and advanced "
-              "cursor (preRequestNPast=%d, nPast=%d, seqId=%d); scheduler "
-              "must skip saveCache to avoid persisting the cancelled "
-              "request's peak state\n",
-              preRequestNPast_,
-              nPast_,
-              seqId_));
-      nPast_ = preRequestNPast_;
-      rollbackOk = false;
-    }
-  } else {
-    const llama_pos delta = nPast_ - preRequestNPast_;
-    if (delta > 0) {
-      removeLastNTokens(delta);
-      nPast_ = preRequestNPast_;
-    }
-  }
+  const bool rollbackOk = rollbackCancelledRequest({
+      .labelTag = "[TextLlm]",
+      .ctx = modelCtx_.lctx,
+      .seqId = seqId_,
+      .needsRecurrentSnapshot = needsRecurrentSnapshot_,
+      .currentPos = nPast_,
+      .preRequestPos = preRequestNPast_,
+      .rollback = rollbackState_,
+      .onRecurrentRestored =
+          [this](llama_pos restoredNPast) { nPast_ = restoredNPast; },
+      .onRecurrentRestoreFailed =
+          [this](llama_pos restoredNPast) { nPast_ = restoredNPast; },
+      .onRecurrentMissingSnapshotAdvanced =
+          [this]() { nPast_ = preRequestNPast_; },
+      .removeLastNTokens =
+          [this](llama_pos delta) { removeLastNTokens(delta); },
+      .onPureAttentionRolledBack = [this]() { nPast_ = preRequestNPast_; },
+  });
 
   firstMsgTokens_ = preRequestFirstMsgTokens_;
   rollbackState_.clearPrefillEntry();
@@ -1286,26 +1233,14 @@ void TextLlmContext::snapshotForRecurrentRollback() {
     // tokens, then re-throw. The batch scheduler's slot cleanup
     // additionally passes `SaveCachePolicy::Skip` so the last known-
     // good on-disk cache is preserved.
-    const auto clearSeq = [this]() noexcept {
-      auto* mem = llama_get_memory(modelCtx_.lctx);
-      if (mem != nullptr) {
-        (void)llama_memory_seq_rm(mem, seqId_, -1, -1);
-      }
-    };
-    bool restoredPrefillEntry = false;
-    if (rollbackState_.hasPrefillEntry()) {
-      const llama_pos restoredNPast = rollbackState_.prefillEntryNPast();
-      if (rollbackState_.restorePrefillEntry(modelCtx_.lctx, seqId_)) {
-        nPast_ = restoredNPast;
-        restoredPrefillEntry = true;
-      } else {
-        clearSeq();
-        nPast_ = 0;
-      }
-    } else {
-      clearSeq();
-      nPast_ = 0;
-    }
+    const bool restoredPrefillEntry = restorePrefillEntryOrClearSequence({
+        .ctx = modelCtx_.lctx,
+        .seqId = seqId_,
+        .rollback = rollbackState_,
+        .onRestored =
+            [this](llama_pos restoredNPast) { nPast_ = restoredNPast; },
+        .onCleared = [this]() { nPast_ = 0; },
+    });
     firstMsgTokens_ = restoredPrefillEntry ? preRequestFirstMsgTokens_ : 0;
     rollbackState_.clearPrefillEntry();
     rollbackState_.clearReasoningBoundary();
@@ -1345,67 +1280,37 @@ void TextLlmContext::compactThinkSpan() {
   }
   const ReasoningBlockCompactor::Outcome outcome =
       compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
-  using OutcomeKind = ReasoningBlockCompactor::Outcome::Kind;
-  switch (outcome.kind) {
-  case OutcomeKind::CompactedAttention:
-  case OutcomeKind::CompactedRecurrent:
-    nPast_ = outcome.newPos;
-    if (outcome.keptPrefixEnd < firstMsgTokens_) {
-      firstMsgTokens_ = outcome.keptPrefixEnd;
-    }
-    break;
-  case OutcomeKind::NoOp:
-    // Nothing to do: feature off, no span captured, degenerate span,
-    // or a tail-eraser already removed the whole reasoning span before
-    // compaction ran. Live memory still matches `nPast_`, so leave it
-    // alone. Partial-resident or open-ended recurrent spans are not allowed to
-    // reach this branch; the compactor reports `FailedKvWiped` instead.
-    break;
-  case OutcomeKind::FailedKvIntact: {
-    // Pure-attention `seq_rm + seq_add` rejection. Live KV was not
-    // modified by the rejected primitive, so it still spans
-    // `[0, nPast_)`. Roll the driver back to the pre-request cursor
-    // and drop everything appended for the current request (prompt
-    // tail + any decoded output) from live memory so both driver
-    // metadata and KV agree on the pre-request state. Then rethrow
-    // so the caller (single-prompt JS wrapper, or batch scheduler
-    // workerLoop's global catch) surfaces the failure and the next
-    // turn on this driver decodes from a coherent baseline.
-    const llama_pos delta = nPast_ - preRequestNPast_;
-    if (delta > 0) {
-      removeLastNTokens(delta);
-    }
-    nPast_ = preRequestNPast_;
-    firstMsgTokens_ = preRequestFirstMsgTokens_;
-    generationStarted_ = false;
-    assistantOutput_.clear();
-    rollbackState_.reset();
-    compactor_.reset();
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        outcome.failureMessage);
-  }
-  case OutcomeKind::FailedKvWiped: {
-    // Hybrid restore/replay failure (or the defensive no-boundary
-    // branch). The compactor best-effort-wiped the sequence memory,
-    // so live KV/SSM is empty for this seqId. Sync our positional
-    // accounting to match (pos=0) and drop per-inference reasoning
-    // bookkeeping so a subsequent turn on this driver cannot decode
-    // into contaminated positions and any late saveCache path cannot
-    // write a header whose metadata no longer matches memory.
-    nPast_ = 0;
-    firstMsgTokens_ = 0;
-    generationStarted_ = false;
-    assistantOutput_.clear();
-    rollbackState_.reset();
-    compactor_.reset();
-    throw qvac_errors::StatusError(
-        errors::ADDON_ID,
-        errors::toString(errors::FailedToDecode),
-        outcome.failureMessage);
-  }
-  }
+  handleCompactionOutcome(outcome, {
+      .onCompacted =
+          [this](const ReasoningBlockCompactor::Outcome& compacted) {
+            nPast_ = compacted.newPos;
+            if (compacted.keptPrefixEnd < firstMsgTokens_) {
+              firstMsgTokens_ = compacted.keptPrefixEnd;
+            }
+          },
+      .onFailedKvIntact =
+          [this]() {
+            const llama_pos delta = nPast_ - preRequestNPast_;
+            if (delta > 0) {
+              removeLastNTokens(delta);
+            }
+            nPast_ = preRequestNPast_;
+            firstMsgTokens_ = preRequestFirstMsgTokens_;
+            generationStarted_ = false;
+            assistantOutput_.clear();
+            rollbackState_.reset();
+            compactor_.reset();
+          },
+      .onFailedKvWiped =
+          [this]() {
+            nPast_ = 0;
+            firstMsgTokens_ = 0;
+            generationStarted_ = false;
+            assistantOutput_.clear();
+            rollbackState_.reset();
+            compactor_.reset();
+          },
+  });
 }
 
 int32_t TextLlmContext::getThinkingBlockDiscards() const {

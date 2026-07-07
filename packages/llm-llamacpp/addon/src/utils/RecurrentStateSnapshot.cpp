@@ -64,6 +64,43 @@ void removeFileQuiet(const std::string& path) noexcept {
   std::filesystem::remove(path, ec);
 }
 
+bool replayTokensThroughDecoderImpl(
+    ::llama_context* lctx, llama_seq_id seqId,
+    const std::vector<llama_token>& tokens, llama_pos startPos,
+    bool outputLogitsForLast, int32_t chunkSize,
+    const ReplayDecodeFunc& decodeFunc) {
+  if (tokens.empty()) {
+    return true;
+  }
+  if (lctx == nullptr || chunkSize <= 0 || !decodeFunc) {
+    return false;
+  }
+
+  const int32_t total = static_cast<int32_t>(tokens.size());
+
+  llama_batch batch = llama_batch_init(chunkSize, 0, 1);
+  bool ok = true;
+  for (int32_t offset = 0; offset < total && ok; offset += chunkSize) {
+    const int32_t end = std::min(offset + chunkSize, total);
+    common_batch_clear(batch);
+    for (int32_t i = offset; i < end; ++i) {
+      const bool isFinal = (i == total - 1);
+      const bool requestLogits = outputLogitsForLast && isFinal;
+      common_batch_add(
+          batch,
+          tokens[i],
+          startPos + static_cast<llama_pos>(i),
+          {seqId},
+          requestLogits);
+    }
+    if (decodeFunc(lctx, batch) != 0) {
+      ok = false;
+    }
+  }
+  llama_batch_free(batch);
+  return ok;
+}
+
 } // namespace
 
 // ---- RecurrentStateSnapshot ----
@@ -234,29 +271,28 @@ bool replayTokensThroughDecoder(
     return false;
   }
   const int32_t chunkSize = static_cast<int32_t>(nBatchU);
-  const int32_t total = static_cast<int32_t>(tokens.size());
+  return replayTokensThroughDecoderImpl(
+      lctx,
+      seqId,
+      tokens,
+      startPos,
+      outputLogitsForLast,
+      chunkSize,
+      [](auto* ctx, llama_batch batch) { return llama_decode(ctx, batch); });
+}
 
-  llama_batch batch = llama_batch_init(chunkSize, 0, 1);
-  bool ok = true;
-  for (int32_t offset = 0; offset < total && ok; offset += chunkSize) {
-    const int32_t end = std::min(offset + chunkSize, total);
-    common_batch_clear(batch);
-    for (int32_t i = offset; i < end; ++i) {
-      const bool isFinal = (i == total - 1);
-      const bool requestLogits = outputLogitsForLast && isFinal;
-      common_batch_add(
-          batch,
-          tokens[i],
-          startPos + static_cast<llama_pos>(i),
-          {seqId},
-          requestLogits);
-    }
-    if (llama_decode(lctx, batch) != 0) {
-      ok = false;
-    }
-  }
-  llama_batch_free(batch);
-  return ok;
+bool replayTokensThroughDecoderForTesting(
+    ::llama_context* lctx, llama_seq_id seqId,
+    const std::vector<llama_token>& tokens, llama_pos startPos,
+    bool outputLogitsForLast, int32_t chunkSize, ReplayDecodeFunc decodeFunc) {
+  return replayTokensThroughDecoderImpl(
+      lctx,
+      seqId,
+      tokens,
+      startPos,
+      outputLogitsForLast,
+      chunkSize,
+      decodeFunc);
 }
 
 } // namespace utils

@@ -150,6 +150,11 @@ function createFollowUpMessages (initialMessages, previousResponse) {
   ]
 }
 
+function stripReasoningForPrompt (response) {
+  const stripped = response.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim()
+  return stripped || response
+}
+
 safeTest('reasoning tag EOS replacement works with tools=false', {
   skip: isDarwinX64,
   timeout: 600_000
@@ -594,18 +599,19 @@ safeTest('Qwen3.5 honours remove_thinking_from_context opt-in', {
     `opt-in run should report at least one discard (got ${thinkingDiscards})`)
 })
 
-// Multi-turn assertion that the SSM rollback is doing its job: with
-// compaction ON, turn-2 must not be measurably steered by turn-1's
-// reasoning span. We measure indirectly via cache growth — turn-2's
-// pre-decode `cacheTokens` should equal the protected-prefix tokens
-// plus turn-2's own prompt, NOT the turn-1 reasoning body. A regression
-// where the snapshot/replay was wired up incorrectly (e.g. forgetting
-// to drop the attention KV) would leave turn-2 carrying turn-1's
-// thinking and the assertion below would fail.
+// Multi-turn assertion that the SSM rollback is doing its job: with compaction
+// ON, the persisted cache should remain usable on the next turn without being
+// steered by turn 1's reasoning span. The explicit assistant message mirrors
+// the compacted cache by stripping the visible reasoning body from the prompt.
 safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clean', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_500_000
 }, async t => {
+  const sessionPath = path.join(os.tmpdir(), `qvac-qwen35-reasoning-clean-${Date.now()}.bin`)
+  t.teardown(() => {
+    try { require('bare-fs').unlinkSync(sessionPath) } catch {}
+  })
+
   const { inference } = await setupReasoningModel(t, false, {
     modelDef: QWEN35_MODEL,
     configOverrides: QWEN35_REASONING_CONFIG
@@ -616,7 +622,7 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
   const t1 = await runCompletionWithStats(
     inference,
     messagesT1,
-    { generationParams: { remove_thinking_from_context: true } }
+    { cacheKey: sessionPath, generationParams: { remove_thinking_from_context: true } }
   )
   t.comment(`turn 1 stats: ${JSON.stringify(t1.stats)}`)
   t.ok(toNumber(t1.stats.thinkingBlockDiscards) >= 1,
@@ -624,27 +630,35 @@ safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clea
 
   const messagesT2 = [
     ...messagesT1,
-    { role: 'assistant', content: t1.response },
+    // The live cache was compacted, so the explicit assistant message used to
+    // render turn 2 must mirror that compacted history rather than re-injecting
+    // turn 1's long reasoning body into the prompt.
+    { role: 'assistant', content: stripReasoningForPrompt(t1.response) },
     { role: 'user', content: 'Now tell me the capital of Spain.' }
   ]
 
   const t2 = await runCompletionWithStats(
     inference,
     messagesT2,
-    { generationParams: { remove_thinking_from_context: true } }
+    {
+      cacheKey: sessionPath,
+      generationParams: {
+        // Turn 2 is a recovery/continuation check. Keep it out of Qwen3.5's
+        // long thinking path so an unfinished second-turn span does not mask
+        // the compacted-cache assertion from turn 1.
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
+      }
+    }
   )
   t.comment(`turn 2 stats: ${JSON.stringify(t2.stats)}`)
   t.comment(`turn 2 response (len=${t2.response.length}): ${t2.response.slice(0, 300)}`)
   t.ok(t2.response.length > 0,
     'turn 2 should still produce a response (generation succeeds after rollback)')
 
-  // Functional check on the answer itself. The end-of-prefill snapshot
-  // keeps the forced `<think>\n` opener in the SSM hidden state; if
-  // the replay buffer omits the matching close marker, turn 2 inherits
-  // an unbalanced (opener-without-closer) recurrent state and the
-  // resulting answer tends to drift off-topic or loop. With temp=0,
-  // a balanced replay reliably produces "Madrid" somewhere in the
-  // response. A degenerate SSM does not.
+  // Functional check on the answer itself. If turn 1's compacted cache is
+  // corrupted or still contains hidden reasoning state, this deterministic
+  // follow-up tends to drift off-topic or loop instead of answering Madrid.
   t.ok(/madrid/i.test(t2.response),
     'turn 2 should answer "capital of Spain" with Madrid (proves the SSM did not degenerate)')
 })
@@ -833,18 +847,11 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
     `batch promptTokens must match between compaction on/off (on=${on.stats.promptTokens}, off=${off.stats.promptTokens})`)
 })
 
-// ContextShifter clears reasoning spans (and the recurrent snapshot for
-// hybrid models) whenever a slide drops cache tokens. This test pins the
-// safety contract: a slide that fires while `remove_thinking_from_context`
-// is enabled must NOT leave the compactor in a state where it asserts,
-// crashes, or hard-fails the request. After a slide the compactor's span
-// bookkeeping is reset; subsequent reasoning either re-opens a fresh
-// span (compacts cleanly) or the recurrent path no-ops because the
-// boundary snapshot is gone. Under the uniform hard-fail contract
-// (PR #2813), a broken slide-clears-reasoning-state wiring would
-// surface as a thrown `StatusError` on the affected turn — the
-// per-turn `runCompletionWithStats` call would throw and the test
-// would exit early via `firstError`.
+// ContextShifter invalidates reasoning spans whenever a generation-time slide
+// drops cache tokens. Under the uniform hard-fail contract (PR #2813), a slide
+// that invalidates active reasoning state must reject the request instead of
+// silently preserving reasoning in cache. This test forces that interaction and
+// asserts the failure is explicit and recoverable.
 //
 // We force the slide by squeezing `ctx_size` down to 512 (and setting
 // `n_discarded=64` so overflow triggers a slide instead of a hard
@@ -852,9 +859,9 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
 // that budget. The chat-template wrapping plus turn-1 reasoning output
 // is enough to push later turns past the ctx limit on Qwen3-0.6B — a
 // slide must fire to make room. Without compaction-aware slide
-// handling this used to crash on span-end-out-of-cache assertions;
-// with the fix it silently no-ops.
-safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
+// handling used to crash on span-end-out-of-cache assertions; with the strict
+// contract it surfaces as a `slide invalidated tracked reasoning state` error.
+safeTest('Qwen3 sliding context hard-fails stale reasoning compaction', {
   timeout: 600_000
 }, async t => {
   const { inference } = await setupReasoningModel(t, false, {
@@ -889,19 +896,17 @@ safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
 
   // Drive turns sequentially, accumulating the full conversation in
   // `messages`. Each turn issues a fresh `inference.run`, so the cache
-  // grows monotonically across turns and eventually trips the slide.
-  // We stop as soon as `contextSlides >= 1` so the test exits early on
-  // hosts where the model is more verbose than expected.
+  // grows monotonically across turns and eventually trips a generation-time
+  // slide while reasoning state is active.
   const messages = createInitialMessages()
   let lastStats = {}
   let lastResponse = ''
-  let sawSlide = false
   let firstError = null
 
   // Five turns is a comfortable upper bound — every additional turn
   // roughly doubles cumulative tokens at this prompt scale, so the
   // cache crosses 512 within 2–3 turns on every backend we test.
-  for (let turn = 1; turn <= 5 && !sawSlide; turn++) {
+  for (let turn = 1; turn <= 5 && firstError === null; turn++) {
     let turnStats = {}
     let turnResponse = ''
     try {
@@ -926,35 +931,25 @@ safeTest('Qwen3 sliding context coexists with remove_thinking_from_context', {
     t.comment(`turn ${turn} stats: ${JSON.stringify(turnStats)}`)
     t.comment(`turn ${turn} response (len=${turnResponse.length}): ${turnResponse.slice(0, 120)}`)
 
-    // Under the uniform hard-fail contract, a broken
-    // slide-clears-reasoning-state wiring would surface as a thrown
-    // `StatusError` on the affected turn — the try block above would
-    // have propagated it into `firstError` and broken out of the
-    // loop. Reaching this point means the turn completed cleanly.
-
-    if (toNumber(turnStats.contextSlides) >= 1) {
-      sawSlide = true
-    }
     messages.push({ role: 'assistant', content: turnResponse })
     messages.push({ role: 'user', content: 'Please elaborate further on the previous answer in great detail, covering all relevant background.' })
   }
 
-  // Core safety contract: the combined feature surface must not crash.
-  // A regression where ContextShifter's reasoning-state reset is wired
-  // up incorrectly would surface here as a thrown StatusError (span
-  // end-out-of-cache, snapshot underflow, etc.).
-  t.is(firstError, null,
-    `multi-turn run with sliding + remove_thinking_from_context must not throw (${firstError && firstError.message})`)
+  t.ok(firstError,
+    `multi-turn sliding run must trigger a strict compaction failure (last stats=${JSON.stringify(lastStats)}, last response len=${lastResponse.length})`)
+  t.ok(/slide invalidated tracked reasoning state/i.test(firstError && firstError.message),
+    `slide failure should explain the invalidated reasoning state, got: ${firstError && firstError.message}`)
 
-  // The slide must have actually fired — otherwise the test is not
-  // exercising the interaction it claims to.
-  t.ok(sawSlide,
-    `at least one turn must have triggered a context slide (last stats=${JSON.stringify(lastStats)}); ` +
-    'if no slide fired the test is not exercising the slide × compaction interaction — ' +
-    'shrink ctx_size further or raise the per-turn elaboration budget')
-
-  // Generation must still produce text on the slide turn itself —
-  // empty output would indicate the slide broke generation.
-  t.ok(lastResponse.length > 0,
-    'last turn (which slid) must still generate text')
+  const recovery = await runCompletionWithStats(
+    inference,
+    [{ role: 'user', content: 'Say ok.' }],
+    {
+      generationParams: {
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
+      }
+    }
+  )
+  t.ok(recovery.response.length > 0,
+    'model should recover and generate after strict slide-invalidation failure')
 })
