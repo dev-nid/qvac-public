@@ -114,7 +114,12 @@ test('Qwen3.5-0.8B can run basic inference', {
     await addon.load()
     console.log(`  model.load() took ${Date.now() - t0} ms`)
 
-    const response = await addon.run(BASE_PROMPT)
+    // This smoke test is not exercising reasoning. Keep Qwen3.5 out of the
+    // short-budget thinking path so the assertion checks the final answer, not
+    // an incomplete <think> trace.
+    const response = await addon.run(BASE_PROMPT, {
+      generationParams: { reasoning_budget: 0 }
+    })
     const output = await collectResponse(response)
 
     t.ok(output.length > 0, `inference produced output (${output.length} chars)`)
@@ -170,7 +175,16 @@ test('Qwen3.5-0.8B supports multi-turn conversation with KV cache', {
     // chat message — the latter was removed in v0.15.0 and is silently dropped
     // by Jinja chat templates that have no matching elif branch.
     const prompt1 = [systemMsg, userTurn1]
-    const response1 = await addon.run(prompt1, { cacheKey: sessionName })
+    // This cache smoke test uses a short decode budget and only verifies that
+    // Qwen3.5 can persist/extend KV state. Dedicated reasoning tests cover
+    // thinking/compaction with a larger budget that reaches </think>.
+    const noReasoning = {
+      generationParams: { reasoning_budget: 0 }
+    }
+    const response1 = await addon.run(prompt1, {
+      cacheKey: sessionName,
+      ...noReasoning
+    })
     const output1 = await collectResponse(response1)
     t.ok(output1.length > 0, `first turn produced output (${output1.length} chars)`)
     const lowerOutput1 = output1.toLowerCase()
@@ -183,7 +197,10 @@ test('Qwen3.5-0.8B supports multi-turn conversation with KV cache', {
       { role: 'assistant', content: output1 },
       { role: 'user', content: 'And what about Germany?' }
     ]
-    const response2 = await addon.run(prompt2, { cacheKey: sessionName })
+    const response2 = await addon.run(prompt2, {
+      cacheKey: sessionName,
+      ...noReasoning
+    })
     const output2 = await collectResponse(response2)
     t.ok(output2.length > 0, `second turn produced output (${output2.length} chars)`)
     const lowerOutput2 = output2.toLowerCase()
@@ -246,7 +263,12 @@ test('Qwen3.5-0.8B supports tool calling', {
       { role: 'user', content: 'What is the weather in Paris in celsius?' }
     ]
 
-    const response = await addon.run(prompt)
+    // Tool-call formatting is the behavior under test. Keep Qwen3.5 out of the
+    // short-budget thinking path so the tool-call assertion observes final
+    // output rather than an unfinished reasoning trace.
+    const response = await addon.run(prompt, {
+      generationParams: { reasoning_budget: 0 }
+    })
     const output = await collectResponse(response)
 
     t.ok(output.length > 0, `tool calling produced output (${output.length} chars)`)
