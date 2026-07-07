@@ -228,8 +228,7 @@ TEST(RecurrentStateSnapshotTest, ReplayFailureAfterPartialChunksReturnsFalse) {
   std::vector<llama_token> tokens = {1, 2, 3, 4, 5};
   int decodeCalls = 0;
   std::vector<int32_t> chunkSizes;
-  auto* fakeCtx =
-      reinterpret_cast<::llama_context*>(static_cast<uintptr_t>(1));
+  auto* fakeCtx = reinterpret_cast<::llama_context*>(static_cast<uintptr_t>(1));
 
   const bool replayOk = replayTokensThroughDecoderForTesting(
       fakeCtx,

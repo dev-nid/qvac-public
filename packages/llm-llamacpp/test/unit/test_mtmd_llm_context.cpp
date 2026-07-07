@@ -489,7 +489,8 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
   auto* base = LlamaModelTestPeer::llmContext(*model);
   ASSERT_NE(base, nullptr);
   auto* ctx = dynamic_cast<MtmdLlmContext*>(base);
-  ASSERT_NE(ctx, nullptr) << "single-prompt context for Qwen3.5 VLM must be MTMD";
+  ASSERT_NE(ctx, nullptr)
+      << "single-prompt context for Qwen3.5 VLM must be MTMD";
 
   const fs::path cachePath =
       fs::temp_directory_path() / "qvac-qwen35-mtmd-thinking-compaction.bin";
@@ -527,8 +528,7 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
       ", nPast=" + std::to_string(ctx->getNPast()) +
       ", cacheTokens=" + std::to_string(ctx->getCacheTokens()) +
       ", firstMsgTokens=" + std::to_string(ctx->getFirstMsgTokens()) +
-      ", firstMsgCacheTokens=" +
-      std::to_string(ctx->getFirstMsgCacheTokens()) +
+      ", firstMsgCacheTokens=" + std::to_string(ctx->getFirstMsgCacheTokens()) +
       ", seqPosMax=" + std::to_string(posMax) +
       ", sequenceCells=" + std::to_string(sequenceCells) +
       ", output (first 200 chars): " + output.substr(0, 200));
@@ -553,7 +553,8 @@ TEST_F(MtmdLlmContextTest, Qwen35MultimodalHonoursRemoveThinkingFromContext) {
   EXPECT_GT(ctx->getCacheTokens(), 0)
       << "cache token bookkeeping must remain resident after compaction";
   EXPECT_EQ(ctx->getCacheTokens(), sequenceCells)
-      << "MTMD cacheTokens must be refreshed from llama memory after compaction";
+      << "MTMD cacheTokens must be refreshed from llama memory after "
+         "compaction";
   EXPECT_EQ(ctx->getNPast(), posMax + 1)
       << "MTMD current_.pos must match the compacted sequence cursor";
   EXPECT_LE(ctx->getFirstMsgTokens(), ctx->getNPast())

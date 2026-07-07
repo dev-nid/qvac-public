@@ -50,8 +50,8 @@ struct PrefillEntryRecoveryHooks {
   std::function<void()> onCleared;
 };
 
-inline bool restorePrefillEntryOrClearSequence(
-    const PrefillEntryRecoveryHooks& hooks) {
+inline bool
+restorePrefillEntryOrClearSequence(const PrefillEntryRecoveryHooks& hooks) {
   if (hooks.rollback.hasPrefillEntry()) {
     const llama_pos restoredNPast = hooks.rollback.prefillEntryNPast();
     if (hooks.rollback.restorePrefillEntry(hooks.ctx, hooks.seqId)) {

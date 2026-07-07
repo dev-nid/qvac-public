@@ -16,9 +16,9 @@
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
 #include "MediaLoadOrder.hpp"
+#include "ReasoningRecoveryHelpers.hpp"
 #include "addon/LlmErrors.hpp"
 #include "inference-addon-cpp/Logger.hpp"
-#include "ReasoningRecoveryHelpers.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
 #include "utils/ReasoningSnapshotPolicy.hpp"
@@ -1336,35 +1336,38 @@ void MtmdLlmContext::compactThinkSpan() {
   // llama_memory_seq_token_count(seqId_)` regardless of what a future
   // reasoning span might include (e.g. inline media).
   bool compacted = false;
-  handleCompactionOutcome(outcome, {
-      .onCompacted =
-          [this, &compacted](const ReasoningBlockCompactor::Outcome& result) {
-            current_.pos = result.newPos;
-            refreshCurrentCacheTokensFromMemory();
-            compacted = true;
-          },
-      .onFailedKvIntact =
-          [this]() {
-            const llama_pos delta = current_.pos - preRequestUsage_.pos;
-            if (delta > 0) {
-              removeLastNTokens(delta);
-              current_ = preRequestUsage_;
-              refreshCurrentCacheTokensFromMemory();
-            }
-            protectedPrefix_ = preRequestProtectedPrefix_;
-            pendingBatchFirstMsg_ = false;
-            rollbackState_.reset();
-            compactor_.reset();
-          },
-      .onFailedKvWiped =
-          [this]() {
-            current_ = {};
-            protectedPrefix_ = {};
-            pendingBatchFirstMsg_ = false;
-            rollbackState_.reset();
-            compactor_.reset();
-          },
-  });
+  handleCompactionOutcome(
+      outcome,
+      {
+          .onCompacted =
+              [this,
+               &compacted](const ReasoningBlockCompactor::Outcome& result) {
+                current_.pos = result.newPos;
+                refreshCurrentCacheTokensFromMemory();
+                compacted = true;
+              },
+          .onFailedKvIntact =
+              [this]() {
+                const llama_pos delta = current_.pos - preRequestUsage_.pos;
+                if (delta > 0) {
+                  removeLastNTokens(delta);
+                  current_ = preRequestUsage_;
+                  refreshCurrentCacheTokensFromMemory();
+                }
+                protectedPrefix_ = preRequestProtectedPrefix_;
+                pendingBatchFirstMsg_ = false;
+                rollbackState_.reset();
+                compactor_.reset();
+              },
+          .onFailedKvWiped =
+              [this]() {
+                current_ = {};
+                protectedPrefix_ = {};
+                pendingBatchFirstMsg_ = false;
+                rollbackState_.reset();
+                compactor_.reset();
+              },
+      });
 
   // Protected-prefix bookkeeping for both successful paths: the new
   // lower bound is `keptPrefixEnd` (= `spanStart` for attention,

@@ -157,8 +157,8 @@ bool replayTokensThroughDecoder(
 using ReplayDecodeFunc = std::function<int(::llama_context*, llama_batch)>;
 
 // Test seam for replay chunking and failure propagation. Production callers
-// should use `replayTokensThroughDecoder`, which derives the chunk size from the
-// live context and decodes with llama.cpp directly.
+// should use `replayTokensThroughDecoder`, which derives the chunk size from
+// the live context and decodes with llama.cpp directly.
 bool replayTokensThroughDecoderForTesting(
     ::llama_context* lctx, llama_seq_id seqId,
     const std::vector<llama_token>& tokens, llama_pos startPos,

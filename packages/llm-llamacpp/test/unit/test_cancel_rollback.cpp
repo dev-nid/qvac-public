@@ -935,8 +935,7 @@ TEST(
       generationDone.store(true);
     });
 
-    auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (!generationDone.load() &&
            std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));

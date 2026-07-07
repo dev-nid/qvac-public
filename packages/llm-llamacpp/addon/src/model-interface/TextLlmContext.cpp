@@ -13,11 +13,11 @@
 #include "CacheManager.hpp"
 #include "ContextSlider.hpp"
 #include "GenerationParamsApply.hpp"
+#include "ReasoningRecoveryHelpers.hpp"
 #include "addon/LlmErrors.hpp"
 #include "common/common.h"
 #include "common/log.h"
 #include "inference-addon-cpp/Logger.hpp"
-#include "ReasoningRecoveryHelpers.hpp"
 #include "utils/ChatTemplateUtils.hpp"
 #include "utils/LoggingMacros.hpp"
 #include "utils/ReasoningSnapshotPolicy.hpp"
@@ -1280,37 +1280,39 @@ void TextLlmContext::compactThinkSpan() {
   }
   const ReasoningBlockCompactor::Outcome outcome =
       compactor_.compact(modelCtx_.lctx, seqId_, nPast_, "[TextLlm]");
-  handleCompactionOutcome(outcome, {
-      .onCompacted =
-          [this](const ReasoningBlockCompactor::Outcome& compacted) {
-            nPast_ = compacted.newPos;
-            if (compacted.keptPrefixEnd < firstMsgTokens_) {
-              firstMsgTokens_ = compacted.keptPrefixEnd;
-            }
-          },
-      .onFailedKvIntact =
-          [this]() {
-            const llama_pos delta = nPast_ - preRequestNPast_;
-            if (delta > 0) {
-              removeLastNTokens(delta);
-            }
-            nPast_ = preRequestNPast_;
-            firstMsgTokens_ = preRequestFirstMsgTokens_;
-            generationStarted_ = false;
-            assistantOutput_.clear();
-            rollbackState_.reset();
-            compactor_.reset();
-          },
-      .onFailedKvWiped =
-          [this]() {
-            nPast_ = 0;
-            firstMsgTokens_ = 0;
-            generationStarted_ = false;
-            assistantOutput_.clear();
-            rollbackState_.reset();
-            compactor_.reset();
-          },
-  });
+  handleCompactionOutcome(
+      outcome,
+      {
+          .onCompacted =
+              [this](const ReasoningBlockCompactor::Outcome& compacted) {
+                nPast_ = compacted.newPos;
+                if (compacted.keptPrefixEnd < firstMsgTokens_) {
+                  firstMsgTokens_ = compacted.keptPrefixEnd;
+                }
+              },
+          .onFailedKvIntact =
+              [this]() {
+                const llama_pos delta = nPast_ - preRequestNPast_;
+                if (delta > 0) {
+                  removeLastNTokens(delta);
+                }
+                nPast_ = preRequestNPast_;
+                firstMsgTokens_ = preRequestFirstMsgTokens_;
+                generationStarted_ = false;
+                assistantOutput_.clear();
+                rollbackState_.reset();
+                compactor_.reset();
+              },
+          .onFailedKvWiped =
+              [this]() {
+                nPast_ = 0;
+                firstMsgTokens_ = 0;
+                generationStarted_ = false;
+                assistantOutput_.clear();
+                rollbackState_.reset();
+                compactor_.reset();
+              },
+      });
 }
 
 int32_t TextLlmContext::getThinkingBlockDiscards() const {
