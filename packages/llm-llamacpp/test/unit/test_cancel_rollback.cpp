@@ -142,6 +142,16 @@ void primeWithPrefill(LlamaModel& model, const std::string& userText) {
   model.processPrompt(prompt);
 }
 
+LlamaModel::Prompt makeMtmdVisibleRecoveryPrompt() {
+  LlamaModel::Prompt recovery;
+  recovery.input =
+      R"([{"role":"user","content":"Answer with exactly one word: ok"}])";
+  recovery.generationParams.remove_thinking_from_context = false;
+  recovery.generationParams.reasoning_budget = 0;
+  recovery.generationParams.n_predict = 32;
+  return recovery;
+}
+
 // Returns the canonical small test image path used elsewhere in the
 // unit test suite. Mirrors `multimodalTestImagePath()` from
 // `test_mtmd_llm_context.cpp`; duplicated here to keep this file
@@ -762,9 +772,7 @@ TEST_F(MtmdLlmContextCancelTest, CancelDuringPrefillLeavesHybridMtmdUsable) {
   worker.join();
 
   // Recovery: the model must accept another inference cleanly.
-  LlamaModel::Prompt recovery;
-  recovery.input = R"([{"role":"user","content":"Hi"}])";
-  recovery.generationParams.remove_thinking_from_context = false;
+  LlamaModel::Prompt recovery = makeMtmdVisibleRecoveryPrompt();
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GT(output.length(), 0u);
@@ -837,9 +845,7 @@ TEST_F(
 
   // Recovery: the model must accept another inference (with or without
   // an image) cleanly on the rolled-back cache.
-  LlamaModel::Prompt recovery;
-  recovery.input = R"([{"role":"user","content":"Hi"}])";
-  recovery.generationParams.remove_thinking_from_context = false;
+  LlamaModel::Prompt recovery = makeMtmdVisibleRecoveryPrompt();
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GT(output.length(), 0u);
@@ -889,8 +895,7 @@ TEST_F(
   ASSERT_TRUE(done.load());
   worker.join();
 
-  LlamaModel::Prompt recovery;
-  recovery.input = R"([{"role":"user","content":"Hi"}])";
+  LlamaModel::Prompt recovery = makeMtmdVisibleRecoveryPrompt();
   EXPECT_NO_THROW({
     std::string output = model->processPrompt(recovery);
     EXPECT_GT(output.length(), 0u);
