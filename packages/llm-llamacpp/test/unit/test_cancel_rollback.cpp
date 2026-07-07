@@ -326,10 +326,12 @@ TEST_F(TextLlmContextCancelTest, PrefillCancelAtEntryReturnsFalseOnHybrid) {
 
   driver.stop();
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  const bool result = driver.evalMessageWithTools(
+  const LlmContext::EvalMessageResult result = driver.evalMessageWithTools(
       chatMsgs, /*tools=*/{}, /*isCacheLoaded=*/false, /*prefill=*/false);
 
-  EXPECT_FALSE(result);
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.cancelled);
+  EXPECT_TRUE(result.rollbackOk);
   EXPECT_EQ(driver.getNPast(), 0);
   EXPECT_EQ(seqPosMax(*model), -1)
       << "cancelled prefill must not leave KV cells resident";
@@ -349,10 +351,12 @@ TEST_F(
 
   driver.stop();
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  const bool result = driver.evalMessageWithTools(
+  const LlmContext::EvalMessageResult result = driver.evalMessageWithTools(
       chatMsgs, /*tools=*/{}, /*isCacheLoaded=*/false, /*prefill=*/false);
 
-  EXPECT_FALSE(result);
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.cancelled);
+  EXPECT_TRUE(result.rollbackOk);
   EXPECT_EQ(driver.getNPast(), 0);
   EXPECT_EQ(seqPosMax(*model), -1);
 }
@@ -377,16 +381,22 @@ TEST_F(
     TextLlmContext driver(params, shared, tools, /*seqId=*/0);
     driver.stop();
     std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-    EXPECT_FALSE(driver.evalMessageWithTools(
-        chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
+    const LlmContext::EvalMessageResult result = driver.evalMessageWithTools(
+        chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
+    EXPECT_FALSE(result.ok);
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_TRUE(result.rollbackOk);
     EXPECT_EQ(driver.getNPast(), 0);
   }
 
   // Then run a normal prefill on a fresh driver — must succeed.
   TextLlmContext driver2(params, shared, tools, /*seqId=*/0);
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  EXPECT_TRUE(driver2.evalMessageWithTools(
-      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/true));
+  const LlmContext::EvalMessageResult result = driver2.evalMessageWithTools(
+      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/true);
+  EXPECT_TRUE(result.ok);
+  EXPECT_FALSE(result.cancelled);
+  EXPECT_TRUE(result.rollbackOk);
   EXPECT_GT(driver2.getNPast(), 0)
       << "post-cancel prefill must successfully decode tokens";
 }
@@ -417,8 +427,12 @@ TEST_F(TextLlmContextCancelTest, OnCancelRestoresPreRequestSnapshotOnHybrid) {
   const llama_pos preRequestNPast = driver.getNPast();
 
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
+  const LlmContext::EvalMessageResult prefillResult =
+      driver.evalMessageWithTools(
+          chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
+  ASSERT_TRUE(prefillResult.ok);
+  EXPECT_FALSE(prefillResult.cancelled);
+  EXPECT_TRUE(prefillResult.rollbackOk);
   const llama_pos posAfterPrefill = driver.getNPast();
   ASSERT_GT(posAfterPrefill, preRequestNPast)
       << "prefill must advance the cursor for the test to be meaningful";
@@ -466,8 +480,12 @@ TEST_F(
   const llama_pos preRequestNPast = driver.getNPast();
 
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
+  const LlmContext::EvalMessageResult prefillResult =
+      driver.evalMessageWithTools(
+          chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
+  ASSERT_TRUE(prefillResult.ok);
+  EXPECT_FALSE(prefillResult.cancelled);
+  EXPECT_TRUE(prefillResult.rollbackOk);
   ASSERT_GT(driver.getNPast(), preRequestNPast);
 
   bool rollbackOk = false;
@@ -528,19 +546,27 @@ TEST_F(
 
   // Turn 1 (small opener) keeps `firstMsgTokens_` modest so turn 3's
   // slide budget is not dominated by the protected prefix.
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", "Hi")},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true));
+  const LlmContext::EvalMessageResult turn1Result =
+      driver.evalMessageWithTools(
+          {makeMsg("user", "Hi")},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
+  ASSERT_TRUE(turn1Result.ok);
+  EXPECT_FALSE(turn1Result.cancelled);
+  EXPECT_TRUE(turn1Result.rollbackOk);
 
   // Turn 2 fills context toward the ceiling (~350 tokens on Qwen3).
   const std::string bulk = repeat("The quick brown fox jumps. ", /*times=*/65);
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", bulk)},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true));
+  const LlmContext::EvalMessageResult turn2Result =
+      driver.evalMessageWithTools(
+          {makeMsg("user", bulk)},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
+  ASSERT_TRUE(turn2Result.ok);
+  EXPECT_FALSE(turn2Result.cancelled);
+  EXPECT_TRUE(turn2Result.rollbackOk);
   const llama_pos preRequestNPast = driver.getNPast();
   const llama_pos preRequestFirstMsg = driver.getFirstMsgTokens();
   ASSERT_GT(preRequestNPast, preRequestFirstMsg)
@@ -556,11 +582,15 @@ TEST_F(
   // Turn 3 sized so `preRequestNPast + nTokens > ctx_size` forces
   // `trySlidePrefill` to run before decode.
   const std::string overflow = repeat("Please describe. ", /*times=*/50);
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", overflow)},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true));
+  const LlmContext::EvalMessageResult turn3Result =
+      driver.evalMessageWithTools(
+          {makeMsg("user", overflow)},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
+  ASSERT_TRUE(turn3Result.ok);
+  EXPECT_FALSE(turn3Result.cancelled);
+  EXPECT_TRUE(turn3Result.rollbackOk);
   ASSERT_GT(driver.getNSlides(), preRequestSlides)
       << "turn 3 must have triggered a context slide in preparePrefill "
          "for the regression assertion to be meaningful. preRequestNPast="
@@ -586,12 +616,16 @@ TEST_F(
          "cancel — any leftover cells past `postCancelNPast - 1` are "
          "contamination of the next turn";
 
-  EXPECT_TRUE(driver.evalMessageWithTools(
+  const LlmContext::EvalMessageResult recoveryResult =
+      driver.evalMessageWithTools(
       {makeMsg("user", "Recovery ping")},
       {},
       /*isCacheLoaded=*/false,
-      /*prefill=*/true))
+      /*prefill=*/true);
+  EXPECT_TRUE(recoveryResult.ok)
       << "post-cancel prefill must succeed on the rolled-back cache";
+  EXPECT_FALSE(recoveryResult.cancelled);
+  EXPECT_TRUE(recoveryResult.rollbackOk);
 }
 
 // ============================================================================
@@ -658,8 +692,12 @@ TEST_F(
   TextLlmContext driver(params, shared, tools, /*seqId=*/0);
 
   std::vector<common_chat_msg> chatMsgs = {makeMsg("user", "Hi")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false));
+  const LlmContext::EvalMessageResult evalResult =
+      driver.evalMessageWithTools(
+          chatMsgs, {}, /*isCacheLoaded=*/false, /*prefill=*/false);
+  ASSERT_TRUE(evalResult.ok);
+  EXPECT_FALSE(evalResult.cancelled);
+  EXPECT_TRUE(evalResult.rollbackOk);
   ASSERT_TRUE(driver.generateResponse([](const std::string&) {}).ok);
 
   EXPECT_FALSE(driver.takeUserVisiblePerfSnapshot().has_value())
@@ -1348,8 +1386,12 @@ TEST_F(
   // Turn 1 (warm baseline). This is the "prior turn's leftover state"
   // that a next-turn compaction failure MUST NOT corrupt.
   std::vector<common_chat_msg> turn1 = {makeMsg("user", "Hi there")};
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      turn1, {}, /*isCacheLoaded=*/false, /*prefill=*/true));
+  const LlmContext::EvalMessageResult turn1Result =
+      driver.evalMessageWithTools(
+          turn1, {}, /*isCacheLoaded=*/false, /*prefill=*/true);
+  ASSERT_TRUE(turn1Result.ok);
+  EXPECT_FALSE(turn1Result.cancelled);
+  EXPECT_TRUE(turn1Result.rollbackOk);
   const llama_pos preRequestNPast = driver.getNPast();
   ASSERT_GT(preRequestNPast, 0);
   const llama_pos preRequestFirstMsg = driver.getFirstMsgTokens();
@@ -1362,11 +1404,15 @@ TEST_F(
   // calls `snapshotPreRequestCursor` at entry, so `preRequestNPast_` is
   // pinned at the post-turn-1 cursor before the prefill advances
   // `nPast_` further.
-  ASSERT_TRUE(driver.evalMessageWithTools(
-      {makeMsg("user", "How are you?")},
-      {},
-      /*isCacheLoaded=*/false,
-      /*prefill=*/true));
+  const LlmContext::EvalMessageResult turn2Result =
+      driver.evalMessageWithTools(
+          {makeMsg("user", "How are you?")},
+          {},
+          /*isCacheLoaded=*/false,
+          /*prefill=*/true);
+  ASSERT_TRUE(turn2Result.ok);
+  EXPECT_FALSE(turn2Result.cancelled);
+  EXPECT_TRUE(turn2Result.rollbackOk);
   const llama_pos postTurn2NPast = driver.getNPast();
   ASSERT_GT(postTurn2NPast, preRequestNPast)
       << "turn 2 prefill must advance the cursor past the pre-request "
@@ -1413,12 +1459,16 @@ TEST_F(
 
   // Recovery: the driver must remain usable for a follow-up prefill on
   // the pre-request baseline that we just rolled back to.
-  EXPECT_TRUE(driver.evalMessageWithTools(
+  const LlmContext::EvalMessageResult recoveryResult =
+      driver.evalMessageWithTools(
       {makeMsg("user", "Are you working?")},
       {},
       /*isCacheLoaded=*/false,
-      /*prefill=*/true))
+      /*prefill=*/true);
+  EXPECT_TRUE(recoveryResult.ok)
       << "post-recovery prefill must succeed on the rolled-back cache";
+  EXPECT_FALSE(recoveryResult.cancelled);
+  EXPECT_TRUE(recoveryResult.rollbackOk);
   EXPECT_GT(driver.getNPast(), preRequestNPast);
 }
 

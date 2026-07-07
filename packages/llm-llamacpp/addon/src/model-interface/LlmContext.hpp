@@ -200,8 +200,6 @@ public:
     bool ok = true;
     bool cancelled = false;
     bool rollbackOk = true;
-
-    operator bool() const noexcept { return ok; }
   };
 
   /**
@@ -238,8 +236,6 @@ public:
     bool ok = true;
     bool cancelled = false;
     bool rollbackOk = true;
-
-    operator bool() const noexcept { return ok; }
   };
 
   /**

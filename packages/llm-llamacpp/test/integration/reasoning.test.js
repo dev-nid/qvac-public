@@ -599,61 +599,62 @@ safeTest('Qwen3.5 honours remove_thinking_from_context opt-in', {
     `opt-in run should report at least one discard (got ${thinkingDiscards})`)
 })
 
-// Multi-turn assertion that the SSM rollback is doing its job: with compaction
-// ON, the persisted cache should remain usable on the next turn without being
-// steered by turn 1's reasoning span. The explicit assistant message mirrors
-// the compacted cache by stripping the visible reasoning body from the prompt.
+// Multi-turn assertion that the SSM rollback is doing its job: with
+// compaction ON, the persisted cache should remain usable on the next turn
+// without being steered by turn 1's reasoning span. The explicit assistant
+// message mirrors the compacted cache by stripping the visible reasoning body
+// from the prompt.
 safeTest('Qwen3.5 multi-turn with remove_thinking_from_context is reasoning-clean', {
   skip: isDarwinX64 || isWindowsX64,
   timeout: 1_500_000
 }, async t => {
   const sessionPath = path.join(os.tmpdir(), `qvac-qwen35-reasoning-clean-${Date.now()}.bin`)
   t.teardown(() => {
-    try { require('bare-fs').unlinkSync(sessionPath) } catch {}
+    try {
+      require('bare-fs').unlinkSync(sessionPath)
+    } catch {
+    }
   })
 
-  const { inference } = await setupReasoningModel(t, false, {
-    modelDef: QWEN35_MODEL,
-    configOverrides: QWEN35_REASONING_CONFIG
-  })
+  const { inference } = await setupReasoningModel(
+    t, false,
+    { modelDef: QWEN35_MODEL, configOverrides: QWEN35_REASONING_CONFIG })
 
   const messagesT1 = createInitialMessages()
 
-  const t1 = await runCompletionWithStats(
-    inference,
-    messagesT1,
-    { cacheKey: sessionPath, generationParams: { remove_thinking_from_context: true } }
-  )
+  const t1 = await runCompletionWithStats(inference, messagesT1, {
+    cacheKey: sessionPath,
+    generationParams: { remove_thinking_from_context: true }
+  })
   t.comment(`turn 1 stats: ${JSON.stringify(t1.stats)}`)
   t.ok(toNumber(t1.stats.thinkingBlockDiscards) >= 1,
     'turn 1 should drop at least one reasoning block')
 
-  const messagesT2 = [
-    ...messagesT1,
-    // The live cache was compacted, so the explicit assistant message used to
-    // render turn 2 must mirror that compacted history rather than re-injecting
-    // turn 1's long reasoning body into the prompt.
-    { role: 'assistant', content: stripReasoningForPrompt(t1.response) },
-    { role: 'user', content: 'Now tell me the capital of Spain.' }
-  ]
+  const messagesT2 =
+    [
+      ...messagesT1,
+      // The live cache was compacted, so the explicit assistant message used to
+      // render turn 2 must mirror that compacted history rather than
+      // re-injecting turn 1's long reasoning body into the prompt.
+      { role: 'assistant', content: stripReasoningForPrompt(t1.response) },
+      { role: 'user', content: 'Now tell me the capital of Spain.' }
+    ]
 
-  const t2 = await runCompletionWithStats(
-    inference,
-    messagesT2,
-    {
-      cacheKey: sessionPath,
-      generationParams: {
-        // Turn 2 is a recovery/continuation check. Keep it out of Qwen3.5's
-        // long thinking path so an unfinished second-turn span does not mask
-        // the compacted-cache assertion from turn 1.
-        reasoning_budget: 0,
-        remove_thinking_from_context: true
-      }
+  const t2 = await runCompletionWithStats(inference, messagesT2, {
+    cacheKey: sessionPath,
+    generationParams: {
+      // Turn 2 is a recovery/continuation check. Keep it out of Qwen3.5's
+      // long thinking path so an unfinished second-turn span does not mask
+      // the compacted-cache assertion from turn 1.
+      reasoning_budget: 0,
+      remove_thinking_from_context: true
     }
-  )
+  })
   t.comment(`turn 2 stats: ${JSON.stringify(t2.stats)}`)
-  t.comment(`turn 2 response (len=${t2.response.length}): ${t2.response.slice(0, 300)}`)
-  t.ok(t2.response.length > 0,
+  t.comment(
+    `turn 2 response (len=${t2.response.length}): ${t2.response.slice(0, 300)}`)
+  t.ok(
+    t2.response.length > 0,
     'turn 2 should still produce a response (generation succeeds after rollback)')
 
   // Functional check on the answer itself. If turn 1's compacted cache is
@@ -848,10 +849,10 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
 })
 
 // ContextShifter invalidates reasoning spans whenever a generation-time slide
-// drops cache tokens. Under the uniform hard-fail contract (PR #2813), a slide
-// that invalidates active reasoning state must reject the request instead of
-// silently preserving reasoning in cache. This test forces that interaction and
-// asserts the failure is explicit and recoverable.
+// drops cache tokens. Under the uniform hard-fail contract (PR #2813), a
+// slide that invalidates active reasoning state must reject the request
+// instead of silently preserving reasoning in cache. This test forces that
+// interaction and asserts the failure is explicit and recoverable.
 //
 // We force the slide by squeezing `ctx_size` down to 512 (and setting
 // `n_discarded=64` so overflow triggers a slide instead of a hard
@@ -860,96 +861,100 @@ safeTest('Qwen3.5 batch path does not inflate TTFT with recurrent replay', {
 // is enough to push later turns past the ctx limit on Qwen3-0.6B — a
 // slide must fire to make room. Without compaction-aware slide
 // handling used to crash on span-end-out-of-cache assertions; with the strict
-// contract it surfaces as a `slide invalidated tracked reasoning state` error.
-safeTest('Qwen3 sliding context hard-fails stale reasoning compaction', {
-  timeout: 600_000
-}, async t => {
-  const { inference } = await setupReasoningModel(t, false, {
-    configOverrides: {
-      // Tight ctx so the cumulative cache from multi-turn overflows
-      // ctx_size and ContextShifter is forced to run. 512 rounds up to
-      // the next 256 multiple, matching the budget used by
-      // sliding-context.test.js. `n_discarded > 0` is required to
-      // enable sliding (the default of 0 turns overflow into a hard
-      // error).
-      ctx_size: '512',
-      n_predict: '512',
-      n_discarded: '64'
-    }
-  })
+// contract it surfaces as a `slide invalidated tracked reasoning state`
+// error.
+safeTest(
+  'Qwen3 sliding context hard-fails stale reasoning compaction',
+  { timeout: 600_000 }, async t => {
+    const { inference } = await setupReasoningModel(t, false, {
+      configOverrides: {
+        // Tight ctx so the cumulative cache from multi-turn overflows
+        // ctx_size and ContextShifter is forced to run. 512 rounds up to
+        // the next 256 multiple, matching the budget used by
+        // sliding-context.test.js. `n_discarded > 0` is required to
+        // enable sliding (the default of 0 turns overflow into a hard
+        // error).
+        ctx_size: '512',
+        n_predict: '512',
+        n_discarded: '64'
+      }
+    })
 
-  // Per-turn output cap. Each `inference.run` starts with a fresh KV
-  // cache, so every turn re-tokenizes the full conversation and
-  // prefills it as a single delta. With the default `n_predict=512`,
-  // a single verbose turn (observed >300 tokens on Android
-  // Qwen3-0.6B) pushes turn 2's tokenized prompt past ctx_size and
-  // trips the prefill-time hard-overflow guard before any slide can
-  // fire. Capping per-turn output keeps every turn's tokenized prompt
-  // under ctx_size (so the hard guard never fires) while letting
-  // cumulative cache growth during decode cross the ceiling — which
-  // is where the slide is expected to fire on this test.
-  //
-  // Sizing: initial ~40 + 4 x (PER_TURN_PREDICT + 25) + 25 must stay
-  // safely below 512 on turn 5's prefill, and turn-5 nPast + predict
-  // must exceed 512 so decode triggers the slide.
-  const PER_TURN_PREDICT = 80
+    // Per-turn output cap. Each `inference.run` starts with a fresh KV
+    // cache, so every turn re-tokenizes the full conversation and
+    // prefills it as a single delta. With the default `n_predict=512`,
+    // a single verbose turn (observed >300 tokens on Android
+    // Qwen3-0.6B) pushes turn 2's tokenized prompt past ctx_size and
+    // trips the prefill-time hard-overflow guard before any slide can
+    // fire. Capping per-turn output keeps every turn's tokenized prompt
+    // under ctx_size (so the hard guard never fires) while letting
+    // cumulative cache growth during decode cross the ceiling — which
+    // is where the slide is expected to fire on this test.
+    //
+    // Sizing: initial ~40 + 4 x (PER_TURN_PREDICT + 25) + 25 must stay
+    // safely below 512 on turn 5's prefill, and turn-5 nPast + predict
+    // must exceed 512 so decode triggers the slide.
+    const PER_TURN_PREDICT = 80
 
-  // Drive turns sequentially, accumulating the full conversation in
-  // `messages`. Each turn issues a fresh `inference.run`, so the cache
-  // grows monotonically across turns and eventually trips a generation-time
-  // slide while reasoning state is active.
-  const messages = createInitialMessages()
-  let lastStats = {}
-  let lastResponse = ''
-  let firstError = null
+    // Drive turns sequentially, accumulating the full conversation in
+    // `messages`. Each turn issues a fresh `inference.run`, so the cache
+    // grows monotonically across turns and eventually trips a
+    // generation-time slide while reasoning state is active.
+    const messages = createInitialMessages()
+    let lastStats = {}
+    let lastResponse = ''
+    let firstError = null
 
-  // Five turns is a comfortable upper bound — every additional turn
-  // roughly doubles cumulative tokens at this prompt scale, so the
-  // cache crosses 512 within 2–3 turns on every backend we test.
-  for (let turn = 1; turn <= 5 && firstError === null; turn++) {
-    let turnStats = {}
-    let turnResponse = ''
-    try {
-      const result = await runCompletionWithStats(
-        inference,
-        messages,
-        {
+    // Five turns is a comfortable upper bound — every additional turn
+    // roughly doubles cumulative tokens at this prompt scale, so the
+    // cache crosses 512 within 2–3 turns on every backend we test.
+    for (let turn = 1; turn <= 5 && firstError === null; turn++) {
+      let turnStats = {}
+      let turnResponse = ''
+      try {
+        const result = await runCompletionWithStats(inference, messages, {
           generationParams: {
             remove_thinking_from_context: true,
             predict: PER_TURN_PREDICT
           }
-        }
-      )
-      turnStats = result.stats
-      turnResponse = result.response
-    } catch (err) {
-      firstError = firstError || err
-      break
-    }
-    lastStats = turnStats
-    lastResponse = turnResponse
-    t.comment(`turn ${turn} stats: ${JSON.stringify(turnStats)}`)
-    t.comment(`turn ${turn} response (len=${turnResponse.length}): ${turnResponse.slice(0, 120)}`)
-
-    messages.push({ role: 'assistant', content: turnResponse })
-    messages.push({ role: 'user', content: 'Please elaborate further on the previous answer in great detail, covering all relevant background.' })
-  }
-
-  t.ok(firstError,
-    `multi-turn sliding run must trigger a strict compaction failure (last stats=${JSON.stringify(lastStats)}, last response len=${lastResponse.length})`)
-  t.ok(/slide invalidated tracked reasoning state/i.test(firstError && firstError.message),
-    `slide failure should explain the invalidated reasoning state, got: ${firstError && firstError.message}`)
-
-  const recovery = await runCompletionWithStats(
-    inference,
-    [{ role: 'user', content: 'Say ok.' }],
-    {
-      generationParams: {
-        reasoning_budget: 0,
-        remove_thinking_from_context: true
+        })
+        turnStats = result.stats
+        turnResponse = result.response
+      } catch (err) {
+        firstError = firstError || err
+        break
       }
+      lastStats = turnStats
+      lastResponse = turnResponse
+      t.comment(`turn ${turn} stats: ${JSON.stringify(turnStats)}`)
+      t.comment(`turn ${turn} response (len=${turnResponse.length}): ${
+              turnResponse.slice(0, 120)}`)
+
+      messages.push({ role: 'assistant', content: turnResponse })
+      messages.push({
+        role: 'user',
+        content:
+                'Please elaborate further on the previous answer in great detail, covering all relevant background.'
+      })
     }
-  )
-  t.ok(recovery.response.length > 0,
-    'model should recover and generate after strict slide-invalidation failure')
-})
+
+    t.ok(
+      firstError,
+            `multi-turn sliding run must trigger a strict compaction failure (last stats=${
+                JSON.stringify(
+                    lastStats)}, last response len=${lastResponse.length})`)
+    t.ok(
+      /slide invalidated tracked reasoning state/i.test(
+        firstError && firstError.message),
+            `slide failure should explain the invalidated reasoning state, got: ${
+                firstError && firstError.message}`)
+
+    const recovery = await runCompletionWithStats(
+      inference, [{ role: 'user', content: 'Say ok.' }], {
+        generationParams:
+                  { reasoning_budget: 0, remove_thinking_from_context: true }
+      })
+    t.ok(
+      recovery.response.length > 0,
+      'model should recover and generate after strict slide-invalidation failure')
+  })
