@@ -388,6 +388,20 @@ void CacheManager::writeCacheFile(const std::string& path) {
 
 void CacheManager::atomicPromoteFile(
     const std::string& from, const std::string& to) {
+  std::error_code directoryEc;
+  if (std::filesystem::is_directory(to, directoryEc)) {
+    std::error_code removeEc;
+    std::filesystem::remove(from, removeEc);
+    throw qvac_errors::StatusError(
+        ADDON_ID,
+        toString(UnableToSaveSessionFile),
+        string_format(
+            "%s: failed to promote tmp file to '%s': destination is a "
+            "directory\n",
+            __func__,
+            to.c_str()));
+  }
+
 #ifdef _WIN32
   // MoveFileExW atomically replaces the destination on NTFS — unlike
   // delete-then-rename, the old canonical file is preserved if promotion fails.
