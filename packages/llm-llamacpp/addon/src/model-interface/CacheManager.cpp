@@ -83,6 +83,11 @@ bool CacheManager::isFileInitialized(const std::filesystem::path& path) {
 }
 
 bool CacheManager::isFileMissingOrEmpty(const std::filesystem::path& path) {
+  std::error_code directoryErrorCode;
+  if (std::filesystem::is_directory(path, directoryErrorCode)) {
+    return false;
+  }
+
   std::error_code errorCode;
   auto size = std::filesystem::file_size(path, errorCode);
   if (!errorCode) {
