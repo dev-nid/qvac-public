@@ -918,12 +918,11 @@ TEST_F(
   ASSERT_TRUE(fs::exists(cachePath));
 
   std::atomic<bool> removedBackingStore = false;
-  auto followup =
-      makePrompt("Write several words about the cached setup.");
+  auto followup = makePrompt("Write several words about the cached setup.");
   followup.cacheKey = cachePath.string();
   followup.saveCacheToDisk = true;
-  followup.outputCallback = [&cacheDir, &removedBackingStore](
-                                const std::string&) {
+  followup.outputCallback = [&cacheDir,
+                             &removedBackingStore](const std::string&) {
     if (!removedBackingStore.exchange(true)) {
       fs::remove_all(cacheDir);
     }
@@ -946,8 +945,8 @@ TEST_F(
   REQUIRE_MODEL(model_);
   config_["n_predict"] = "64";
   auto model = loadModel();
-  const fs::path cacheDir =
-      fs::temp_directory_path() / ("batch-deleted-cache-file-" + uniqueTestId());
+  const fs::path cacheDir = fs::temp_directory_path() /
+                            ("batch-deleted-cache-file-" + uniqueTestId());
   const fs::path cachePath = cacheDir / "session.bin";
 
   fs::remove_all(cacheDir);
@@ -965,8 +964,8 @@ TEST_F(
       makePrompt("Write several words about the cached file setup.");
   followup.cacheKey = cachePath.string();
   followup.saveCacheToDisk = true;
-  followup.outputCallback = [&cachePath, &removedCacheFile](
-                                const std::string&) {
+  followup.outputCallback = [&cachePath,
+                             &removedCacheFile](const std::string&) {
     if (!removedCacheFile.exchange(true)) {
       fs::remove(cachePath);
     }
@@ -1012,8 +1011,8 @@ TEST_F(
       makePrompt("Write several words about the cached empty file setup.");
   followup.cacheKey = cachePath.string();
   followup.saveCacheToDisk = true;
-  followup.outputCallback = [&cachePath, &truncatedCacheFile](
-                                const std::string&) {
+  followup.outputCallback = [&cachePath,
+                             &truncatedCacheFile](const std::string&) {
     if (!truncatedCacheFile.exchange(true)) {
       std::ofstream truncate(cachePath, std::ios::trunc);
     }
@@ -1085,8 +1084,8 @@ TEST_F(
       makePrompt("Write several words after loading the batch cache.");
   followup.cacheKey = cachePath.string();
   followup.saveCacheToDisk = true;
-  followup.outputCallback = [&cachePath, &replacedWithDirectory](
-                                const std::string&) {
+  followup.outputCallback = [&cachePath,
+                             &replacedWithDirectory](const std::string&) {
     if (!replacedWithDirectory.exchange(true)) {
       fs::remove(cachePath);
       fs::create_directory(cachePath);
