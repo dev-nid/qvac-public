@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.35.2] - 2026-07-08
+
+### Fixed
+
+- KV-cache stale backing-store handling now only discards active cache state for caches that were actually persisted before. Unsaved RAM-only cache paths with missing parents, cache paths replaced by directories, or other save-path failures continue to surface `UnableToSaveSessionFile` through the existing throw-and-invalidate path.
+
+### Pull Requests
+
+- [#3121](https://github.com/tetherto/qvac/pull/3121) - QVAC-21302 fix: preserve KV cache save failures after stale-cache handling
+
 ## [0.35.1] - 2026-07-08
 
 ### Fixed
