@@ -1,7 +1,6 @@
 {
   "name": "qvac-fabric",
-  "version": "8828.0.2",
-  "port-version": 1,
+  "version": "9518.0.0",
   "description": "LLM inference in C/C++",
   "homepage": "https://github.com/tetherto/qvac-fabric-llm.cpp",
   "license": "MIT",
@@ -34,6 +33,15 @@
           "name": "spirv-headers",
           "platform": "!osx & !ios",
           "version>=": "1.4.341.0"
+        }
+      ]
+    },
+    "hip-backend": {
+      "description": "Build the ROCm/HIP GPU backend (libqvac-ggml-hip.so) for AMD GPUs on Linux as a DL module alongside Vulkan. Opt-in (only @qvac/vla-ggml requests it). Fail-safe: if no ROCm SDK is present at build time the HIP backend is skipped (Vulkan/CPU only). Targets gfx1151 (Strix Halo). The 'hip' dependency forwards the system ROCm find_package configs.",
+      "dependencies": [
+        {
+          "name": "hip",
+          "platform": "linux & x64"
         }
       ]
     },
