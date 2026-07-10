@@ -17,6 +17,21 @@ find_package(cmake-vcpkg REQUIRED PATHS node_modules/cmake-vcpkg)
 
 set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/../../vcpkg-overlays/triplets;${VCPKG_OVERLAY_TRIPLETS}")
 
+# Local overlay-port for fabric (turbovec POC). The overlay at
+# `vcpkg/ports/qvac-fabric/` carries the POC fabric build because the public
+# `tetherto/qvac-registry-vcpkg` qvac-fabric port has no 8828.x line yet and
+# this manifest pins `>=8828.1.0`. By default the overlay fetches from
+# `dev-nid/qvac-fabric-llm.cpp` (poc/turbovec-embed branch) at a pinned
+# commit + SHA512. Drop this overlay once the registry publishes 8828.x.
+#
+# Local-iteration override: set `QVAC_FABRIC_LOCAL_PATH=/path/to/fabric` to
+# build from a working tree instead. In that mode, run
+# `./scripts/sync-fabric-overlay.sh` after each edit to bump the
+# portfile-tracked source hash (vcpkg derives ABI from portfile contents,
+# not from the source it copies in). `./scripts/rebuild-fabric.sh` chains
+# sync + generate + build + install for the inner-loop case.
+set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/ports;${VCPKG_OVERLAY_PORTS}")
+
 project(embed-llamacpp C CXX)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -68,6 +83,7 @@ target_sources(
   ${embed-llamacpp}
   PRIVATE
   ${PROJECT_SOURCE_DIR}/addon/src/js-interface/binding.cpp
+  ${PROJECT_SOURCE_DIR}/addon/src/js-interface/vector-index-binding.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/utils.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/AsyncWeightsLoader.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/BackendSelection.cpp
@@ -75,6 +91,7 @@ target_sources(
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/LlamaLazyInitializeBackend.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/ModelMetadata.cpp
   ${PROJECT_SOURCE_DIR}/addon/src/model-interface/BertModel.cpp
+  ${PROJECT_SOURCE_DIR}/addon/src/model-interface/VectorIndex.cpp
 )
 target_include_directories(
   ${embed-llamacpp}
@@ -82,6 +99,30 @@ target_include_directories(
     ${QVAC_LIB_INFERENCE_ADDON_CPP_INCLUDE_DIRS}
     ${PROJECT_SOURCE_DIR}/addon/src
 )
+# Some fabric branches (HEAD-ish) only export the `llama` target without
+# namespacing and without exporting the `llama-common` helper lib at all.
+# The `temp-8828` branch exports the full `llama::*` namespace incl.
+# `llama::common`. Add a shim only when the expected targets are missing.
+if(TARGET llama AND NOT TARGET llama::llama)
+  add_library(llama::llama ALIAS llama)
+endif()
+if(NOT TARGET llama::common)
+  if(NOT TARGET llama-common)
+    find_library(LLAMA_COMMON_LIB
+      NAMES llama-common
+      REQUIRED
+      HINTS ${LLAMA_LIB_DIR}
+      NO_CMAKE_FIND_ROOT_PATH)
+    add_library(llama-common UNKNOWN IMPORTED)
+    set_target_properties(llama-common
+      PROPERTIES
+        IMPORTED_LOCATION "${LLAMA_COMMON_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${LLAMA_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "llama")
+  endif()
+  add_library(llama::common ALIAS llama-common)
+endif()
+
 target_link_libraries(
   ${embed-llamacpp}
   PRIVATE

@@ -2,6 +2,15 @@
 
 #include "../addon/AddonJs.hpp"
 
+// Forward declaration for the IdMapIndex (vector-index) binding registrar.
+// The implementation lives in `vector-index-binding.cpp` and is deliberately
+// kept in its own TU so it has no symbol dependency on BertModel /
+// LlamaLazyInitializeBackend — required for the POC's lifecycle-isolation
+// invariant (constructing IdMapIndex must not boot fabric's LLM backend).
+namespace qvac_lib_inference_addon_embed::vector_index {
+void registerBindings(js_env_t* env, js_value_t* exports);
+}
+
 js_value_t*
 qvacLibInferLlamacppEmbedExports(js_env_t* env, js_value_t* exports) {
 
@@ -29,6 +38,8 @@ qvacLibInferLlamacppEmbedExports(js_env_t* env, js_value_t* exports) {
   V("releaseLogger", qvac_lib_inference_addon_cpp::JsInterface::releaseLogger)
 #undef V
 // NOLINTEND(cppcoreguidelines-macro-usage)
+
+  qvac_lib_inference_addon_embed::vector_index::registerBindings(env, exports);
 
   return exports;
 }
