@@ -88,8 +88,8 @@ endif()
 # to dispatch the variants at runtime; the existing #ifdef guard around
 # `ggml_backend_load_all_from_path()` in ggml-backend-reg.cpp keeps the search
 # scoped to the consumer's own prebuilds dir.
-if(VCPKG_TARGET_IS_ANDROID OR (VCPKG_TARGET_IS_LINUX AND BUILD_GPU_BACKENDS))
-  # Desktop Linux also needs GGML_BACKEND_DL=ON so that multiple GPU backends
+if(VCPKG_TARGET_IS_ANDROID OR (VCPKG_TARGET_IS_LINUX AND BUILD_GPU_BACKENDS AND BUILD_HIP_BACKEND))
+  # Desktop Linux needs GGML_BACKEND_DL=ON so that multiple GPU backends
   # (Vulkan + HIP/ROCm) can coexist as separately-loaded modules, the same way
   # Android dispatches CPU variants at runtime. Without DL the Linux build links
   # a single static GPU backend and a second one (HIP) cannot be stacked.
@@ -97,6 +97,8 @@ if(VCPKG_TARGET_IS_ANDROID OR (VCPKG_TARGET_IS_LINUX AND BUILD_GPU_BACKENDS))
   # GGML_CPU_ALL_VARIANTS instead. Consumers must ship the core ggml/llama libs
   # alongside their backend modules so the dynamically-linked .bare can resolve
   # them at load time.
+  #
+  # Scoped to BUILD_HIP_BACKEND on Linux to reduce build pressure.
   set(DL_BACKENDS ON)
   list(APPEND PLATFORM_OPTIONS
     -DGGML_BACKEND_DL=ON
@@ -182,7 +184,7 @@ endif()
 # boundary is the C ggml-backend ABI, so per-module libc++ copies never exchange
 # C++ objects. Linux only: Apple/iOS use Metal frameworks, Android ships
 # libc++_shared via the NDK STL, Windows uses the MSVC runtime.
-if(VCPKG_TARGET_IS_LINUX)
+if(VCPKG_TARGET_IS_LINUX AND DL_BACKENDS)
   string(APPEND VCPKG_LINKER_FLAGS " -static-libstdc++")
 endif()
 
