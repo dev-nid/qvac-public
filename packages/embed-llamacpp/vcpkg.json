@@ -1,5 +1,5 @@
 {
-  "$schema-comment": "vcpkg requires `name` + a versioning field whenever the manifest uses `version>=` constraints or overlay-ports. Both are present here because the qvac-fabric pin (>=8828.1.0) goes through an overlay (vcpkg/ports/qvac-fabric).",
+  "$schema-comment": "vcpkg requires `name` + a versioning field whenever the manifest uses `version>=` constraints or overlay-ports. Both are present here because the qvac-fabric pin (>=9341.1.6) goes through an overlay (vcpkg/ports/qvac-fabric).",
   "name": "embed-llamacpp",
   "version-string": "0.19.1",
   "dependencies": [

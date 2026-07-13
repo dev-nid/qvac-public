@@ -89,18 +89,18 @@ export class BertInterface implements Addon {
 export function pickPrimaryGgufPath(files: string[]): string
 
 // ---------------------------------------------------------------------------
-// IdMapIndex (turbovec POC)
+// IdMapIndex (turbovec)
 // ---------------------------------------------------------------------------
 
 export interface IdMapIndexOptions {
   /** Vector dimensionality (must be > 0). */
   dim: number
-  /** Reserved for future quantization; POC stores full f32 internally. */
-  bitWidth?: number
+  /** Storage precision: 8 = q8 quantized storage, 32 = full f32 storage. Defaults to 8. */
+  bitWidth?: 8 | 32
 }
 
 export interface IdMapIndexSearchResult {
-  /** Row-major scores: m * k. Higher = closer. */
+  /** Row-major dot-product scores: m * k. Higher = closer. */
   scores: Float32Array
   /** Row-major external ids: m * k. `UINT64_MAX` padding when index is shorter than k. */
   ids: BigUint64Array
@@ -129,10 +129,10 @@ export class IdMapIndex {
   remove(id: bigint): boolean
   contains(id: bigint): boolean
 
-  /** No-op for the POC. */
+  /** Placeholder for cache warming / codebook resolution after bulk add. */
   prepare(): void
 
-  /** Persist to disk (.tvim v1). */
+  /** Persist to disk (.tvim v2; legacy v1 files are still readable). */
   write(path: string): void
 
   readonly length: number

@@ -1,8 +1,8 @@
 {
   "name": "qvac-fabric",
-  "version": "8828.1.0",
+  "version": "9341.1.6",
   "port-version": 9999,
-  "description": "LLM inference in C/C++ (LOCAL OVERLAY built from sibling qvac-fabric-llm.cpp source tree)",
+  "description": "LLM inference in C/C++ (LOCAL OVERLAY with turbovec vector index support)",
   "homepage": "https://github.com/tetherto/qvac-fabric-llm.cpp",
   "license": "MIT",
   "dependencies": [

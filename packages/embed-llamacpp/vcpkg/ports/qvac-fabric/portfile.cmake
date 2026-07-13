@@ -1,18 +1,15 @@
-# LOCAL OVERLAY for qvac-fabric (turbovec POC).
+# LOCAL OVERLAY for qvac-fabric (turbovec).
 #
 # Pinned by default to a commit on
 #   https://github.com/dev-nid/qvac-fabric-llm.cpp.git
-# (branch: poc/turbovec-embed)
-# which adds the new ggml-vector-index module on top of upstream
-# fabric's `v8828.1.1` (which is the highest 8828.x release tag that
-# satisfies embed-llamacpp's `qvac-fabric >= 8828.1.0` manifest pin).
+# (branch: turbovec)
+# which carries the production ggml-vector-index implementation on top
+# of the fabric line consumed by embed-llamacpp.
 #
 # Why an overlay at all: the public `tetherto/qvac-registry-vcpkg` port
-# for qvac-fabric tops out at v7248.2.2 and has no 8828.x line yet, so
-# the manifest's >=8828.1.0 constraint cannot be satisfied by the
-# registry. This overlay closes that gap and is the single source of
-# fabric source for the POC build. Drop it once the registry publishes
-# an 8828.x port.
+# does not yet carry the turbovec/vector-index fabric changes. This
+# overlay is the temporary source of truth until that port is published
+# in the registry.
 #
 # Local-edit iteration (Phase 0 fast loop) — set QVAC_FABRIC_LOCAL_PATH
 # to the path of a fabric working tree. The overlay then copies that
@@ -25,10 +22,10 @@
 # fabric-src-hash: 0000000000000000000000000000000000000000
 
 set(FABRIC_GH_REPO "dev-nid/qvac-fabric-llm.cpp")
-set(FABRIC_GH_REF  "dd934a6d9964a718eaca6630c72dc33fe88a8892")  # poc/turbovec-embed
-set(FABRIC_GH_HEAD_REF "poc/turbovec-embed")
+set(FABRIC_GH_REF  "3a928cf584e0d1b3e98323c422f0d15218bf7b6b")  # turbovec
+set(FABRIC_GH_HEAD_REF "turbovec")
 set(FABRIC_GH_SHA512
-    "ad696aa0382c207ce5ca3840b9ae0b2fd7ce85b458d0a472275e2fee933bb578539244c716f07ed087b718be0de1057139837d0ec57a8ac6b0eeafabe942fae5")
+    "a26df5e54ae0cb12ee272d86465221d312949ae520b250412388f4dea4a049dd1598eecaf37a49a22e9a444ca532ebb6bdd70239ddde0d201b3861fdb2e599ee")
 
 if(DEFINED ENV{QVAC_FABRIC_LOCAL_PATH})
   set(FABRIC_LOCAL_PATH "$ENV{QVAC_FABRIC_LOCAL_PATH}")
@@ -130,6 +127,7 @@ vcpkg_cmake_configure(
     -DLLAMA_BUILD_TOOLS=OFF
     -DLLAMA_BUILD_EXAMPLES=OFF
     -DLLAMA_BUILD_SERVER=OFF
+    -DLLAMA_BUILD_APP=OFF
     -DLLAMA_ALL_WARNINGS=OFF
     ${PLATFORM_OPTIONS}
     ${FEATURE_OPTIONS}

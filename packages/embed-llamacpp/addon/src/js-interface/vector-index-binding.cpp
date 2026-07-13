@@ -94,15 +94,20 @@ bool read_utf8_string(
     return false;
   }
 
-  std::vector<utf8_t> buffer(len + 1);
-  size_t copied = 0;
-  if (js_get_value_string_utf8(
-          env, value, buffer.data(), buffer.size(), &copied) != 0) {
-    js_throw_error(env, "InternalError", read_error);
+  try {
+    std::vector<utf8_t> buffer(len + 1);
+    size_t copied = 0;
+    if (js_get_value_string_utf8(
+            env, value, buffer.data(), buffer.size(), &copied) != 0) {
+      js_throw_error(env, "InternalError", read_error);
+      return false;
+    }
+
+    out->assign(reinterpret_cast<const char*>(buffer.data()), copied);
+  } catch (const std::bad_alloc&) {
+    js_throw_error(env, "OutOfMemory", "allocation failure");
     return false;
   }
-
-  out->assign(reinterpret_cast<const char*>(buffer.data()), copied);
   return true;
 }
 
@@ -168,9 +173,14 @@ js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
     js_throw_error(env, "IOError", "ggml_vec_index_load returned null");
     return nullptr;
   }
-  // Move the wrapper onto the heap so we can hand JS an owning external.
-  auto* heap = new VectorIndex(std::move(loaded));
-  return wrap(env, heap);
+  try {
+    // Move the wrapper onto the heap so we can hand JS an owning external.
+    auto* heap = new VectorIndex(std::move(loaded));
+    return wrap(env, heap);
+  } catch (const std::bad_alloc&) {
+    js_throw_error(env, "OutOfMemory", "allocation failure");
+    return nullptr;
+  }
 }
 
 // idx_add(handle, Float32Array vectors, BigUint64Array ids) -> undefined
@@ -419,7 +429,7 @@ js_value_t* idx_contains(js_env_t* env, js_callback_info_t* info) {
   return result;
 }
 
-// idx_prepare(handle) -> undefined (no-op in POC).
+// idx_prepare(handle) -> undefined (currently a no-op).
 js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
   js_value_t* argv[1] = { nullptr };

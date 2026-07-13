@@ -2,8 +2,8 @@
 
 // IdMapIndex: thin JS wrapper around the IdMapIndex N-API bindings exposed
 // by the embed-llamacpp addon (vector-index-binding.cpp). The native side
-// keeps the index in RAM as full f32 vectors for the POC; quantization,
-// SIMD, and GPU kernels are future work behind the same JS shape.
+// supports full f32 storage (`bitWidth: 32`) and production q8 storage
+// (`bitWidth: 8`) with CPU search against the selected representation.
 //
 // Lifecycle isolation: constructing IdMapIndex does NOT load any BERT
 // model. It only resolves the native binding (loaded once per process)
@@ -15,33 +15,31 @@ const binding = require('./binding')
 
 const HANDLE = Symbol('IdMapIndex.handle')
 
-function ensureHandle (self) {
-  if (self[HANDLE] == null) {
+function ensureHandle(self) {
+  if (self[HANDLE] === null || self[HANDLE] === undefined) {
     throw new Error('IdMapIndex has been disposed')
   }
   return self[HANDLE]
 }
 
 /**
- * In-memory TurboQuant-style ANN vector index. Indexes vectors of fixed
- * dimensionality and stable external uint64 ids; supports top-k cosine /
- * dot-product search.
- *
- * Scope: POC. Internals store full f32 vectors and do scalar dot products;
- * quantization, SIMD, and GPU paths come later behind the same JS API.
+ * In-memory TurboVec-style vector index. Indexes vectors of fixed
+ * dimensionality and stable external uint64 ids; supports top-k dot-product
+ * search. Callers that need cosine similarity should L2-normalize vectors
+ * before both insertion and query.
  */
 class IdMapIndex {
   /**
    * @param {object} opts
    * @param {number} opts.dim - vector dimensionality (must be > 0)
-   * @param {number} [opts.bitWidth=4] - reserved for future quantization
+   * @param {8|32} [opts.bitWidth=8] - 8 = q8 storage, 32 = f32 storage
    */
-  constructor ({ dim, bitWidth = 4 } = {}) {
+  constructor({ dim, bitWidth = 8 } = {}) {
     if (!Number.isInteger(dim) || dim <= 0) {
       throw new TypeError('IdMapIndex: dim must be a positive integer')
     }
-    if (!Number.isInteger(bitWidth) || bitWidth <= 0 || bitWidth > 32) {
-      throw new TypeError('IdMapIndex: bitWidth must be an integer in [1, 32]')
+    if (bitWidth !== 8 && bitWidth !== 32) {
+      throw new TypeError('IdMapIndex: bitWidth must be 8 or 32')
     }
     this[HANDLE] = binding.idx_create({ dim, bitWidth })
   }
@@ -51,13 +49,13 @@ class IdMapIndex {
    * @param {string} path
    * @returns {Promise<IdMapIndex>}
    */
-  static async load (path) {
+  static load(path) {
     if (typeof path !== 'string' || path.length === 0) {
       throw new TypeError('IdMapIndex.load: path must be a non-empty string')
     }
     const instance = Object.create(IdMapIndex.prototype)
     instance[HANDLE] = binding.idx_load(path)
-    return instance
+    return Promise.resolve(instance)
   }
 
   /**
@@ -66,19 +64,19 @@ class IdMapIndex {
    * @param {Float32Array} vectors - length = n * dim
    * @param {BigUint64Array} ids   - length = n
    */
-  addWithIds (vectors, ids) {
+  addWithIds(vectors, ids) {
     if (!(vectors instanceof Float32Array)) {
       throw new TypeError('addWithIds: vectors must be a Float32Array')
     }
     if (!(ids instanceof BigUint64Array)) {
       throw new TypeError('addWithIds: ids must be a BigUint64Array')
     }
-    if (ids.length === 0) return
     if (vectors.length !== ids.length * this.dim) {
       throw new RangeError(
         `addWithIds: vectors.length (${vectors.length}) must equal ids.length (${ids.length}) * dim (${this.dim})`
       )
     }
+    if (ids.length === 0) return
     binding.idx_add(ensureHandle(this), vectors, ids)
   }
 
@@ -90,7 +88,7 @@ class IdMapIndex {
    * @param {number} k
    * @returns {{ scores: Float32Array, ids: BigUint64Array, m: number, k: number }}
    */
-  search (queries, k) {
+  search(queries, k) {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('search: queries must be a Float32Array')
     }
@@ -105,7 +103,7 @@ class IdMapIndex {
    * @param {bigint} id
    * @returns {boolean} true if removed, false if not present
    */
-  remove (id) {
+  remove(id) {
     if (typeof id !== 'bigint') {
       throw new TypeError('remove: id must be a bigint')
     }
@@ -116,32 +114,38 @@ class IdMapIndex {
    * @param {bigint} id
    * @returns {boolean}
    */
-  contains (id) {
+  contains(id) {
     if (typeof id !== 'bigint') {
       throw new TypeError('contains: id must be a bigint')
     }
     return binding.idx_contains(ensureHandle(this), id)
   }
 
-  /** No-op for the POC. Placeholder for future cache warming. */
-  prepare () {
+  /** Placeholder for future cache warming. */
+  prepare() {
     binding.idx_prepare(ensureHandle(this))
   }
 
   /**
-   * Persist the index to disk in the .tvim v1 format.
+   * Persist the index to disk in the checksummed .tvim v2 format.
    * @param {string} path
    */
-  write (path) {
+  write(path) {
     if (typeof path !== 'string' || path.length === 0) {
       throw new TypeError('write: path must be a non-empty string')
     }
     binding.idx_write(ensureHandle(this), path)
   }
 
-  get length () { return binding.idx_len(ensureHandle(this)) }
-  get dim () { return binding.idx_dim(ensureHandle(this)) }
-  get bitWidth () { return binding.idx_bit_width(ensureHandle(this)) }
+  get length() {
+    return binding.idx_len(ensureHandle(this))
+  }
+  get dim() {
+    return binding.idx_dim(ensureHandle(this))
+  }
+  get bitWidth() {
+    return binding.idx_bit_width(ensureHandle(this))
+  }
 
   /**
    * Mark the instance as unusable. The native handle is owned by a
@@ -152,8 +156,9 @@ class IdMapIndex {
    * a safe early-free path (wrapper object + sentinel) without changing
    * the call sites.
    */
-  async dispose () {
+  dispose() {
     this[HANDLE] = null
+    return Promise.resolve()
   }
 }
 
