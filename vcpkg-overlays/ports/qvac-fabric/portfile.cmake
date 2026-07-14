@@ -31,32 +31,11 @@ if(NOT BUILD_GPU_BACKENDS)
   message(STATUS "qvac-fabric: gpu-backends feature OFF — building CPU-only ggml (no Metal/Vulkan/CUDA/OpenCL)")
 endif()
 
-if (VCPKG_TARGET_IS_ANDROID AND BUILD_GPU_BACKENDS)
-  # NDK only comes with C headers.
-  # Make sure C++ header exists, it will be used by ggml tensor library.
-  # Need to determine installed vulkan version and download correct headers
-  include(${CMAKE_CURRENT_LIST_DIR}/android-vulkan-version.cmake)
-  detect_ndk_vulkan_version()
-  message(STATUS "Using Vulkan C++ wrappers from version: ${vulkan_version}")
-  file(DOWNLOAD
-    "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v${vulkan_version}.tar.gz"
-    "${SOURCE_PATH}/vulkan-sdk-${vulkan_version}.tar.gz"
-    TLS_VERIFY ON
-  )
-
-  file(ARCHIVE_EXTRACT
-    INPUT "${SOURCE_PATH}/vulkan-sdk-${vulkan_version}.tar.gz"
-    DESTINATION "${SOURCE_PATH}"
-    PATTERNS "*.hpp"
-  )
-
-  file(RENAME
-    "${SOURCE_PATH}/Vulkan-Headers-${vulkan_version}"
-    "${SOURCE_PATH}/ggml/src/ggml-vulkan/vulkan_cpp_wrapper"
-  )
-endif()
-
 set(PLATFORM_OPTIONS)
+
+if (VCPKG_TARGET_IS_ANDROID AND BUILD_GPU_BACKENDS)
+  list(APPEND PLATFORM_OPTIONS -DFETCHCONTENT_FULLY_DISCONNECTED=OFF)
+endif()
 
 if(NOT BUILD_GPU_BACKENDS)
   # Force every GPU backend off explicitly, in case upstream defaults change.
