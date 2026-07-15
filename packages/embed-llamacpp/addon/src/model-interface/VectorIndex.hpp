@@ -70,6 +70,8 @@ public:
 
   int buildIvf(int nLists, int nIter) noexcept;
 
+  int prepareGpu() noexcept;
+
   // Top-k search. Caller owns out arrays of size n_q * k.
   int search(
       const float* queries,
@@ -101,7 +103,30 @@ public:
       float* outScores,
       uint64_t* outIds) const noexcept;
 
+  int searchGpu(
+      const float* queries,
+      int n_q,
+      int k,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
+  int searchGpuPreparedFiltered(
+      const VectorIndexFilter& filter,
+      const float* queries,
+      int n_q,
+      int k,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
   int searchIvf(
+      const float* queries,
+      int n_q,
+      int k,
+      int nProbe,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
+  int searchGpuIvf(
       const float* queries,
       int n_q,
       int k,

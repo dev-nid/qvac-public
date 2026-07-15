@@ -669,6 +669,64 @@ js_value_t* idx_search(js_env_t* env, js_callback_info_t* info) {
   return finish_search_result(env, output, m, k);
 }
 
+// idx_search_gpu(handle, Float32Array queries, int k)
+//   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
+js_value_t* idx_search_gpu(js_env_t* env, js_callback_info_t* info) {
+  size_t argc = 3;
+  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
+    return nullptr;
+  }
+  if (argc < 3) {
+    js_throw_type_error(env, "InvalidArgument",
+        "expected (handle, queries:Float32Array, k:number)");
+    return nullptr;
+  }
+  VectorIndex* idx = unwrap(env, argv[0]);
+  if (idx == nullptr) { return nullptr; }
+
+  js_typedarray_type_t qtype{};
+  void* qdata = nullptr;
+  size_t qlen = 0;
+  if (js_get_typedarray_info(
+          env, argv[1], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
+      || qtype != js_float32array) {
+    js_throw_type_error(env, "InvalidArgument",
+        "queries must be a Float32Array");
+    return nullptr;
+  }
+
+  int32_t k = 0;
+  if (js_get_value_int32(env, argv[2], &k) != 0 || k <= 0) {
+    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
+    return nullptr;
+  }
+  if (k > 64) {
+    js_throw_range_error(env, "InvalidArgument",
+        "GPU top-k search supports k <= 64");
+    return nullptr;
+  }
+
+  int m = 0;
+  SearchOutput output;
+  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+    return nullptr;
+  }
+
+  const int rc = idx->searchGpu(
+      static_cast<const float*>(qdata),
+      m,
+      k,
+      static_cast<float*>(output.scoresData),
+      static_cast<uint64_t*>(output.idsData));
+  if (rc != 0) {
+    throw_status(env, rc);
+    return nullptr;
+  }
+
+  return finish_search_result(env, output, m, k);
+}
+
 // idx_search_filtered(handle, Float32Array queries, int k, BigUint64Array ids)
 //   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
 js_value_t* idx_search_filtered(js_env_t* env, js_callback_info_t* info) {
@@ -845,6 +903,69 @@ js_value_t* idx_search_prepared_filtered(
   return finish_search_result(env, output, m, k);
 }
 
+// idx_search_gpu_prepared_filtered(handle, filter, Float32Array queries, int k)
+//   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
+js_value_t* idx_search_gpu_prepared_filtered(
+    js_env_t* env,
+    js_callback_info_t* info) {
+  size_t argc = 4;
+  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
+    return nullptr;
+  }
+  if (argc < 4) {
+    js_throw_type_error(env, "InvalidArgument",
+        "expected (handle, filter, queries:Float32Array, k:number)");
+    return nullptr;
+  }
+  VectorIndex* idx = unwrap(env, argv[0]);
+  if (idx == nullptr) { return nullptr; }
+  VectorIndexFilter* filter = unwrap_filter(env, argv[1]);
+  if (filter == nullptr) { return nullptr; }
+
+  js_typedarray_type_t qtype{};
+  void* qdata = nullptr;
+  size_t qlen = 0;
+  if (js_get_typedarray_info(
+          env, argv[2], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
+      || qtype != js_float32array) {
+    js_throw_type_error(env, "InvalidArgument",
+        "queries must be a Float32Array");
+    return nullptr;
+  }
+
+  int32_t k = 0;
+  if (js_get_value_int32(env, argv[3], &k) != 0 || k <= 0) {
+    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
+    return nullptr;
+  }
+  if (k > 64) {
+    js_throw_range_error(env, "InvalidArgument",
+        "GPU top-k search supports k <= 64");
+    return nullptr;
+  }
+
+  int m = 0;
+  SearchOutput output;
+  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+    return nullptr;
+  }
+
+  const int rc = idx->searchGpuPreparedFiltered(
+      *filter,
+      static_cast<const float*>(qdata),
+      m,
+      k,
+      static_cast<float*>(output.scoresData),
+      static_cast<uint64_t*>(output.idsData));
+  if (rc != 0) {
+    throw_status(env, rc);
+    return nullptr;
+  }
+
+  return finish_search_result(env, output, m, k);
+}
+
 // idx_build_ivf(handle, nLists:number, nIter:number) -> undefined
 js_value_t* idx_build_ivf(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
@@ -932,6 +1053,72 @@ js_value_t* idx_search_ivf(js_env_t* env, js_callback_info_t* info) {
   }
 
   const int rc = idx->searchIvf(
+      static_cast<const float*>(qdata),
+      m,
+      k,
+      n_probe,
+      static_cast<float*>(output.scoresData),
+      static_cast<uint64_t*>(output.idsData));
+  if (rc != 0) {
+    throw_status(env, rc);
+    return nullptr;
+  }
+
+  return finish_search_result(env, output, m, k);
+}
+
+// idx_search_gpu_ivf(handle, Float32Array queries, int k, int nProbe)
+//   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
+js_value_t* idx_search_gpu_ivf(js_env_t* env, js_callback_info_t* info) {
+  size_t argc = 4;
+  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
+    return nullptr;
+  }
+  if (argc < 4) {
+    js_throw_type_error(env, "InvalidArgument",
+        "expected (handle, queries:Float32Array, k:number, nProbe:number)");
+    return nullptr;
+  }
+  VectorIndex* idx = unwrap(env, argv[0]);
+  if (idx == nullptr) { return nullptr; }
+
+  js_typedarray_type_t qtype{};
+  void* qdata = nullptr;
+  size_t qlen = 0;
+  if (js_get_typedarray_info(
+          env, argv[1], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
+      || qtype != js_float32array) {
+    js_throw_type_error(env, "InvalidArgument",
+        "queries must be a Float32Array");
+    return nullptr;
+  }
+
+  int32_t k = 0;
+  if (js_get_value_int32(env, argv[2], &k) != 0 || k <= 0) {
+    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
+    return nullptr;
+  }
+  if (k > 64) {
+    js_throw_range_error(env, "InvalidArgument",
+        "GPU top-k search supports k <= 64");
+    return nullptr;
+  }
+
+  int32_t n_probe = 0;
+  if (js_get_value_int32(env, argv[3], &n_probe) != 0 || n_probe <= 0) {
+    js_throw_type_error(env, "InvalidArgument",
+        "nProbe must be a positive int");
+    return nullptr;
+  }
+
+  int m = 0;
+  SearchOutput output;
+  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+    return nullptr;
+  }
+
+  const int rc = idx->searchGpuIvf(
       static_cast<const float*>(qdata),
       m,
       k,
@@ -1081,6 +1268,26 @@ js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
   VectorIndex* idx = unwrap(env, argv[0]);
   if (idx == nullptr) { return nullptr; }
   idx->prepare();
+  js_value_t* u = nullptr;
+  js_get_undefined(env, &u);
+  return u;
+}
+
+// idx_prepare_gpu(handle) -> undefined. Uploads optional GPU search cache.
+js_value_t* idx_prepare_gpu(js_env_t* env, js_callback_info_t* info) {
+  size_t argc = 1;
+  js_value_t* argv[1] = { nullptr };
+  if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
+    return nullptr;
+  }
+  VectorIndex* idx = unwrap(env, argv[0]);
+  if (idx == nullptr) { return nullptr; }
+
+  const int rc = idx->prepareGpu();
+  if (rc != 0) {
+    throw_status(env, rc);
+    return nullptr;
+  }
   js_value_t* u = nullptr;
   js_get_undefined(env, &u);
   return u;
@@ -1246,16 +1453,20 @@ void registerBindings(js_env_t* env, js_value_t* exports) {
   V("idx_add",       idx_add);
   V("idx_add_logged", idx_add_logged);
   V("idx_search",    idx_search);
+  V("idx_search_gpu", idx_search_gpu);
   V("idx_search_filtered", idx_search_filtered);
   V("idx_filter_create", idx_filter_create);
   V("idx_search_prepared_filtered", idx_search_prepared_filtered);
+  V("idx_search_gpu_prepared_filtered", idx_search_gpu_prepared_filtered);
   V("idx_build_ivf", idx_build_ivf);
   V("idx_search_ivf", idx_search_ivf);
+  V("idx_search_gpu_ivf", idx_search_gpu_ivf);
   V("idx_remove",    idx_remove);
   V("idx_remove_logged", idx_remove_logged);
   V("idx_compact",   idx_compact);
   V("idx_contains",  idx_contains);
   V("idx_prepare",   idx_prepare);
+  V("idx_prepare_gpu", idx_prepare_gpu);
   V("idx_write",     idx_write);
   V("idx_compact_delta", idx_compact_delta);
   V("idx_dispose",   idx_dispose);

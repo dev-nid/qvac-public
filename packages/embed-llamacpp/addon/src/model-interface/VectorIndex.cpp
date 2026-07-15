@@ -104,6 +104,10 @@ int VectorIndex::buildIvf(int nLists, int nIter) noexcept {
   return ggml_vec_index_build_ivf(handle_, nLists, nIter);
 }
 
+int VectorIndex::prepareGpu() noexcept {
+  return ggml_vec_index_prepare_gpu(handle_);
+}
+
 int VectorIndex::search(
     const float* queries,
     int n_q,
@@ -145,6 +149,27 @@ int VectorIndex::searchPreparedFiltered(
       handle_, filter.raw(), queries, n_q, k, outScores, outIds);
 }
 
+int VectorIndex::searchGpu(
+    const float* queries,
+    int n_q,
+    int k,
+    float* outScores,
+    uint64_t* outIds) const noexcept {
+  return ggml_vec_index_search_gpu_topk(
+      handle_, queries, n_q, k, outScores, outIds);
+}
+
+int VectorIndex::searchGpuPreparedFiltered(
+    const VectorIndexFilter& filter,
+    const float* queries,
+    int n_q,
+    int k,
+    float* outScores,
+    uint64_t* outIds) const noexcept {
+  return ggml_vec_index_search_gpu_prepared_filtered_topk(
+      handle_, filter.raw(), queries, n_q, k, outScores, outIds);
+}
+
 int VectorIndex::searchIvf(
     const float* queries,
     int n_q,
@@ -153,6 +178,17 @@ int VectorIndex::searchIvf(
     float* outScores,
     uint64_t* outIds) const noexcept {
   return ggml_vec_index_search_ivf(
+      handle_, queries, n_q, k, nProbe, outScores, outIds);
+}
+
+int VectorIndex::searchGpuIvf(
+    const float* queries,
+    int n_q,
+    int k,
+    int nProbe,
+    float* outScores,
+    uint64_t* outIds) const noexcept {
+  return ggml_vec_index_search_gpu_ivf_topk(
       handle_, queries, n_q, k, nProbe, outScores, outIds);
 }
 

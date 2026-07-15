@@ -330,6 +330,67 @@ test('IdMapIndex: IVF build and search lifecycle', (t) => {
   idx.dispose()
 })
 
+test('IdMapIndex: GPU search lifecycle', async (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  let filter = null
+  try {
+    idx.addWithIds(
+      new Float32Array([1, 0, 0, 1, 0.5, 0.5, -1, 0]),
+      new BigUint64Array([11n, 22n, 33n, 44n])
+    )
+
+    expectThrows(
+      t,
+      () => idx.searchGpu(new Float32Array([1, 0]), 1),
+      'GPU search before prepare should throw'
+    )
+    expectThrows(t, () => idx.searchGpu(new Float32Array([1, 0]), 65), 'GPU search rejects k > 64')
+
+    try {
+      idx.prepareGpu()
+    } catch (e) {
+      t.pass(`GPU search unsupported on this build: ${e.message || e.code}`)
+      return
+    }
+
+    const cpu = idx.search(new Float32Array([1, 0]), 2)
+    const gpu = idx.searchGpu(new Float32Array([1, 0]), 2)
+    t.is(gpu.m, 1, 'GPU m')
+    t.is(gpu.k, 2, 'GPU k')
+    t.is(gpu.ids[0], cpu.ids[0], 'GPU best id matches CPU')
+    t.is(gpu.ids[1], cpu.ids[1], 'GPU second id matches CPU')
+
+    filter = idx.prepareFilter(new BigUint64Array([22n, 33n]))
+    const filteredCpu = filter.search(new Float32Array([1, 0]), 2)
+    const filteredGpu = filter.searchGpu(new Float32Array([1, 0]), 2)
+    t.is(filteredGpu.ids[0], filteredCpu.ids[0], 'GPU prepared filter best id matches CPU')
+    t.is(filteredGpu.ids[1], filteredCpu.ids[1], 'GPU prepared filter second id matches CPU')
+
+    idx.buildIvf(4, 1)
+    const ivfCpu = idx.searchIvf(new Float32Array([1, 0]), 2, 4)
+    const ivfGpu = idx.searchIvfGpu(new Float32Array([1, 0]), 2, 4)
+    t.is(ivfGpu.ids[0], ivfCpu.ids[0], 'GPU IVF best id matches CPU IVF')
+
+    idx.addWithIds(new Float32Array([0.25, 0.75]), new BigUint64Array([55n]))
+    expectThrows(
+      t,
+      () => idx.searchGpu(new Float32Array([1, 0]), 1),
+      'GPU search after mutation should throw'
+    )
+
+    idx.buildIvf(4, 1)
+    idx.prepareGpu()
+    t.is(
+      idx.searchGpu(new Float32Array([0, 1]), 1).ids[0],
+      22n,
+      'GPU prepare refreshes after mutation'
+    )
+  } finally {
+    if (filter !== null) await filter.dispose()
+    await idx.dispose()
+  }
+})
+
 test('IdMapIndex: delta log replay and compaction', async (t) => {
   const snapshot = tmpPath('id-map-index-delta-snapshot')
   const delta = tmpDeltaPath('id-map-index-delta-log')

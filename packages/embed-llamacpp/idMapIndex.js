@@ -48,6 +48,22 @@ class IdMapIndexFilter {
     )
   }
 
+  searchGpu(queries, k) {
+    if (!(queries instanceof Float32Array)) {
+      throw new TypeError('IdMapIndexFilter.searchGpu: queries must be a Float32Array')
+    }
+    if (!Number.isInteger(k) || k <= 0 || k > 64) {
+      throw new TypeError('IdMapIndexFilter.searchGpu: k must be an integer between 1 and 64')
+    }
+    const filterHandle = ensureFilterHandle(this)
+    return binding.idx_search_gpu_prepared_filtered(
+      ensureHandle(this[FILTER_OWNER]),
+      filterHandle,
+      queries,
+      k
+    )
+  }
+
   dispose() {
     if (this[FILTER_HANDLE] !== null && this[FILTER_HANDLE] !== undefined) {
       binding.idx_filter_dispose(this[FILTER_HANDLE])
@@ -193,6 +209,23 @@ class IdMapIndex {
   }
 
   /**
+   * Exact Metal/GPU top-k search. `prepareGpu()` must have run after the latest
+   * mutation. Unsupported platforms throw so callers can fall back to `search()`.
+   * @param {Float32Array} queries - length = m * dim
+   * @param {number} k - 1..64
+   * @returns {{ scores: Float32Array, ids: BigUint64Array, m: number, k: number }}
+   */
+  searchGpu(queries, k) {
+    if (!(queries instanceof Float32Array)) {
+      throw new TypeError('searchGpu: queries must be a Float32Array')
+    }
+    if (!Number.isInteger(k) || k <= 0 || k > 64) {
+      throw new TypeError('searchGpu: k must be an integer between 1 and 64')
+    }
+    return binding.idx_search_gpu(ensureHandle(this), queries, k)
+  }
+
+  /**
    * Top-k search restricted to `allowedIds`. Missing ids are ignored; an empty
    * allowlist returns only sentinel padding.
    * @param {Float32Array} queries - length = m * dim
@@ -266,6 +299,27 @@ class IdMapIndex {
   }
 
   /**
+   * IVF-flat ANN Metal/GPU top-k search. `prepareGpu()` and `buildIvf()` must
+   * have run after the latest mutation.
+   * @param {Float32Array} queries - length = m * dim
+   * @param {number} k - 1..64
+   * @param {number} nProbe
+   * @returns {{ scores: Float32Array, ids: BigUint64Array, m: number, k: number }}
+   */
+  searchIvfGpu(queries, k, nProbe) {
+    if (!(queries instanceof Float32Array)) {
+      throw new TypeError('searchIvfGpu: queries must be a Float32Array')
+    }
+    if (!Number.isInteger(k) || k <= 0 || k > 64) {
+      throw new TypeError('searchIvfGpu: k must be an integer between 1 and 64')
+    }
+    if (!Number.isInteger(nProbe) || nProbe <= 0) {
+      throw new TypeError('searchIvfGpu: nProbe must be a positive integer')
+    }
+    return binding.idx_search_gpu_ivf(ensureHandle(this), queries, k, nProbe)
+  }
+
+  /**
    * Remove an entry by external id.
    * @param {bigint} id
    * @returns {boolean} true if removed, false if not present
@@ -312,6 +366,14 @@ class IdMapIndex {
   /** Placeholder for future cache warming. */
   prepare() {
     binding.idx_prepare(ensureHandle(this))
+  }
+
+  /**
+   * Prepare optional Metal/GPU search cache. Mutations invalidate this state.
+   * Unsupported platforms throw so callers can fall back to CPU search.
+   */
+  prepareGpu() {
+    binding.idx_prepare_gpu(ensureHandle(this))
   }
 
   /**

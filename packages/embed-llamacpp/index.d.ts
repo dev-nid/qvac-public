@@ -4,7 +4,11 @@ import type QvacLogger from '@qvac/logging'
 export { QvacResponse }
 
 export interface Addon {
-  loadWeights(data: { filename: string; chunk: Uint8Array | null; completed: boolean }): Promise<void>
+  loadWeights(data: {
+    filename: string
+    chunk: Uint8Array | null
+    completed: boolean
+  }): Promise<void>
   activate(): Promise<void>
   runJob(input: { type: 'text' | 'sequences'; input?: string | string[] }): Promise<boolean>
   cancel(): Promise<void>
@@ -78,7 +82,11 @@ export class BertInterface implements Addon {
     outputCb: (addon: unknown, event: string, data: unknown, error?: Error) => void
   )
 
-  loadWeights(data: { filename: string; chunk: Uint8Array | null; completed: boolean }): Promise<void>
+  loadWeights(data: {
+    filename: string
+    chunk: Uint8Array | null
+    completed: boolean
+  }): Promise<void>
   activate(): Promise<void>
   runJob(input: { type: 'text' | 'sequences'; input?: string | string[] }): Promise<boolean>
   cancel(): Promise<void>
@@ -114,6 +122,9 @@ export class IdMapIndexFilter {
   /** Search with the prepared allowlist. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
 
+  /** Metal/GPU search with the prepared allowlist. `prepareGpu()` must have run on the owner index. */
+  searchGpu(queries: Float32Array, k: number): IdMapIndexSearchResult
+
   dispose(): Promise<void>
 }
 
@@ -127,10 +138,7 @@ export class IdMapIndex {
   static loadMmap(path: string): Promise<IdMapIndex>
 
   /** Open a persisted .tvim snapshot and replay an append-only .tvid delta log. */
-  static loadWithDelta(
-    snapshotPath: string,
-    deltaPath: string
-  ): Promise<IdMapIndex>
+  static loadWithDelta(snapshotPath: string, deltaPath: string): Promise<IdMapIndex>
 
   /**
    * Insert `n` vectors with stable external ids. Throws on duplicate id or
@@ -139,14 +147,13 @@ export class IdMapIndex {
   addWithIds(vectors: Float32Array, ids: BigUint64Array): void
 
   /** Insert vectors and append the mutation to an incremental .tvid delta log. */
-  addLogged(
-    vectors: Float32Array,
-    ids: BigUint64Array,
-    deltaPath: string
-  ): void
+  addLogged(vectors: Float32Array, ids: BigUint64Array, deltaPath: string): void
 
   /** Top-k search across `queries.length / dim` rows. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
+
+  /** Exact Metal/GPU top-k search. `prepareGpu()` must have run after the latest mutation. */
+  searchGpu(queries: Float32Array, k: number): IdMapIndexSearchResult
 
   /** Top-k search restricted to the supplied allowed ids. */
   searchFiltered(
@@ -164,6 +171,9 @@ export class IdMapIndex {
   /** IVF-flat ANN top-k search. `buildIvf()` must have run after the latest mutation. */
   searchIvf(queries: Float32Array, k: number, nProbe: number): IdMapIndexSearchResult
 
+  /** IVF-flat ANN Metal/GPU top-k search. `prepareGpu()` and `buildIvf()` must be current. */
+  searchIvfGpu(queries: Float32Array, k: number, nProbe: number): IdMapIndexSearchResult
+
   /** Returns true if removed, false if not present. */
   remove(id: bigint): boolean
 
@@ -177,6 +187,9 @@ export class IdMapIndex {
 
   /** Placeholder for cache warming / codebook resolution after bulk add. */
   prepare(): void
+
+  /** Prepare optional Metal/GPU search cache. Mutations invalidate this state. */
+  prepareGpu(): void
 
   /** Persist to disk (.tvim v2; legacy v1 files are still readable). */
   write(path: string): void
