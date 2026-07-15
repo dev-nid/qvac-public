@@ -12,6 +12,25 @@
 
 namespace qvac_lib_infer_llamacpp_embed {
 
+class VectorIndexFilter {
+public:
+  explicit VectorIndexFilter(ggml_vec_index_filter_t* handle) noexcept;
+  ~VectorIndexFilter();
+
+  VectorIndexFilter(const VectorIndexFilter&) = delete;
+  VectorIndexFilter& operator=(const VectorIndexFilter&) = delete;
+  VectorIndexFilter(VectorIndexFilter&& other) noexcept;
+  VectorIndexFilter& operator=(VectorIndexFilter&& other) noexcept;
+
+  [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
+  [[nodiscard]] ggml_vec_index_filter_t* raw() const noexcept {
+    return handle_;
+  }
+
+private:
+  ggml_vec_index_filter_t* handle_;
+};
+
 class VectorIndex {
 public:
   // Construct a fresh empty index. Throws std::invalid_argument on bad
@@ -31,12 +50,25 @@ public:
   // Returns 0 on success, ggml_vec_index_error on failure (e.g. duplicate).
   int add(const float* vectors, int n, const uint64_t* ids) noexcept;
 
+  int addLogged(
+      const float* vectors,
+      int n,
+      const uint64_t* ids,
+      const std::string& deltaPath) noexcept;
+
   // Returns 1 / 0 (removed / not present), negative on error.
   int remove(uint64_t id) noexcept;
+
+  int removeLogged(uint64_t id, const std::string& deltaPath) noexcept;
+
+  // Physically removes deleted slots from in-memory storage.
+  int compact() noexcept;
 
   [[nodiscard]] bool contains(uint64_t id) const noexcept;
 
   void prepare() noexcept;
+
+  int buildIvf(int nLists, int nIter) noexcept;
 
   // Top-k search. Caller owns out arrays of size n_q * k.
   int search(
@@ -46,12 +78,54 @@ public:
       float* outScores,
       uint64_t* outIds) const noexcept;
 
+  // Top-k search restricted to the caller-supplied allowlist.
+  int searchFiltered(
+      const float* queries,
+      int n_q,
+      int k,
+      const uint64_t* allowedIds,
+      int nAllowed,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
+  // Creates a reusable filter for repeated allowlist searches.
+  VectorIndexFilter createFilter(
+      const uint64_t* allowedIds,
+      int nAllowed) const noexcept;
+
+  int searchPreparedFiltered(
+      const VectorIndexFilter& filter,
+      const float* queries,
+      int n_q,
+      int k,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
+  int searchIvf(
+      const float* queries,
+      int n_q,
+      int k,
+      int nProbe,
+      float* outScores,
+      uint64_t* outIds) const noexcept;
+
   // Persists to disk. Returns 0 on success.
   int write(const std::string& path) noexcept;
+
+  int compactDelta(
+      const std::string& snapshotPath,
+      const std::string& deltaPath) noexcept;
 
   // Reads from disk. On failure returns a wrapper whose `valid()` is false;
   // callers must check before using the instance.
   static VectorIndex load(const std::string& path) noexcept;
+
+  static VectorIndex loadWithDelta(
+      const std::string& snapshotPath,
+      const std::string& deltaPath) noexcept;
+
+  // Reads from disk with mmap-backed vector storage. Mutations fail.
+  static VectorIndex loadMmap(const std::string& path) noexcept;
 
   // Stats.
   [[nodiscard]] int len() const noexcept;

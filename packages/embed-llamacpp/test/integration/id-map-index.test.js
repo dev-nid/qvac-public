@@ -47,6 +47,10 @@ function tmpPath(name) {
   return path.join(os.tmpdir(), `${name}-${pid}-${Date.now()}-${tmpCounter}.tvim`)
 }
 
+function tmpDeltaPath(name) {
+  return tmpPath(name).replace(/\.tvim$/, '.tvid')
+}
+
 function expectThrows(t, fn, message) {
   try {
     fn()
@@ -75,6 +79,15 @@ function assertTvimV2Header(t, file, bitWidth) {
   t.is(bytes[5], bitWidth, 'tvim bit width')
 }
 
+function assertTvidHeader(t, file) {
+  const bytes = fs.readFileSync(file)
+  t.is(bytes[0], 0x54, 'tvid magic T')
+  t.is(bytes[1], 0x56, 'tvid magic V')
+  t.is(bytes[2], 0x44, 'tvid magic D')
+  t.is(bytes[3], 0x4c, 'tvid magic L')
+  t.is(bytes[4], 1, 'tvid version 1')
+}
+
 async function runRoundTrip(t, bitWidth) {
   const idx = new IdMapIndex({ dim: DIM, bitWidth })
 
@@ -91,7 +104,7 @@ async function runRoundTrip(t, bitWidth) {
   t.ok(idx.contains(ids[3]), `contains a known id (${bitWidth})`)
   t.absent(idx.contains(999n), `absent id missing (${bitWidth})`)
 
-  // Unit vectors remain exact for both f32 and q8 storage.
+  // Unit vectors remain exact for f32, q8, and q4 storage.
   for (let i = 0; i < N; i++) {
     const out = idx.search(unitVec(i), 1)
     t.is(out.m, 1)
@@ -131,6 +144,11 @@ async function runRoundTrip(t, bitWidth) {
       t.absent(out.ids[i] === ids[2], `removed id absent from search result ${i} (${bitWidth})`)
     }
   }
+
+  idx.compact()
+  t.is(idx.length, N - 1, `length preserved after compact (${bitWidth})`)
+  t.absent(idx.contains(ids[2]), `removed id absent after compact (${bitWidth})`)
+  t.is(idx.search(unitVec(0), 1).ids[0], ids[0], `search works after compact (${bitWidth})`)
 
   idx.prepare()
 
@@ -177,6 +195,10 @@ test('IdMapIndex sub-export does not boot the BERT runtime', (t) => {
   t.absent(require.cache[KEY_ADDON], 'BertInterface plumbing (addon.js) NOT loaded by ./idMapIndex')
 })
 
+test('IdMapIndex: q4 add + search + remove + persistence round-trip', async (t) => {
+  await runRoundTrip(t, 4)
+})
+
 test('IdMapIndex: q8 add + search + remove + persistence round-trip', async (t) => {
   await runRoundTrip(t, 8)
 })
@@ -186,7 +208,6 @@ test('IdMapIndex: f32 add + search + remove + persistence round-trip', async (t)
 })
 
 test('IdMapIndex: validates production bit widths', (t) => {
-  expectThrows(t, () => new IdMapIndex({ dim: DIM, bitWidth: 4 }), 'bitWidth 4 should be rejected')
   expectThrows(
     t,
     () => new IdMapIndex({ dim: DIM, bitWidth: 16 }),
@@ -220,6 +241,195 @@ test('IdMapIndex: BigInt id range edge cases', (t) => {
   idx.dispose()
 })
 
+test('IdMapIndex: filtered search restricts allowed ids', (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  idx.addWithIds(new Float32Array([1, 0, 0, 1, 0.5, 0.5]), new BigUint64Array([11n, 22n, 33n]))
+
+  {
+    const out = idx.searchFiltered(new Float32Array([1, 0]), 2, new BigUint64Array([22n, 33n, 44n]))
+    t.is(out.m, 1, 'filtered m')
+    t.is(out.k, 2, 'filtered k')
+    t.is(out.ids[0], 33n, 'best allowed id wins')
+    t.is(out.ids[1], 22n, 'lower-scoring allowed id follows')
+  }
+
+  {
+    const out = idx.searchFiltered(new Float32Array([1, 0]), 2, new BigUint64Array())
+    t.is(out.ids[0], UINT64_MAX, 'empty filter returns sentinel id 0')
+    t.ok(out.scores[0] < -3e38, 'empty filter returns sentinel score 0')
+    t.is(out.ids[1], UINT64_MAX, 'empty filter returns sentinel id 1')
+    t.ok(out.scores[1] < -3e38, 'empty filter returns sentinel score 1')
+  }
+
+  idx.dispose()
+})
+
+test('IdMapIndex: prepared filters are reusable and invalidated by mutation', async (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  let filter = null
+  try {
+    idx.addWithIds(new Float32Array([1, 0, 0, 1, 0.5, 0.5]), new BigUint64Array([11n, 22n, 33n]))
+    filter = idx.prepareFilter(new BigUint64Array([22n, 33n]))
+
+    const first = filter.search(new Float32Array([1, 0]), 2)
+    t.is(first.ids[0], 33n, 'prepared filter best allowed id wins')
+    t.is(first.ids[1], 22n, 'prepared filter lower allowed id follows')
+
+    const second = filter.search(new Float32Array([0, 1]), 1)
+    t.is(second.ids[0], 22n, 'prepared filter can be reused')
+
+    idx.addWithIds(new Float32Array([0.25, 0.75]), new BigUint64Array([44n]))
+    expectThrows(
+      t,
+      () => filter.search(new Float32Array([1, 0]), 1),
+      'stale prepared filter should throw'
+    )
+
+    await filter.dispose()
+    await filter.dispose()
+    expectThrows(
+      t,
+      () => filter.search(new Float32Array([1, 0]), 1),
+      'disposed prepared filter should throw'
+    )
+    filter = null
+  } finally {
+    if (filter !== null) await filter.dispose()
+    await idx.dispose()
+  }
+})
+
+test('IdMapIndex: IVF build and search lifecycle', (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  idx.addWithIds(
+    new Float32Array([1, 0, 0, 1, 0.5, 0.5, -1, 0]),
+    new BigUint64Array([11n, 22n, 33n, 44n])
+  )
+
+  expectThrows(
+    t,
+    () => idx.searchIvf(new Float32Array([1, 0]), 1, 1),
+    'IVF search before build should throw'
+  )
+
+  idx.buildIvf(4, 0)
+  const out = idx.searchIvf(new Float32Array([1, 0]), 2, 4)
+  t.is(out.m, 1, 'IVF m')
+  t.is(out.k, 2, 'IVF k')
+  t.is(out.ids[0], 11n, 'IVF search returns nearest id')
+
+  idx.addWithIds(new Float32Array([0.25, 0.75]), new BigUint64Array([55n]))
+  expectThrows(
+    t,
+    () => idx.searchIvf(new Float32Array([1, 0]), 1, 4),
+    'IVF search after mutation should throw'
+  )
+
+  idx.buildIvf(4, 1)
+  t.is(idx.searchIvf(new Float32Array([0, 1]), 1, 4).ids[0], 22n, 'IVF rebuild restores search')
+  idx.dispose()
+})
+
+test('IdMapIndex: delta log replay and compaction', async (t) => {
+  const snapshot = tmpPath('id-map-index-delta-snapshot')
+  const delta = tmpDeltaPath('id-map-index-delta-log')
+  let idx = null
+  let replayed = null
+  let compacted = null
+  try {
+    idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+    idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
+    idx.write(snapshot)
+
+    idx.addLogged(new Float32Array([0.5, 0.5]), new BigUint64Array([33n]), delta)
+    t.ok(idx.removeLogged(11n, delta), 'logged remove returns true for existing id')
+    t.absent(idx.removeLogged(44n, delta), 'logged remove returns false for absent id')
+    t.is(idx.length, 2, 'logged mutations update live index')
+
+    replayed = await IdMapIndex.loadWithDelta(snapshot, delta)
+    t.is(replayed.dim, 2, 'delta replay dim restored')
+    t.is(replayed.bitWidth, 4, 'delta replay bitWidth restored')
+    t.absent(replayed.contains(11n), 'delta replay applies remove')
+    t.ok(replayed.contains(22n), 'delta replay keeps snapshot id')
+    t.ok(replayed.contains(33n), 'delta replay applies add')
+    t.is(
+      replayed.searchFiltered(new Float32Array([0.5, 0.5]), 1, new BigUint64Array([33n])).ids[0],
+      33n,
+      'delta replay search sees added id'
+    )
+    await replayed.dispose()
+    replayed = null
+
+    idx.compactDelta(snapshot, delta)
+    assertTvimV2Header(t, snapshot, 4)
+    assertTvidHeader(t, delta)
+    await idx.dispose()
+    idx = null
+
+    compacted = await IdMapIndex.loadWithDelta(snapshot, delta)
+    t.absent(compacted.contains(11n), 'compacted snapshot excludes removed id')
+    t.ok(compacted.contains(22n), 'compacted snapshot keeps existing id')
+    t.ok(compacted.contains(33n), 'compacted snapshot includes logged add')
+  } finally {
+    if (idx !== null) await idx.dispose()
+    if (replayed !== null) await replayed.dispose()
+    if (compacted !== null) await compacted.dispose()
+    if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
+    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+  }
+})
+
+test('IdMapIndex: missing delta log replays as empty', async (t) => {
+  const snapshot = tmpPath('id-map-index-missing-delta-snapshot')
+  const delta = tmpDeltaPath('id-map-index-missing-delta-log')
+  let idx = null
+  let loaded = null
+  try {
+    idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+    idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
+    idx.write(snapshot)
+    await idx.dispose()
+    idx = null
+
+    t.absent(fs.existsSync(delta), 'delta log does not exist before load')
+    loaded = await IdMapIndex.loadWithDelta(snapshot, delta)
+    t.is(loaded.dim, 2, 'snapshot dim restored without delta')
+    t.is(loaded.bitWidth, 4, 'snapshot bitWidth restored without delta')
+    t.is(loaded.length, 2, 'snapshot length restored without delta')
+    t.ok(loaded.contains(11n), 'snapshot id 11 restored without delta')
+    t.ok(loaded.contains(22n), 'snapshot id 22 restored without delta')
+  } finally {
+    if (idx !== null) await idx.dispose()
+    if (loaded !== null) await loaded.dispose()
+    if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
+    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+  }
+})
+
+test('IdMapIndex: corrupt delta log replay fails', async (t) => {
+  const snapshot = tmpPath('id-map-index-corrupt-delta-snapshot')
+  const delta = tmpDeltaPath('id-map-index-corrupt-delta-log')
+  let idx = null
+  try {
+    idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+    idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([11n]))
+    idx.write(snapshot)
+    await idx.dispose()
+    idx = null
+
+    fs.writeFileSync(delta, new Uint8Array([0, 1, 2, 3, 4, 5]))
+    await expectRejects(
+      t,
+      () => IdMapIndex.loadWithDelta(snapshot, delta),
+      'corrupt delta log should be rejected'
+    )
+  } finally {
+    if (idx !== null) await idx.dispose()
+    if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
+    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+  }
+})
+
 test('IdMapIndex: rejects non-finite vectors and queries', (t) => {
   const idx = new IdMapIndex({ dim: 2, bitWidth: 8 })
   expectThrows(
@@ -238,6 +448,59 @@ test('IdMapIndex: rejects non-finite vectors and queries', (t) => {
     'non-finite query should be rejected'
   )
   idx.dispose()
+})
+
+test('IdMapIndex: mmap load is searchable and read-only', async (t) => {
+  const file = tmpPath('id-map-index-mmap')
+  let mmap = null
+  let filter = null
+  try {
+    const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+    idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
+    idx.write(file)
+    await idx.dispose()
+
+    mmap = await IdMapIndex.loadMmap(file)
+    t.is(mmap.dim, 2, 'mmap dim restored')
+    t.is(mmap.bitWidth, 4, 'mmap bitWidth restored')
+    t.is(mmap.length, 2, 'mmap length restored')
+    t.ok(mmap.contains(22n), 'mmap contains existing id')
+    t.is(mmap.search(new Float32Array([0, 1]), 1).ids[0], 22n, 'mmap search works')
+    t.is(
+      mmap.searchFiltered(new Float32Array([1, 0]), 1, new BigUint64Array([11n])).ids[0],
+      11n,
+      'mmap filtered search works'
+    )
+    filter = mmap.prepareFilter(new BigUint64Array([11n]))
+    t.is(
+      filter.search(new Float32Array([1, 0]), 1).ids[0],
+      11n,
+      'mmap prepared filter search works'
+    )
+
+    expectThrows(
+      t,
+      () => mmap.addWithIds(new Float32Array([0.5, 0.5]), new BigUint64Array([33n])),
+      'mmap add should be rejected'
+    )
+    expectThrows(t, () => mmap.remove(11n), 'mmap remove should be rejected')
+    expectThrows(t, () => mmap.compact(), 'mmap compact should be rejected')
+  } finally {
+    if (filter !== null) await filter.dispose()
+    if (mmap !== null) await mmap.dispose()
+    if (fs.existsSync(file)) fs.unlinkSync(file)
+  }
+})
+
+test('IdMapIndex: dispose is deterministic and idempotent', async (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([1n]))
+  await idx.dispose()
+  await idx.dispose()
+
+  expectThrows(t, () => idx.contains(1n), 'disposed contains should throw')
+  expectThrows(t, () => idx.search(new Float32Array([1, 0]), 1), 'disposed search should throw')
+  expectThrows(t, () => idx.compact(), 'disposed compact should throw')
 })
 
 test('IdMapIndex: corrupt persistence file load fails', async (t) => {

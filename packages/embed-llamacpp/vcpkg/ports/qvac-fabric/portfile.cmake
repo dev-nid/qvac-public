@@ -22,10 +22,10 @@
 # fabric-src-hash: 0000000000000000000000000000000000000000
 
 set(FABRIC_GH_REPO "dev-nid/qvac-fabric-llm.cpp")
-set(FABRIC_GH_REF  "3a928cf584e0d1b3e98323c422f0d15218bf7b6b")  # turbovec
+set(FABRIC_GH_REF  "8b24b6c72c11ee1aa044068e4f89d150d58e107d")  # turbovec
 set(FABRIC_GH_HEAD_REF "turbovec")
 set(FABRIC_GH_SHA512
-    "a26df5e54ae0cb12ee272d86465221d312949ae520b250412388f4dea4a049dd1598eecaf37a49a22e9a444ca532ebb6bdd70239ddde0d201b3861fdb2e599ee")
+    "d477c54cf609fafee397b59f614a161b26455f90ce39c9344a14a9b3c01fb0539518ceaf994f3839dd2387c85862258dc355e7b0ceeca680814ada22258abac5")
 
 if(DEFINED ENV{QVAC_FABRIC_LOCAL_PATH})
   set(FABRIC_LOCAL_PATH "$ENV{QVAC_FABRIC_LOCAL_PATH}")
@@ -190,6 +190,7 @@ file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug/share")
 # even for static builds, so we keep an (empty) bin/ around. Upstream's
 # tagged release didn't, hence the original removal block. Preserve the
 # dirs so `find_package(llama)` succeeds.
+set(VCPKG_POLICY_ALLOW_EMPTY_FOLDERS enabled)
 file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/bin")
 file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/debug/bin")
 
