@@ -1408,7 +1408,9 @@ void MtmdLlmContext::loadMedia(const std::vector<uint8_t>& media) {
   }
 
   mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_buf(
-                       visionContext(), media.data(), media.size(),
+                       visionContext(),
+                       media.data(),
+                       media.size(),
                        /*placeholder=*/false)
                        .bitmap);
   if (!bmp.ptr) {
@@ -1442,9 +1444,10 @@ void MtmdLlmContext::loadMedia(const std::string& fname) {
         ADDON_ID, toString(UnableToLoadModel), errorMsg);
   }
 
-  mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(visionContext(),
-                                                     fname.c_str(),
-                                                     /*placeholder=*/false)
+  mtmd::bitmap bmp(mtmd_helper_bitmap_init_from_file(
+                       visionContext(),
+                       fname.c_str(),
+                       /*placeholder=*/false)
                        .bitmap);
   if (!bmp.ptr) {
     resetMedia();

@@ -1055,7 +1055,8 @@ void TextLlmContext::onGenerationFinished(
   if (reasoningEnabled_ && reasoningState_.inside_reasoning &&
       reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
     const std::string closeStr = common_token_to_piece(
-        modelCtx_.lctx, reasoningState_.cached_close_tag_token,
+        modelCtx_.lctx,
+        reasoningState_.cached_close_tag_token,
         params_.special);
     reasoningState_.inside_reasoning = false;
     const std::string completeChars = utf8Buffer_.addToken(closeStr);
