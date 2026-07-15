@@ -1050,23 +1050,6 @@ void TextLlmContext::onSequenceEnd(
 
 void TextLlmContext::onGenerationFinished(
     const std::function<void(const std::string&)>& outputCallback) {
-  // Close the reasoning channel at end of generation so n_predict exhaustion
-  // mid-think doesn't hard-fail the recurrent compactor.
-  if (reasoningEnabled_ && reasoningState_.inside_reasoning &&
-      reasoningState_.cached_close_tag_token != LLAMA_TOKEN_NULL) {
-    const std::string closeStr = common_token_to_piece(
-        modelCtx_.lctx,
-        reasoningState_.cached_close_tag_token,
-        params_.special);
-    reasoningState_.inside_reasoning = false;
-    const std::string completeChars = utf8Buffer_.addToken(closeStr);
-    if (!completeChars.empty()) {
-      emitOutputPiece(outputCallback, completeChars);
-    }
-    compactor_.requestCloseCapture();
-    compactor_.recordCloseMarkerForReplay(
-        reasoningState_.cached_close_tag_token);
-  }
   capturePendingThinkClose();
   onSequenceEnd(outputCallback);
   if (generationStarted_) {
