@@ -1,5 +1,9 @@
 # Function to detect Vulkan version from NDK vulkan_core.h
 function(detect_ndk_vulkan_version)
+    if(NOT DEFINED ENV{ANDROID_NDK_HOME} OR "$ENV{ANDROID_NDK_HOME}" STREQUAL "")
+        message(FATAL_ERROR "ANDROID_NDK_HOME must be set for Android Vulkan header detection")
+    endif()
+
     string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" host_system_name_lower)
 
     # CMAKE_HOST_SYSTEM_PROCESSOR is unavailable here. Use a glob pattern to complete the folder instead.
@@ -9,11 +13,11 @@ function(detect_ndk_vulkan_version)
         get_filename_component(host_arch "${host_dir}" NAME)
         set(vulkan_core_h "$ENV{ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/${host_arch}/sysroot/usr/include/vulkan/vulkan_core.h")
     else()
-        message(FATAL "Could not find NDK host directory for ${host_system_name_lower}")
+        message(FATAL_ERROR "Could not find NDK host directory for ${host_system_name_lower}")
     endif()
 
-    if(NOT vulkan_core_h)
-        message(FATAL "vulkan_core.h not found, using default version")
+    if(NOT EXISTS "${vulkan_core_h}")
+        message(FATAL_ERROR "vulkan_core.h not found at ${vulkan_core_h}")
     endif()
 
     file(READ "${vulkan_core_h}" header_content)
@@ -21,7 +25,7 @@ function(detect_ndk_vulkan_version)
     if(version_match)
         set(header_version_3 "${CMAKE_MATCH_1}")
     else()
-        message(FATAL "Could not extract VK_HEADER_VERSION from vulkan_core.h, using default: ${vulkan_version}")
+        message(FATAL_ERROR "Could not extract VK_HEADER_VERSION from ${vulkan_core_h}")
     endif()
 
      # Extract major.minor version from VK_HEADER_VERSION_COMPLETE for download URL
@@ -31,6 +35,18 @@ function(detect_ndk_vulkan_version)
         set(minor "${CMAKE_MATCH_3}")
         set(vulkan_version "${major}.${minor}.${header_version_3}" PARENT_SCOPE)
     else()
-        message(FATAL "Could not extract major.minor version from vulkan_core.h, using default: ${vulkan_version}")
+        message(FATAL_ERROR "Could not extract Vulkan major.minor version from ${vulkan_core_h}")
+    endif()
+endfunction()
+
+function(resolve_vulkan_headers_sha512 version out_var)
+    if(version STREQUAL "1.3.275")
+        set(${out_var}
+            "adebfc61501e67367d366a8b17833d064f925ada6480641ef3c128bbda3852087e02d67a09e90b2c188a47494b7e47a87db0d039465858e765e89dc6c2b370d7"
+            PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR
+            "Unsupported Android NDK Vulkan header version '${version}'. "
+            "Add the matching KhronosGroup/Vulkan-Headers archive SHA512 before building.")
     endif()
 endfunction()

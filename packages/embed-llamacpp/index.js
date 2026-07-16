@@ -223,4 +223,6 @@ module.exports.pickPrimaryGgufPath = pickPrimaryGgufPath
 // addon require chain should import it directly via the package's
 // `./idMapIndex` sub-export — that path goes straight to `./binding` and
 // never touches `./addon`, satisfying the POC's lifecycle-isolation invariant.
-module.exports.IdMapIndex = require('./idMapIndex')
+const IdMapIndex = require('./idMapIndex')
+module.exports.IdMapIndex = IdMapIndex
+module.exports.IdMapIndexFilter = IdMapIndex.IdMapIndexFilter

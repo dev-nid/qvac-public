@@ -215,6 +215,26 @@ test('IdMapIndex: validates production bit widths', (t) => {
   )
 })
 
+test('IdMapIndex: promise APIs reject instead of throwing synchronously', async (t) => {
+  const load = IdMapIndex.load('')
+  t.ok(load && typeof load.catch === 'function', 'load returns a promise for invalid input')
+  await expectRejects(t, () => load, 'load invalid path rejects')
+
+  const loadMmap = IdMapIndex.loadMmap('')
+  t.ok(
+    loadMmap && typeof loadMmap.catch === 'function',
+    'loadMmap returns a promise for invalid input'
+  )
+  await expectRejects(t, () => loadMmap, 'loadMmap invalid path rejects')
+
+  const loadWithDelta = IdMapIndex.loadWithDelta('', '')
+  t.ok(
+    loadWithDelta && typeof loadWithDelta.catch === 'function',
+    'loadWithDelta returns a promise for invalid input'
+  )
+  await expectRejects(t, () => loadWithDelta, 'loadWithDelta invalid paths reject')
+})
+
 test('IdMapIndex: rejects mismatched empty-id add', (t) => {
   const idx = new IdMapIndex({ dim: 2 })
   expectThrows(

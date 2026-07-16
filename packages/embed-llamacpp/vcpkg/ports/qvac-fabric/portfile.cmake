@@ -68,14 +68,15 @@ vcpkg_check_features(
 if (VCPKG_TARGET_IS_ANDROID)
   include(${CMAKE_CURRENT_LIST_DIR}/android-vulkan-version.cmake)
   detect_ndk_vulkan_version()
+  resolve_vulkan_headers_sha512("${vulkan_version}" vulkan_headers_sha512)
   message(STATUS "Using Vulkan C++ wrappers from version: ${vulkan_version}")
-  file(DOWNLOAD
-    "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v${vulkan_version}.tar.gz"
-    "${SOURCE_PATH}/vulkan-sdk-${vulkan_version}.tar.gz"
-    TLS_VERIFY ON
+  vcpkg_download_distfile(VULKAN_HEADERS_ARCHIVE
+    URLS "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v${vulkan_version}.tar.gz"
+    FILENAME "KhronosGroup-Vulkan-Headers-v${vulkan_version}.tar.gz"
+    SHA512 "${vulkan_headers_sha512}"
   )
   file(ARCHIVE_EXTRACT
-    INPUT "${SOURCE_PATH}/vulkan-sdk-${vulkan_version}.tar.gz"
+    INPUT "${VULKAN_HEADERS_ARCHIVE}"
     DESTINATION "${SOURCE_PATH}"
     PATTERNS "*.hpp"
   )

@@ -11,8 +11,6 @@
 // importing the addon does not boot fabric's LLM backend. The same .bare
 // binary carries both class surfaces; the JS side decides which to construct.
 
-#include <bare.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -21,6 +19,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <bare.h>
 
 #include "../addon/VectorIndexErrors.hpp"
 #include "../model-interface/VectorIndex.hpp"
@@ -63,21 +63,21 @@ struct VectorIndexFilterExternal {
   }
 
   VectorIndexFilterExternal(const VectorIndexFilterExternal&) = delete;
-  VectorIndexFilterExternal& operator=(const VectorIndexFilterExternal&) = delete;
+  VectorIndexFilterExternal&
+  operator=(const VectorIndexFilterExternal&) = delete;
 
   VectorIndexFilter* filter;
 };
 
 // Finalizer: invoked by the JS engine when the external handle is GC'd.
 // Tears down the native C handle via VectorIndex's RAII dtor.
-void
-finalize_vector_index(js_env_t* /*env*/, void* data, void* /*hint*/) {
+void finalize_vector_index(js_env_t* /*env*/, void* data, void* /*hint*/) {
   auto* external = static_cast<VectorIndexExternal*>(data);
   delete external;
 }
 
-void
-finalize_vector_index_filter(js_env_t* /*env*/, void* data, void* /*hint*/) {
+void finalize_vector_index_filter(
+    js_env_t* /*env*/, void* data, void* /*hint*/) {
   auto* external = static_cast<VectorIndexFilterExternal*>(data);
   delete external;
 }
@@ -95,8 +95,8 @@ js_value_t* wrap(js_env_t* env, VectorIndex* idx) {
   }
 
   js_value_t* external = nullptr;
-  if (js_create_external(env, holder, finalize_vector_index, nullptr, &external)
-      != 0) {
+  if (js_create_external(
+          env, holder, finalize_vector_index, nullptr, &external) != 0) {
     delete holder;
     js_throw_error(env, "InternalError", "failed to create external");
     return nullptr;
@@ -147,9 +147,8 @@ VectorIndex* unwrap(js_env_t* env, js_value_t* handle) {
   return external->idx;
 }
 
-VectorIndexFilterExternal* unwrap_filter_external(
-    js_env_t* env,
-    js_value_t* handle) {
+VectorIndexFilterExternal*
+unwrap_filter_external(js_env_t* env, js_value_t* handle) {
   void* data = nullptr;
   if (js_get_value_external(env, handle, &data) != 0 || data == nullptr) {
     js_throw_error(env, "InvalidArgument", "expected IdMapIndexFilter handle");
@@ -164,7 +163,8 @@ VectorIndexFilter* unwrap_filter(js_env_t* env, js_value_t* handle) {
     return nullptr;
   }
   if (external->filter == nullptr) {
-    js_throw_error(env, "InvalidArgument", "IdMapIndexFilter has been disposed");
+    js_throw_error(
+        env, "InvalidArgument", "IdMapIndexFilter has been disposed");
     return nullptr;
   }
   return external->filter;
@@ -188,11 +188,8 @@ void throw_status(js_env_t* env, int code) {
 }
 
 bool read_utf8_string(
-    js_env_t* env,
-    js_value_t* value,
-    const char* type_error,
-    const char* read_error,
-    std::string* out) {
+    js_env_t* env, js_value_t* value, const char* type_error,
+    const char* read_error, std::string* out) {
   size_t len = 0;
   if (js_get_value_string_utf8(env, value, nullptr, 0, &len) != 0) {
     js_throw_type_error(env, "InvalidArgument", type_error);
@@ -220,17 +217,116 @@ bool read_utf8_string(
   return true;
 }
 
+bool read_float32_array(
+    js_env_t* env, js_value_t* value, const char* name, const float** outData,
+    size_t* outLen) {
+  js_typedarray_type_t type{};
+  void* data = nullptr;
+  size_t len = 0;
+  if (js_get_typedarray_info(
+          env, value, &type, &data, &len, nullptr, nullptr) != 0 ||
+      type != js_float32array) {
+    const std::string message = std::string(name) + " must be a Float32Array";
+    js_throw_type_error(env, "InvalidArgument", message.c_str());
+    return false;
+  }
+
+  *outData = static_cast<const float*>(data);
+  *outLen = len;
+  return true;
+}
+
+bool read_biguint64_array(
+    js_env_t* env, js_value_t* value, const char* name,
+    const uint64_t** outData, size_t* outLen) {
+  js_typedarray_type_t type{};
+  void* data = nullptr;
+  size_t len = 0;
+  if (js_get_typedarray_info(
+          env, value, &type, &data, &len, nullptr, nullptr) != 0 ||
+      type != js_biguint64array) {
+    const std::string message = std::string(name) + " must be a BigUint64Array";
+    js_throw_type_error(env, "InvalidArgument", message.c_str());
+    return false;
+  }
+
+  *outData = static_cast<const uint64_t*>(data);
+  *outLen = len;
+  return true;
+}
+
+bool read_positive_int32(
+    js_env_t* env, js_value_t* value, const char* name, int32_t* out) {
+  if (js_get_value_int32(env, value, out) != 0 || *out <= 0) {
+    const std::string message = std::string(name) + " must be a positive int";
+    js_throw_type_error(env, "InvalidArgument", message.c_str());
+    return false;
+  }
+  return true;
+}
+
+bool read_nonnegative_int32(
+    js_env_t* env, js_value_t* value, const char* name, int32_t* out) {
+  if (js_get_value_int32(env, value, out) != 0 || *out < 0) {
+    const std::string message =
+        std::string(name) + " must be a non-negative int";
+    js_throw_type_error(env, "InvalidArgument", message.c_str());
+    return false;
+  }
+  return true;
+}
+
+struct VectorBatchInput {
+  const float* vectors = nullptr;
+  const uint64_t* ids = nullptr;
+  int n = 0;
+};
+
+bool read_vector_batch(
+    js_env_t* env, const VectorIndex* idx, js_value_t* vectorsValue,
+    js_value_t* idsValue, VectorBatchInput* out) {
+  const float* vectors = nullptr;
+  size_t vlen = 0;
+  if (!read_float32_array(env, vectorsValue, "vectors", &vectors, &vlen)) {
+    return false;
+  }
+
+  const uint64_t* ids = nullptr;
+  size_t ilen = 0;
+  if (!read_biguint64_array(env, idsValue, "ids", &ids, &ilen)) {
+    return false;
+  }
+
+  const int dim = idx->dim();
+  if (dim <= 0) {
+    js_throw_error(env, "InternalError", "index has invalid dim");
+    return false;
+  }
+  const size_t dim_size = static_cast<size_t>(dim);
+  if (ilen > std::numeric_limits<size_t>::max() / dim_size ||
+      vlen != ilen * dim_size) {
+    js_throw_range_error(
+        env, "InvalidArgument", "vectors.length must equal ids.length * dim");
+    return false;
+  }
+  if (ilen > static_cast<size_t>(INT32_MAX)) {
+    js_throw_range_error(env, "InvalidArgument", "too many vectors in batch");
+    return false;
+  }
+
+  out->vectors = vectors;
+  out->ids = ids;
+  out->n = static_cast<int>(ilen);
+  return true;
+}
+
 bool create_search_output(
-    js_env_t* env,
-    const VectorIndex* idx,
-    size_t qlen,
-    int32_t k,
-    int* outM,
+    js_env_t* env, const VectorIndex* idx, size_t qlen, int32_t k, int* outM,
     SearchOutput* out) {
   const int dim = idx->dim();
   if (dim <= 0 || qlen % static_cast<size_t>(dim) != 0) {
-    js_throw_range_error(env, "InvalidArgument",
-        "queries.length must be a multiple of dim");
+    js_throw_range_error(
+        env, "InvalidArgument", "queries.length must be a multiple of dim");
     return false;
   }
 
@@ -278,14 +374,37 @@ bool create_search_output(
   return true;
 }
 
+struct SearchInput {
+  const float* queries = nullptr;
+  int m = 0;
+  int32_t k = 0;
+  SearchOutput output;
+};
+
+bool read_search_input(
+    js_env_t* env, const VectorIndex* idx, js_value_t* queriesValue,
+    js_value_t* kValue, SearchInput* out) {
+  size_t qlen = 0;
+  if (!read_float32_array(env, queriesValue, "queries", &out->queries, &qlen)) {
+    return false;
+  }
+
+  if (!read_positive_int32(env, kValue, "k", &out->k)) {
+    return false;
+  }
+
+  return create_search_output(env, idx, qlen, out->k, &out->m, &out->output);
+}
+
 js_value_t* finish_search_result(
-    js_env_t* env,
-    const SearchOutput& output,
-    int m,
-    int32_t k) {
+    js_env_t* env, const SearchOutput& output, int m, int32_t k) {
   js_value_t* scores_ta = nullptr;
   if (js_create_typedarray(
-          env, js_float32array, output.total, output.scoresBuffer, 0,
+          env,
+          js_float32array,
+          output.total,
+          output.scoresBuffer,
+          0,
           &scores_ta) != 0) {
     js_throw_error(env, "InternalError", "create scores typedarray");
     return nullptr;
@@ -293,8 +412,8 @@ js_value_t* finish_search_result(
 
   js_value_t* ids_ta = nullptr;
   if (js_create_typedarray(
-          env, js_biguint64array, output.total, output.idsBuffer, 0,
-          &ids_ta) != 0) {
+          env, js_biguint64array, output.total, output.idsBuffer, 0, &ids_ta) !=
+      0) {
     js_throw_error(env, "InternalError", "create ids typedarray");
     return nullptr;
   }
@@ -304,8 +423,8 @@ js_value_t* finish_search_result(
     js_throw_error(env, "InternalError", "create result object");
     return nullptr;
   }
-  if (js_set_named_property(env, result, "scores", scores_ta) != 0
-      || js_set_named_property(env, result, "ids", ids_ta) != 0) {
+  if (js_set_named_property(env, result, "scores", scores_ta) != 0 ||
+      js_set_named_property(env, result, "ids", ids_ta) != 0) {
     js_throw_error(env, "InternalError", "set result fields");
     return nullptr;
   }
@@ -326,7 +445,7 @@ js_value_t* finish_search_result(
 // idx_create({ dim, bitWidth }) -> external handle
 js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -341,7 +460,7 @@ js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   // bitWidth optional; default to 32 if missing.
-  (void) read_int_prop(env, argv[0], "bitWidth", &bit_width);
+  (void)read_int_prop(env, argv[0], "bitWidth", &bit_width);
 
   VectorIndex* idx = nullptr;
   try {
@@ -359,7 +478,7 @@ js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
 // idx_load(path) -> external handle (throws on file errors).
 js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -369,7 +488,8 @@ js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
   }
   std::string path;
   if (!read_utf8_string(
-          env, argv[0],
+          env,
+          argv[0],
           "path must be a string",
           "failed to read path string",
           &path)) {
@@ -394,7 +514,7 @@ js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
 // idx_load_mmap(path) -> external handle (throws on file errors).
 js_value_t* idx_load_mmap(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -404,7 +524,8 @@ js_value_t* idx_load_mmap(js_env_t* env, js_callback_info_t* info) {
   }
   std::string path;
   if (!read_utf8_string(
-          env, argv[0],
+          env,
+          argv[0],
           "path must be a string",
           "failed to read path string",
           &path)) {
@@ -429,19 +550,20 @@ js_value_t* idx_load_mmap(js_env_t* env, js_callback_info_t* info) {
 // idx_load_with_delta(snapshotPath, deltaPath) -> external handle.
 js_value_t* idx_load_with_delta(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 2;
-  js_value_t* argv[2] = { nullptr, nullptr };
+  js_value_t* argv[2] = {nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 2) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (snapshotPath, deltaPath)");
+    js_throw_type_error(
+        env, "InvalidArgument", "expected (snapshotPath, deltaPath)");
     return nullptr;
   }
 
   std::string snapshot_path;
   if (!read_utf8_string(
-          env, argv[0],
+          env,
+          argv[0],
           "snapshotPath must be a string",
           "failed to read snapshot path string",
           &snapshot_path)) {
@@ -449,7 +571,8 @@ js_value_t* idx_load_with_delta(js_env_t* env, js_callback_info_t* info) {
   }
   std::string delta_path;
   if (!read_utf8_string(
-          env, argv[1],
+          env,
+          argv[1],
           "deltaPath must be a string",
           "failed to read delta path string",
           &delta_path)) {
@@ -458,8 +581,8 @@ js_value_t* idx_load_with_delta(js_env_t* env, js_callback_info_t* info) {
 
   VectorIndex loaded = VectorIndex::loadWithDelta(snapshot_path, delta_path);
   if (!loaded.valid()) {
-    js_throw_error(env, "IOError",
-        "ggml_vec_index_load_with_delta returned null");
+    js_throw_error(
+        env, "IOError", "ggml_vec_index_load_with_delta returned null");
     return nullptr;
   }
   try {
@@ -474,61 +597,28 @@ js_value_t* idx_load_with_delta(js_env_t* env, js_callback_info_t* info) {
 // idx_add(handle, Float32Array vectors, BigUint64Array ids) -> undefined
 js_value_t* idx_add(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
-  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  js_value_t* argv[3] = {nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 3) {
-    js_throw_type_error(env, "InvalidArgument",
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "expected (handle, vectors:Float32Array, ids:BigUint64Array)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
-
-  js_typedarray_type_t vtype{};
-  void* vdata = nullptr;
-  size_t vlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &vtype, &vdata, &vlen, nullptr, nullptr) != 0
-      || vtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "vectors must be a Float32Array");
+  if (idx == nullptr) {
     return nullptr;
   }
 
-  js_typedarray_type_t itype{};
-  void* idata = nullptr;
-  size_t ilen = 0;
-  if (js_get_typedarray_info(
-          env, argv[2], &itype, &idata, &ilen, nullptr, nullptr) != 0
-      || itype != js_biguint64array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "ids must be a BigUint64Array");
+  VectorBatchInput batch;
+  if (!read_vector_batch(env, idx, argv[1], argv[2], &batch)) {
     return nullptr;
   }
 
-  const int dim = idx->dim();
-  if (dim <= 0) {
-    js_throw_error(env, "InternalError", "index has invalid dim");
-    return nullptr;
-  }
-  const size_t dim_size = static_cast<size_t>(dim);
-  if (ilen > std::numeric_limits<size_t>::max() / dim_size
-      || vlen != ilen * dim_size) {
-    js_throw_range_error(env, "InvalidArgument",
-        "vectors.length must equal ids.length * dim");
-    return nullptr;
-  }
-  if (ilen > static_cast<size_t>(INT32_MAX)) {
-    js_throw_range_error(env, "InvalidArgument", "too many vectors in batch");
-    return nullptr;
-  }
-
-  const int rc = idx->add(
-      static_cast<const float*>(vdata),
-      static_cast<int>(ilen),
-      static_cast<const uint64_t*>(idata));
+  const int rc = idx->add(batch.vectors, batch.n, batch.ids);
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
@@ -542,71 +632,39 @@ js_value_t* idx_add(js_env_t* env, js_callback_info_t* info) {
 //   -> undefined
 js_value_t* idx_add_logged(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 4;
-  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  js_value_t* argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 4) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, vectors:Float32Array, ids:BigUint64Array, deltaPath)");
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
+        "expected (handle, vectors:Float32Array, ids:BigUint64Array, "
+        "deltaPath)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
-
-  js_typedarray_type_t vtype{};
-  void* vdata = nullptr;
-  size_t vlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &vtype, &vdata, &vlen, nullptr, nullptr) != 0
-      || vtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "vectors must be a Float32Array");
+  if (idx == nullptr) {
     return nullptr;
   }
 
-  js_typedarray_type_t itype{};
-  void* idata = nullptr;
-  size_t ilen = 0;
-  if (js_get_typedarray_info(
-          env, argv[2], &itype, &idata, &ilen, nullptr, nullptr) != 0
-      || itype != js_biguint64array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "ids must be a BigUint64Array");
+  VectorBatchInput batch;
+  if (!read_vector_batch(env, idx, argv[1], argv[2], &batch)) {
     return nullptr;
   }
 
   std::string delta_path;
   if (!read_utf8_string(
-          env, argv[3],
+          env,
+          argv[3],
           "deltaPath must be a string",
           "failed to read delta path",
           &delta_path)) {
     return nullptr;
   }
 
-  const int dim = idx->dim();
-  if (dim <= 0) {
-    js_throw_error(env, "InternalError", "index has invalid dim");
-    return nullptr;
-  }
-  const size_t dim_size = static_cast<size_t>(dim);
-  if (ilen > std::numeric_limits<size_t>::max() / dim_size
-      || vlen != ilen * dim_size) {
-    js_throw_range_error(env, "InvalidArgument",
-        "vectors.length must equal ids.length * dim");
-    return nullptr;
-  }
-  if (ilen > static_cast<size_t>(INT32_MAX)) {
-    js_throw_range_error(env, "InvalidArgument", "too many vectors in batch");
-    return nullptr;
-  }
-
-  const int rc = idx->addLogged(
-      static_cast<const float*>(vdata),
-      static_cast<int>(ilen),
-      static_cast<const uint64_t*>(idata),
-      delta_path);
+  const int rc = idx->addLogged(batch.vectors, batch.n, batch.ids, delta_path);
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
@@ -620,96 +678,70 @@ js_value_t* idx_add_logged(js_env_t* env, js_callback_info_t* info) {
 //   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
 js_value_t* idx_search(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
-  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  js_value_t* argv[3] = {nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 3) {
-    js_throw_type_error(env, "InvalidArgument",
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "expected (handle, queries:Float32Array, k:number)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
-
-  js_typedarray_type_t qtype{};
-  void* qdata = nullptr;
-  size_t qlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
-      || qtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "queries must be a Float32Array");
+  if (idx == nullptr) {
     return nullptr;
   }
 
-  int32_t k = 0;
-  if (js_get_value_int32(env, argv[2], &k) != 0 || k <= 0) {
-    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
-    return nullptr;
-  }
-
-  int m = 0;
-  SearchOutput output;
-  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+  SearchInput input;
+  if (!read_search_input(env, idx, argv[1], argv[2], &input)) {
     return nullptr;
   }
 
   const int rc = idx->search(
-      static_cast<const float*>(qdata),
-      m,
-      k,
-      static_cast<float*>(output.scoresData),
-      static_cast<uint64_t*>(output.idsData));
+      input.queries,
+      input.m,
+      input.k,
+      static_cast<float*>(input.output.scoresData),
+      static_cast<uint64_t*>(input.output.idsData));
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
   }
 
-  return finish_search_result(env, output, m, k);
+  return finish_search_result(env, input.output, input.m, input.k);
 }
 
 // idx_search_filtered(handle, Float32Array queries, int k, BigUint64Array ids)
 //   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
 js_value_t* idx_search_filtered(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 4;
-  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  js_value_t* argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 4) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, queries:Float32Array, k:number, allowedIds:BigUint64Array)");
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
+        "expected (handle, queries:Float32Array, k:number, "
+        "allowedIds:BigUint64Array)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
-
-  js_typedarray_type_t qtype{};
-  void* qdata = nullptr;
-  size_t qlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
-      || qtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "queries must be a Float32Array");
+  if (idx == nullptr) {
     return nullptr;
   }
 
-  int32_t k = 0;
-  if (js_get_value_int32(env, argv[2], &k) != 0 || k <= 0) {
-    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
+  SearchInput input;
+  if (!read_search_input(env, idx, argv[1], argv[2], &input)) {
     return nullptr;
   }
 
-  js_typedarray_type_t atype{};
-  void* adata = nullptr;
+  const uint64_t* allowed_ids = nullptr;
   size_t alen = 0;
-  if (js_get_typedarray_info(
-          env, argv[3], &atype, &adata, &alen, nullptr, nullptr) != 0
-      || atype != js_biguint64array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "allowedIds must be a BigUint64Array");
+  if (!read_biguint64_array(env, argv[3], "allowedIds", &allowed_ids, &alen)) {
     return nullptr;
   }
   if (alen > static_cast<size_t>(INT32_MAX)) {
@@ -717,51 +749,42 @@ js_value_t* idx_search_filtered(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  int m = 0;
-  SearchOutput output;
-  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
-    return nullptr;
-  }
-
   const int rc = idx->searchFiltered(
-      static_cast<const float*>(qdata),
-      m,
-      k,
-      alen == 0 ? nullptr : static_cast<const uint64_t*>(adata),
+      input.queries,
+      input.m,
+      input.k,
+      alen == 0 ? nullptr : allowed_ids,
       static_cast<int>(alen),
-      static_cast<float*>(output.scoresData),
-      static_cast<uint64_t*>(output.idsData));
+      static_cast<float*>(input.output.scoresData),
+      static_cast<uint64_t*>(input.output.idsData));
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
   }
 
-  return finish_search_result(env, output, m, k);
+  return finish_search_result(env, input.output, input.m, input.k);
 }
 
 // idx_filter_create(handle, BigUint64Array allowedIds) -> external filter
 js_value_t* idx_filter_create(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 2;
-  js_value_t* argv[2] = { nullptr, nullptr };
+  js_value_t* argv[2] = {nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 2) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, allowedIds:BigUint64Array)");
+    js_throw_type_error(
+        env, "InvalidArgument", "expected (handle, allowedIds:BigUint64Array)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
-  js_typedarray_type_t atype{};
-  void* adata = nullptr;
+  const uint64_t* allowed_ids = nullptr;
   size_t alen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &atype, &adata, &alen, nullptr, nullptr) != 0
-      || atype != js_biguint64array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "allowedIds must be a BigUint64Array");
+  if (!read_biguint64_array(env, argv[1], "allowedIds", &allowed_ids, &alen)) {
     return nullptr;
   }
   if (alen > static_cast<size_t>(INT32_MAX)) {
@@ -770,11 +793,10 @@ js_value_t* idx_filter_create(js_env_t* env, js_callback_info_t* info) {
   }
 
   VectorIndexFilter filter = idx->createFilter(
-      alen == 0 ? nullptr : static_cast<const uint64_t*>(adata),
-      static_cast<int>(alen));
+      alen == 0 ? nullptr : allowed_ids, static_cast<int>(alen));
   if (!filter.valid()) {
-    js_throw_error(env, "InvalidArgument",
-        "ggml_vec_index_filter_create returned null");
+    js_throw_error(
+        env, "InvalidArgument", "ggml_vec_index_filter_create returned null");
     return nullptr;
   }
 
@@ -789,88 +811,75 @@ js_value_t* idx_filter_create(js_env_t* env, js_callback_info_t* info) {
 
 // idx_search_prepared_filtered(handle, filter, Float32Array queries, int k)
 //   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
-js_value_t* idx_search_prepared_filtered(
-    js_env_t* env,
-    js_callback_info_t* info) {
+js_value_t*
+idx_search_prepared_filtered(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 4;
-  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  js_value_t* argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 4) {
-    js_throw_type_error(env, "InvalidArgument",
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "expected (handle, filter, queries:Float32Array, k:number)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
   VectorIndexFilter* filter = unwrap_filter(env, argv[1]);
-  if (filter == nullptr) { return nullptr; }
-
-  js_typedarray_type_t qtype{};
-  void* qdata = nullptr;
-  size_t qlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[2], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
-      || qtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "queries must be a Float32Array");
+  if (filter == nullptr) {
     return nullptr;
   }
 
-  int32_t k = 0;
-  if (js_get_value_int32(env, argv[3], &k) != 0 || k <= 0) {
-    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
-    return nullptr;
-  }
-
-  int m = 0;
-  SearchOutput output;
-  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+  SearchInput input;
+  if (!read_search_input(env, idx, argv[2], argv[3], &input)) {
     return nullptr;
   }
 
   const int rc = idx->searchPreparedFiltered(
       *filter,
-      static_cast<const float*>(qdata),
-      m,
-      k,
-      static_cast<float*>(output.scoresData),
-      static_cast<uint64_t*>(output.idsData));
+      input.queries,
+      input.m,
+      input.k,
+      static_cast<float*>(input.output.scoresData),
+      static_cast<uint64_t*>(input.output.idsData));
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
   }
 
-  return finish_search_result(env, output, m, k);
+  return finish_search_result(env, input.output, input.m, input.k);
 }
 
 // idx_build_ivf(handle, nLists:number, nIter:number) -> undefined
 js_value_t* idx_build_ivf(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
-  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  js_value_t* argv[3] = {nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 3) {
-    js_throw_type_error(env, "InvalidArgument",
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "expected (handle, nLists:number, nIter:number)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   int32_t n_lists = 0;
-  if (js_get_value_int32(env, argv[1], &n_lists) != 0 || n_lists <= 0) {
-    js_throw_type_error(env, "InvalidArgument",
-        "nLists must be a positive int");
+  if (!read_positive_int32(env, argv[1], "nLists", &n_lists)) {
     return nullptr;
   }
 
   int32_t n_iter = 0;
-  if (js_get_value_int32(env, argv[2], &n_iter) != 0 || n_iter < 0) {
-    js_throw_type_error(env, "InvalidArgument",
-        "nIter must be a non-negative int");
+  if (!read_nonnegative_int32(env, argv[2], "nIter", &n_iter)) {
     return nullptr;
   }
 
@@ -889,83 +898,70 @@ js_value_t* idx_build_ivf(js_env_t* env, js_callback_info_t* info) {
 //   -> { scores: Float32Array(m*k), ids: BigUint64Array(m*k), m, k }
 js_value_t* idx_search_ivf(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 4;
-  js_value_t* argv[4] = { nullptr, nullptr, nullptr, nullptr };
+  js_value_t* argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 4) {
-    js_throw_type_error(env, "InvalidArgument",
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "expected (handle, queries:Float32Array, k:number, nProbe:number)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
-
-  js_typedarray_type_t qtype{};
-  void* qdata = nullptr;
-  size_t qlen = 0;
-  if (js_get_typedarray_info(
-          env, argv[1], &qtype, &qdata, &qlen, nullptr, nullptr) != 0
-      || qtype != js_float32array) {
-    js_throw_type_error(env, "InvalidArgument",
-        "queries must be a Float32Array");
+  if (idx == nullptr) {
     return nullptr;
   }
 
-  int32_t k = 0;
-  if (js_get_value_int32(env, argv[2], &k) != 0 || k <= 0) {
-    js_throw_type_error(env, "InvalidArgument", "k must be a positive int");
+  SearchInput input;
+  if (!read_search_input(env, idx, argv[1], argv[2], &input)) {
     return nullptr;
   }
 
   int32_t n_probe = 0;
-  if (js_get_value_int32(env, argv[3], &n_probe) != 0 || n_probe <= 0) {
-    js_throw_type_error(env, "InvalidArgument",
-        "nProbe must be a positive int");
-    return nullptr;
-  }
-
-  int m = 0;
-  SearchOutput output;
-  if (!create_search_output(env, idx, qlen, k, &m, &output)) {
+  if (!read_positive_int32(env, argv[3], "nProbe", &n_probe)) {
     return nullptr;
   }
 
   const int rc = idx->searchIvf(
-      static_cast<const float*>(qdata),
-      m,
-      k,
+      input.queries,
+      input.m,
+      input.k,
       n_probe,
-      static_cast<float*>(output.scoresData),
-      static_cast<uint64_t*>(output.idsData));
+      static_cast<float*>(input.output.scoresData),
+      static_cast<uint64_t*>(input.output.idsData));
   if (rc != 0) {
     throw_status(env, rc);
     return nullptr;
   }
 
-  return finish_search_result(env, output, m, k);
+  return finish_search_result(env, input.output, input.m, input.k);
 }
 
 // idx_remove(handle, id:bigint) -> boolean
 js_value_t* idx_remove(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 2;
-  js_value_t* argv[2] = { nullptr, nullptr };
+  js_value_t* argv[2] = {nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 2) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, id:bigint)");
+    js_throw_type_error(env, "InvalidArgument", "expected (handle, id:bigint)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   uint64_t id = 0;
   bool lossless = false;
-  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0
-      || !lossless) {
-    js_throw_type_error(env, "InvalidArgument",
+  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0 ||
+      !lossless) {
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "id must be an unsigned BigInt fitting in 64 bits");
     return nullptr;
   }
@@ -983,30 +979,35 @@ js_value_t* idx_remove(js_env_t* env, js_callback_info_t* info) {
 // idx_remove_logged(handle, id:bigint, deltaPath) -> boolean
 js_value_t* idx_remove_logged(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
-  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  js_value_t* argv[3] = {nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 3) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, id:bigint, deltaPath)");
+    js_throw_type_error(
+        env, "InvalidArgument", "expected (handle, id:bigint, deltaPath)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   uint64_t id = 0;
   bool lossless = false;
-  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0
-      || !lossless) {
-    js_throw_type_error(env, "InvalidArgument",
+  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0 ||
+      !lossless) {
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "id must be an unsigned BigInt fitting in 64 bits");
     return nullptr;
   }
 
   std::string delta_path;
   if (!read_utf8_string(
-          env, argv[2],
+          env,
+          argv[2],
           "deltaPath must be a string",
           "failed to read delta path",
           &delta_path)) {
@@ -1026,12 +1027,14 @@ js_value_t* idx_remove_logged(js_env_t* env, js_callback_info_t* info) {
 // idx_compact(handle) -> undefined
 js_value_t* idx_compact(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   const int rc = idx->compact();
   if (rc != 0) {
@@ -1046,23 +1049,26 @@ js_value_t* idx_compact(js_env_t* env, js_callback_info_t* info) {
 // idx_contains(handle, id:bigint) -> boolean
 js_value_t* idx_contains(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 2;
-  js_value_t* argv[2] = { nullptr, nullptr };
+  js_value_t* argv[2] = {nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 2) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, id:bigint)");
+    js_throw_type_error(env, "InvalidArgument", "expected (handle, id:bigint)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   uint64_t id = 0;
   bool lossless = false;
-  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0
-      || !lossless) {
-    js_throw_type_error(env, "InvalidArgument",
+  if (js_get_value_bigint_uint64(env, argv[1], &id, &lossless) != 0 ||
+      !lossless) {
+    js_throw_type_error(
+        env,
+        "InvalidArgument",
         "id must be an unsigned BigInt fitting in 64 bits");
     return nullptr;
   }
@@ -1074,12 +1080,14 @@ js_value_t* idx_contains(js_env_t* env, js_callback_info_t* info) {
 // idx_prepare(handle) -> undefined (currently a no-op).
 js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
   idx->prepare();
   js_value_t* u = nullptr;
   js_get_undefined(env, &u);
@@ -1089,7 +1097,7 @@ js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
 // idx_write(handle, path) -> undefined; throws on IO error.
 js_value_t* idx_write(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 2;
-  js_value_t* argv[2] = { nullptr, nullptr };
+  js_value_t* argv[2] = {nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -1098,11 +1106,14 @@ js_value_t* idx_write(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   std::string path;
   if (!read_utf8_string(
-          env, argv[1],
+          env,
+          argv[1],
           "path must be a string",
           "failed to read path",
           &path)) {
@@ -1122,21 +1133,24 @@ js_value_t* idx_write(js_env_t* env, js_callback_info_t* info) {
 // idx_compact_delta(handle, snapshotPath, deltaPath) -> undefined.
 js_value_t* idx_compact_delta(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 3;
-  js_value_t* argv[3] = { nullptr, nullptr, nullptr };
+  js_value_t* argv[3] = {nullptr, nullptr, nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   if (argc < 3) {
-    js_throw_type_error(env, "InvalidArgument",
-        "expected (handle, snapshotPath, deltaPath)");
+    js_throw_type_error(
+        env, "InvalidArgument", "expected (handle, snapshotPath, deltaPath)");
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
 
   std::string snapshot_path;
   if (!read_utf8_string(
-          env, argv[1],
+          env,
+          argv[1],
           "snapshotPath must be a string",
           "failed to read snapshot path",
           &snapshot_path)) {
@@ -1144,7 +1158,8 @@ js_value_t* idx_compact_delta(js_env_t* env, js_callback_info_t* info) {
   }
   std::string delta_path;
   if (!read_utf8_string(
-          env, argv[2],
+          env,
+          argv[2],
           "deltaPath must be a string",
           "failed to read delta path",
           &delta_path)) {
@@ -1166,7 +1181,7 @@ js_value_t* idx_compact_delta(js_env_t* env, js_callback_info_t* info) {
 // JS external finalizer remains safe and becomes a no-op for the index.
 js_value_t* idx_dispose(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -1175,7 +1190,9 @@ js_value_t* idx_dispose(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   VectorIndexExternal* external = unwrap_external(env, argv[0]);
-  if (external == nullptr) { return nullptr; }
+  if (external == nullptr) {
+    return nullptr;
+  }
 
   delete external->idx;
   external->idx = nullptr;
@@ -1188,7 +1205,7 @@ js_value_t* idx_dispose(js_env_t* env, js_callback_info_t* info) {
 // idx_filter_dispose(filter) -> undefined.
 js_value_t* idx_filter_dispose(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
@@ -1197,7 +1214,9 @@ js_value_t* idx_filter_dispose(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   VectorIndexFilterExternal* external = unwrap_filter_external(env, argv[0]);
-  if (external == nullptr) { return nullptr; }
+  if (external == nullptr) {
+    return nullptr;
+  }
 
   delete external->filter;
   external->filter = nullptr;
@@ -1211,12 +1230,14 @@ js_value_t* idx_filter_dispose(js_env_t* env, js_callback_info_t* info) {
 template <int (VectorIndex::*Fn)() const noexcept>
 js_value_t* idx_int_getter(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
-  js_value_t* argv[1] = { nullptr };
+  js_value_t* argv[1] = {nullptr};
   if (js_get_callback_info(env, info, &argc, argv, nullptr, nullptr) != 0) {
     return nullptr;
   }
   VectorIndex* idx = unwrap(env, argv[0]);
-  if (idx == nullptr) { return nullptr; }
+  if (idx == nullptr) {
+    return nullptr;
+  }
   js_value_t* result = nullptr;
   js_create_int32(env, (idx->*Fn)(), &result);
   return result;
@@ -1239,32 +1260,32 @@ void registerBindings(js_env_t* env, js_value_t* exports) {
     }                                                                          \
   } while (0)
 
-  V("idx_create",    idx_create);
-  V("idx_load",      idx_load);
+  V("idx_create", idx_create);
+  V("idx_load", idx_load);
   V("idx_load_mmap", idx_load_mmap);
   V("idx_load_with_delta", idx_load_with_delta);
-  V("idx_add",       idx_add);
+  V("idx_add", idx_add);
   V("idx_add_logged", idx_add_logged);
-  V("idx_search",    idx_search);
+  V("idx_search", idx_search);
   V("idx_search_filtered", idx_search_filtered);
   V("idx_filter_create", idx_filter_create);
   V("idx_search_prepared_filtered", idx_search_prepared_filtered);
   V("idx_build_ivf", idx_build_ivf);
   V("idx_search_ivf", idx_search_ivf);
-  V("idx_remove",    idx_remove);
+  V("idx_remove", idx_remove);
   V("idx_remove_logged", idx_remove_logged);
-  V("idx_compact",   idx_compact);
-  V("idx_contains",  idx_contains);
-  V("idx_prepare",   idx_prepare);
-  V("idx_write",     idx_write);
+  V("idx_compact", idx_compact);
+  V("idx_contains", idx_contains);
+  V("idx_prepare", idx_prepare);
+  V("idx_write", idx_write);
   V("idx_compact_delta", idx_compact_delta);
-  V("idx_dispose",   idx_dispose);
+  V("idx_dispose", idx_dispose);
   V("idx_filter_dispose", idx_filter_dispose);
-  V("idx_len",       (idx_int_getter<&VectorIndex::len>));
-  V("idx_dim",       (idx_int_getter<&VectorIndex::dim>));
+  V("idx_len", (idx_int_getter<&VectorIndex::len>));
+  V("idx_dim", (idx_int_getter<&VectorIndex::dim>));
   V("idx_bit_width", (idx_int_getter<&VectorIndex::bitWidth>));
 #undef V
-// NOLINTEND(cppcoreguidelines-macro-usage)
+  // NOLINTEND(cppcoreguidelines-macro-usage)
 }
 
 } // namespace qvac_lib_inference_addon_embed::vector_index

@@ -47,6 +47,7 @@
     "addonLogging.d.ts",
     "prebuilds",
     "index.d.ts",
+    "idMapIndex.d.ts",
     "LICENSE",
     "NOTICE"
   ],
@@ -82,7 +83,7 @@
       "default": "./index.js"
     },
     "./idMapIndex": {
-      "types": "./index.d.ts",
+      "types": "./idMapIndex.d.ts",
       "default": "./idMapIndex.js"
     },
     "./addonLogging": {
