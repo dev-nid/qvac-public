@@ -339,6 +339,7 @@ private:
   llama_pos preRequestFirstMsgTokens_ = 0;
   bool pendingBatchFirstMsg_ = false;
   bool generationStarted_ = false;
+  bool generationReachedBudget_ = false;
   std::string assistantOutput_;
   ThreadPoolPtr threadpool_;
   ThreadPoolPtr threadpoolBatch_;
