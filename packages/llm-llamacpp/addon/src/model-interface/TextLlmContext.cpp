@@ -783,6 +783,7 @@ LlmContext::GenerateResponseResult TextLlmContext::generateResponse(
   forcedTokens_.clear();
   assistantOutput_.clear();
   generationStarted_ = false;
+  generationReachedBudget_ = false;
 
   // The chat template force-opened the reasoning channel in the prompt (e.g.
   // Qwen3 / DeepSeek-R1 templates end with "<think>\n"). Emit the matching
@@ -838,6 +839,29 @@ LlmContext::GenerateResponseResult TextLlmContext::generateResponse(
           ADDON_ID, toString(FailedToDecode), errorMsg);
     }
     ++nPast_;
+  }
+
+  if (params_.n_predict > 0 &&
+      generatedAfterAccept >= static_cast<unsigned>(params_.n_predict)) {
+    generationReachedBudget_ = true;
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[TextLlm] generation loop exhausted n_predict budget "
+            "(generatedAfterAccept=%u, nPredict=%d, nPast=%d, "
+            "reasoningEnabled=%s, insideReasoning=%s, hasOpenSpan=%s, "
+            "needsRecurrentSnapshot=%s, assistantOutputBytes=%zu, "
+            "outputHasThinkClose=%s)\n",
+            generatedAfterAccept,
+            params_.n_predict,
+            nPast_,
+            reasoningEnabled_ ? "true" : "false",
+            reasoningState_.inside_reasoning ? "true" : "false",
+            compactor_.hasOpenSpan() ? "true" : "false",
+            compactor_.needsRecurrentSnapshot() ? "true" : "false",
+            assistantOutput_.size(),
+            assistantOutput_.find("</think>") != std::string::npos ? "true"
+                                                                    : "false"));
   }
 
   // Unified post-loop cancel for both hybrid/recurrent and pure-attention.
@@ -1008,6 +1032,29 @@ SequenceStepResult TextLlmContext::onLogitsReady(
   const bool reachedBudget =
       inlineDecodeBatch == nullptr && params_.n_predict > 0 &&
       generatedAfterAccept >= static_cast<unsigned>(params_.n_predict);
+  if (reachedBudget) {
+    generationReachedBudget_ = true;
+    QLOG_IF(
+        Priority::WARNING,
+        string_format(
+            "[TextLlm] generation reached n_predict budget "
+            "(generatedAfterAccept=%u, nPredict=%d, nPast=%d, "
+            "reasoningEnabled=%s, insideReasoning=%s, hasOpenSpan=%s, "
+            "needsRecurrentSnapshot=%s, tokenId=%d, isEos=%s, "
+            "assistantOutputBytes=%zu, outputHasThinkClose=%s)\n",
+            generatedAfterAccept,
+            params_.n_predict,
+            nPast_,
+            reasoningEnabled_ ? "true" : "false",
+            reasoningState_.inside_reasoning ? "true" : "false",
+            compactor_.hasOpenSpan() ? "true" : "false",
+            compactor_.needsRecurrentSnapshot() ? "true" : "false",
+            tokenId,
+            isEos ? "true" : "false",
+            assistantOutput_.size(),
+            assistantOutput_.find("</think>") != std::string::npos ? "true"
+                                                                    : "false"));
+  }
   if (isEos && isHarmonyModel_ && params_.use_jinja &&
       tokenId == harmonyCallToken_) {
     QLOG_IF(
@@ -1037,6 +1084,27 @@ void TextLlmContext::onGenerationFinished(
     const std::function<void(const std::string&)>& outputCallback) {
   capturePendingThinkClose();
   onSequenceEnd(outputCallback);
+  QLOG_IF(
+      Priority::WARNING,
+      string_format(
+          "[TextLlm] onGenerationFinished before compaction "
+          "(reachedBudget=%s, nPredict=%d, nPast=%d, reasoningEnabled=%s, "
+          "insideReasoning=%s, hasOpenSpan=%s, needsRecurrentSnapshot=%s, "
+          "pendingForcedTokens=%zu, assistantOutputBytes=%zu, "
+          "outputHasThinkOpen=%s, outputHasThinkClose=%s)\n",
+          generationReachedBudget_ ? "true" : "false",
+          params_.n_predict,
+          nPast_,
+          reasoningEnabled_ ? "true" : "false",
+          reasoningState_.inside_reasoning ? "true" : "false",
+          compactor_.hasOpenSpan() ? "true" : "false",
+          compactor_.needsRecurrentSnapshot() ? "true" : "false",
+          forcedTokens_.size(),
+          assistantOutput_.size(),
+          assistantOutput_.find("<think>") != std::string::npos ? "true"
+                                                                 : "false",
+          assistantOutput_.find("</think>") != std::string::npos ? "true"
+                                                                  : "false"));
   if (generationStarted_) {
     onGenerationCompletePolicy(assistantOutput_);
     assistantOutput_.clear();
@@ -1091,6 +1159,7 @@ bool TextLlmContext::onCancel(
   compactor_.clearSpan();
   assistantOutput_.clear();
   generationStarted_ = false;
+  generationReachedBudget_ = false;
   return rollbackOk;
 }
 
@@ -1633,6 +1702,7 @@ void TextLlmContext::resetState(bool resetStats) {
   forcedTokens_.clear();
   assistantOutput_.clear();
   generationStarted_ = false;
+  generationReachedBudget_ = false;
   thinkingForcedOpen_ = false;
   thinkingForcedOpenText_.clear();
   compactor_.reset();
