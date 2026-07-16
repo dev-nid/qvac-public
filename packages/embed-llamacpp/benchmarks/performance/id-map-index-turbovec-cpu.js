@@ -84,12 +84,6 @@ function measureSync(fn) {
   return { ms: nowMs() - start, value }
 }
 
-async function measureAsync(fn) {
-  const start = nowMs()
-  const value = await fn()
-  return { ms: nowMs() - start, value }
-}
-
 function median(values) {
   const sorted = values.slice().sort((a, b) => a - b)
   return sorted[Math.floor(sorted.length / 2)]
@@ -182,7 +176,7 @@ function bruteForceSearch(vectors, ids, queries, nVectors, dim, nQueries, k) {
   return { ids: outIds, scores: outScores }
 }
 
-async function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
+function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
   const storage = bitWidth === 32 ? 'f32' : `q${bitWidth}`
   const snapshot = path.join(TMP_DIR, `id-map-index-${storage}.tvim`)
   const delta = path.join(TMP_DIR, `id-map-index-${storage}.tvid`)
@@ -228,9 +222,9 @@ async function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors)
     })
     const sizeBytes = fileSize(snapshot)
 
-    const load = await measureAsync(() => IdMapIndex.load(snapshot))
+    const load = measureSync(() => IdMapIndex.load(snapshot))
     loaded = load.value
-    const mmapLoad = await measureAsync(() => IdMapIndex.loadMmap(snapshot))
+    const mmapLoad = measureSync(() => IdMapIndex.loadMmap(snapshot))
     mmap = mmapLoad.value
     mmap.search(queries.subarray(0, DIM * 8), K)
     const mmapExactMs = measureMedianMs(() => {
@@ -267,10 +261,10 @@ async function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors)
       deltaKb: round(kb(fileSize(delta)), 1)
     }
   } finally {
-    if (filter !== null) await filter.dispose()
-    if (loaded !== null) await loaded.dispose()
-    if (mmap !== null) await mmap.dispose()
-    if (idx !== null) await idx.dispose()
+    if (filter !== null) filter.dispose()
+    if (loaded !== null) loaded.dispose()
+    if (mmap !== null) mmap.dispose()
+    if (idx !== null) idx.dispose()
     cleanupFile(snapshot)
     cleanupFile(delta)
   }
@@ -371,7 +365,7 @@ function toMarkdown(report) {
   return `${lines.join('\n')}\n`
 }
 
-async function main() {
+function main() {
   ensureTmpDir()
   console.log('Generating synthetic vectors...')
   const vectors = createNormalizedVectors(VECTOR_COUNT, DIM, 0x5eed1234)
@@ -389,7 +383,7 @@ async function main() {
   const results = []
   for (const bitWidth of BIT_WIDTHS) {
     console.log(`Benchmarking bitWidth=${bitWidth}...`)
-    results.push(await runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors))
+    results.push(runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors))
   }
 
   const bruteForceQps = qps(QUERY_COUNT, bruteForce.ms)
@@ -416,7 +410,9 @@ async function main() {
   console.log(`Wrote ${REPORT_PATH}`)
 }
 
-main().catch((err) => {
+try {
+  main()
+} catch (err) {
   console.error(err && err.stack ? err.stack : err)
   process.exit(1)
-})
+}

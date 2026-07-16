@@ -31,12 +31,6 @@ function ensureFilterHandle(self) {
   return self[FILTER_HANDLE]
 }
 
-function syncPromise(fn) {
-  return new Promise((resolve) => {
-    resolve(fn())
-  })
-}
-
 class IdMapIndexFilter {
   search(queries, k) {
     if (!(queries instanceof Float32Array)) {
@@ -55,13 +49,11 @@ class IdMapIndexFilter {
   }
 
   dispose() {
-    return syncPromise(() => {
-      if (this[FILTER_HANDLE] !== null && this[FILTER_HANDLE] !== undefined) {
-        binding.idx_filter_dispose(this[FILTER_HANDLE])
-        this[FILTER_HANDLE] = null
-        this[FILTER_OWNER] = null
-      }
-    })
+    if (this[FILTER_HANDLE] !== null && this[FILTER_HANDLE] !== undefined) {
+      binding.idx_filter_dispose(this[FILTER_HANDLE])
+      this[FILTER_HANDLE] = null
+      this[FILTER_OWNER] = null
+    }
   }
 }
 
@@ -89,55 +81,52 @@ class IdMapIndex {
 
   /**
    * Load a persisted index from a .tvim file. Returns a fresh instance.
+   * This is synchronous and may block for large persisted indexes.
    * @param {string} path
-   * @returns {Promise<IdMapIndex>}
+   * @returns {IdMapIndex}
    */
   static load(path) {
-    return syncPromise(() => {
-      if (typeof path !== 'string' || path.length === 0) {
-        throw new TypeError('IdMapIndex.load: path must be a non-empty string')
-      }
-      const instance = Object.create(IdMapIndex.prototype)
-      instance[HANDLE] = binding.idx_load(path)
-      return instance
-    })
+    if (typeof path !== 'string' || path.length === 0) {
+      throw new TypeError('IdMapIndex.load: path must be a non-empty string')
+    }
+    const instance = Object.create(IdMapIndex.prototype)
+    instance[HANDLE] = binding.idx_load(path)
+    return instance
   }
 
   /**
    * Load a persisted .tvim file with mmap-backed vector storage. The returned
    * index is read-only for mutating operations.
+   * This is synchronous and may block for large persisted indexes.
    * @param {string} path
-   * @returns {Promise<IdMapIndex>}
+   * @returns {IdMapIndex}
    */
   static loadMmap(path) {
-    return syncPromise(() => {
-      if (typeof path !== 'string' || path.length === 0) {
-        throw new TypeError('IdMapIndex.loadMmap: path must be a non-empty string')
-      }
-      const instance = Object.create(IdMapIndex.prototype)
-      instance[HANDLE] = binding.idx_load_mmap(path)
-      return instance
-    })
+    if (typeof path !== 'string' || path.length === 0) {
+      throw new TypeError('IdMapIndex.loadMmap: path must be a non-empty string')
+    }
+    const instance = Object.create(IdMapIndex.prototype)
+    instance[HANDLE] = binding.idx_load_mmap(path)
+    return instance
   }
 
   /**
    * Load a full snapshot and replay an append-only delta log.
+   * This is synchronous and may block for large persisted indexes.
    * @param {string} snapshotPath
    * @param {string} deltaPath
-   * @returns {Promise<IdMapIndex>}
+   * @returns {IdMapIndex}
    */
   static loadWithDelta(snapshotPath, deltaPath) {
-    return syncPromise(() => {
-      if (typeof snapshotPath !== 'string' || snapshotPath.length === 0) {
-        throw new TypeError('IdMapIndex.loadWithDelta: snapshotPath must be a non-empty string')
-      }
-      if (typeof deltaPath !== 'string' || deltaPath.length === 0) {
-        throw new TypeError('IdMapIndex.loadWithDelta: deltaPath must be a non-empty string')
-      }
-      const instance = Object.create(IdMapIndex.prototype)
-      instance[HANDLE] = binding.idx_load_with_delta(snapshotPath, deltaPath)
-      return instance
-    })
+    if (typeof snapshotPath !== 'string' || snapshotPath.length === 0) {
+      throw new TypeError('IdMapIndex.loadWithDelta: snapshotPath must be a non-empty string')
+    }
+    if (typeof deltaPath !== 'string' || deltaPath.length === 0) {
+      throw new TypeError('IdMapIndex.loadWithDelta: deltaPath must be a non-empty string')
+    }
+    const instance = Object.create(IdMapIndex.prototype)
+    instance[HANDLE] = binding.idx_load_with_delta(snapshotPath, deltaPath)
+    return instance
   }
 
   /**
@@ -368,12 +357,10 @@ class IdMapIndex {
    * finalizer remains as a safety net if callers forget to dispose.
    */
   dispose() {
-    return syncPromise(() => {
-      if (this[HANDLE] !== null && this[HANDLE] !== undefined) {
-        binding.idx_dispose(this[HANDLE])
-        this[HANDLE] = null
-      }
-    })
+    if (this[HANDLE] !== null && this[HANDLE] !== undefined) {
+      binding.idx_dispose(this[HANDLE])
+      this[HANDLE] = null
+    }
   }
 }
 

@@ -20,7 +20,7 @@ export class IdMapIndexFilter {
   /** Search with the prepared allowlist. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
 
-  dispose(): Promise<void>
+  dispose(): void
 }
 
 export default class IdMapIndex {
@@ -30,17 +30,17 @@ export default class IdMapIndex {
 
   constructor(opts: IdMapIndexOptions)
 
-  /** Open a persisted .tvim file written by `write()`. */
-  static load(path: string): Promise<IdMapIndex>
+  /** Open a persisted .tvim file written by `write()`. Synchronous; may block for large indexes. */
+  static load(path: string): IdMapIndex
 
-  /** Open a persisted .tvim file with mmap-backed vector storage. Mutations fail. */
-  static loadMmap(path: string): Promise<IdMapIndex>
+  /** Open a persisted .tvim file with mmap-backed vector storage. Synchronous; mutations fail. */
+  static loadMmap(path: string): IdMapIndex
 
-  /** Open a persisted .tvim snapshot and replay an append-only .tvid delta log. */
+  /** Open a persisted .tvim snapshot and replay an append-only .tvid delta log. Synchronous; may block for large indexes. */
   static loadWithDelta(
     snapshotPath: string,
     deltaPath: string
-  ): Promise<IdMapIndex>
+  ): IdMapIndex
 
   /**
    * Insert `n` vectors with stable external ids. Throws on duplicate id or
@@ -102,7 +102,7 @@ export default class IdMapIndex {
   readonly dim: number
   readonly bitWidth: 4 | 8 | 32
 
-  dispose(): Promise<void>
+  dispose(): void
 }
 
 export { IdMapIndex }

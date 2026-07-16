@@ -60,15 +60,6 @@ function expectThrows(t, fn, message) {
   }
 }
 
-async function expectRejects(t, fn, message) {
-  try {
-    await fn()
-    t.fail(message)
-  } catch (e) {
-    t.pass(`${message}: ${e.message || e.code}`)
-  }
-}
-
 function assertTvimV2Header(t, file, bitWidth) {
   const bytes = fs.readFileSync(file)
   t.is(bytes[0], 0x54, 'tvim magic T')
@@ -88,7 +79,7 @@ function assertTvidHeader(t, file) {
   t.is(bytes[4], 1, 'tvid version 1')
 }
 
-async function runRoundTrip(t, bitWidth) {
+function runRoundTrip(t, bitWidth) {
   const idx = new IdMapIndex({ dim: DIM, bitWidth })
 
   const vectors = new Float32Array(N * DIM)
@@ -156,9 +147,9 @@ async function runRoundTrip(t, bitWidth) {
   try {
     idx.write(file)
     assertTvimV2Header(t, file, bitWidth)
-    await idx.dispose()
+    idx.dispose()
 
-    const loaded = await IdMapIndex.load(file)
+    const loaded = IdMapIndex.load(file)
     t.is(loaded.dim, DIM, `dim restored (${bitWidth})`)
     t.is(loaded.bitWidth, bitWidth, `bitWidth restored (${bitWidth})`)
     t.is(loaded.length, N - 1, `length restored (${bitWidth})`)
@@ -169,7 +160,7 @@ async function runRoundTrip(t, bitWidth) {
     t.is(out.ids[0], ids[0], `self-match after reload (${bitWidth})`)
     t.ok(Math.abs(out.scores[0] - 1.0) < 1e-5, `score≈1.0 after reload (${bitWidth})`)
 
-    await loaded.dispose()
+    loaded.dispose()
   } finally {
     if (fs.existsSync(file)) fs.unlinkSync(file)
   }
@@ -195,16 +186,16 @@ test('IdMapIndex sub-export does not boot the BERT runtime', (t) => {
   t.absent(require.cache[KEY_ADDON], 'BertInterface plumbing (addon.js) NOT loaded by ./idMapIndex')
 })
 
-test('IdMapIndex: q4 add + search + remove + persistence round-trip', async (t) => {
-  await runRoundTrip(t, 4)
+test('IdMapIndex: q4 add + search + remove + persistence round-trip', (t) => {
+  runRoundTrip(t, 4)
 })
 
-test('IdMapIndex: q8 add + search + remove + persistence round-trip', async (t) => {
-  await runRoundTrip(t, 8)
+test('IdMapIndex: q8 add + search + remove + persistence round-trip', (t) => {
+  runRoundTrip(t, 8)
 })
 
-test('IdMapIndex: f32 add + search + remove + persistence round-trip', async (t) => {
-  await runRoundTrip(t, 32)
+test('IdMapIndex: f32 add + search + remove + persistence round-trip', (t) => {
+  runRoundTrip(t, 32)
 })
 
 test('IdMapIndex: validates production bit widths', (t) => {
@@ -215,24 +206,10 @@ test('IdMapIndex: validates production bit widths', (t) => {
   )
 })
 
-test('IdMapIndex: promise APIs reject instead of throwing synchronously', async (t) => {
-  const load = IdMapIndex.load('')
-  t.ok(load && typeof load.catch === 'function', 'load returns a promise for invalid input')
-  await expectRejects(t, () => load, 'load invalid path rejects')
-
-  const loadMmap = IdMapIndex.loadMmap('')
-  t.ok(
-    loadMmap && typeof loadMmap.catch === 'function',
-    'loadMmap returns a promise for invalid input'
-  )
-  await expectRejects(t, () => loadMmap, 'loadMmap invalid path rejects')
-
-  const loadWithDelta = IdMapIndex.loadWithDelta('', '')
-  t.ok(
-    loadWithDelta && typeof loadWithDelta.catch === 'function',
-    'loadWithDelta returns a promise for invalid input'
-  )
-  await expectRejects(t, () => loadWithDelta, 'loadWithDelta invalid paths reject')
+test('IdMapIndex: load APIs throw synchronously for invalid input', (t) => {
+  expectThrows(t, () => IdMapIndex.load(''), 'load invalid path throws')
+  expectThrows(t, () => IdMapIndex.loadMmap(''), 'loadMmap invalid path throws')
+  expectThrows(t, () => IdMapIndex.loadWithDelta('', ''), 'loadWithDelta invalid paths throw')
 })
 
 test('IdMapIndex: rejects mismatched empty-id add', (t) => {
@@ -289,7 +266,7 @@ test('IdMapIndex: filtered search restricts allowed ids', (t) => {
   idx.dispose()
 })
 
-test('IdMapIndex: prepared filters are reusable and invalidated by mutation', async (t) => {
+test('IdMapIndex: prepared filters are reusable and invalidated by mutation', (t) => {
   const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
   let filter = null
   try {
@@ -310,8 +287,8 @@ test('IdMapIndex: prepared filters are reusable and invalidated by mutation', as
       'stale prepared filter should throw'
     )
 
-    await filter.dispose()
-    await filter.dispose()
+    filter.dispose()
+    filter.dispose()
     expectThrows(
       t,
       () => filter.search(new Float32Array([1, 0]), 1),
@@ -319,8 +296,8 @@ test('IdMapIndex: prepared filters are reusable and invalidated by mutation', as
     )
     filter = null
   } finally {
-    if (filter !== null) await filter.dispose()
-    await idx.dispose()
+    if (filter !== null) filter.dispose()
+    idx.dispose()
   }
 })
 
@@ -355,7 +332,7 @@ test('IdMapIndex: IVF build and search lifecycle', (t) => {
   idx.dispose()
 })
 
-test('IdMapIndex: delta log replay and compaction', async (t) => {
+test('IdMapIndex: delta log replay and compaction', (t) => {
   const snapshot = tmpPath('id-map-index-delta-snapshot')
   const delta = tmpDeltaPath('id-map-index-delta-log')
   let idx = null
@@ -371,7 +348,7 @@ test('IdMapIndex: delta log replay and compaction', async (t) => {
     t.absent(idx.removeLogged(44n, delta), 'logged remove returns false for absent id')
     t.is(idx.length, 2, 'logged mutations update live index')
 
-    replayed = await IdMapIndex.loadWithDelta(snapshot, delta)
+    replayed = IdMapIndex.loadWithDelta(snapshot, delta)
     t.is(replayed.dim, 2, 'delta replay dim restored')
     t.is(replayed.bitWidth, 4, 'delta replay bitWidth restored')
     t.absent(replayed.contains(11n), 'delta replay applies remove')
@@ -382,29 +359,29 @@ test('IdMapIndex: delta log replay and compaction', async (t) => {
       33n,
       'delta replay search sees added id'
     )
-    await replayed.dispose()
+    replayed.dispose()
     replayed = null
 
     idx.compactDelta(snapshot, delta)
     assertTvimV2Header(t, snapshot, 4)
     assertTvidHeader(t, delta)
-    await idx.dispose()
+    idx.dispose()
     idx = null
 
-    compacted = await IdMapIndex.loadWithDelta(snapshot, delta)
+    compacted = IdMapIndex.loadWithDelta(snapshot, delta)
     t.absent(compacted.contains(11n), 'compacted snapshot excludes removed id')
     t.ok(compacted.contains(22n), 'compacted snapshot keeps existing id')
     t.ok(compacted.contains(33n), 'compacted snapshot includes logged add')
   } finally {
-    if (idx !== null) await idx.dispose()
-    if (replayed !== null) await replayed.dispose()
-    if (compacted !== null) await compacted.dispose()
+    if (idx !== null) idx.dispose()
+    if (replayed !== null) replayed.dispose()
+    if (compacted !== null) compacted.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
     if (fs.existsSync(delta)) fs.unlinkSync(delta)
   }
 })
 
-test('IdMapIndex: missing delta log replays as empty', async (t) => {
+test('IdMapIndex: missing delta log replays as empty', (t) => {
   const snapshot = tmpPath('id-map-index-missing-delta-snapshot')
   const delta = tmpDeltaPath('id-map-index-missing-delta-log')
   let idx = null
@@ -413,25 +390,25 @@ test('IdMapIndex: missing delta log replays as empty', async (t) => {
     idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
     idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
     idx.write(snapshot)
-    await idx.dispose()
+    idx.dispose()
     idx = null
 
     t.absent(fs.existsSync(delta), 'delta log does not exist before load')
-    loaded = await IdMapIndex.loadWithDelta(snapshot, delta)
+    loaded = IdMapIndex.loadWithDelta(snapshot, delta)
     t.is(loaded.dim, 2, 'snapshot dim restored without delta')
     t.is(loaded.bitWidth, 4, 'snapshot bitWidth restored without delta')
     t.is(loaded.length, 2, 'snapshot length restored without delta')
     t.ok(loaded.contains(11n), 'snapshot id 11 restored without delta')
     t.ok(loaded.contains(22n), 'snapshot id 22 restored without delta')
   } finally {
-    if (idx !== null) await idx.dispose()
-    if (loaded !== null) await loaded.dispose()
+    if (idx !== null) idx.dispose()
+    if (loaded !== null) loaded.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
     if (fs.existsSync(delta)) fs.unlinkSync(delta)
   }
 })
 
-test('IdMapIndex: corrupt delta log replay fails', async (t) => {
+test('IdMapIndex: corrupt delta log replay fails', (t) => {
   const snapshot = tmpPath('id-map-index-corrupt-delta-snapshot')
   const delta = tmpDeltaPath('id-map-index-corrupt-delta-log')
   let idx = null
@@ -439,17 +416,17 @@ test('IdMapIndex: corrupt delta log replay fails', async (t) => {
     idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
     idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([11n]))
     idx.write(snapshot)
-    await idx.dispose()
+    idx.dispose()
     idx = null
 
     fs.writeFileSync(delta, new Uint8Array([0, 1, 2, 3, 4, 5]))
-    await expectRejects(
+    expectThrows(
       t,
       () => IdMapIndex.loadWithDelta(snapshot, delta),
-      'corrupt delta log should be rejected'
+      'corrupt delta log should throw'
     )
   } finally {
-    if (idx !== null) await idx.dispose()
+    if (idx !== null) idx.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
     if (fs.existsSync(delta)) fs.unlinkSync(delta)
   }
@@ -475,7 +452,7 @@ test('IdMapIndex: rejects non-finite vectors and queries', (t) => {
   idx.dispose()
 })
 
-test('IdMapIndex: mmap load is searchable and read-only', async (t) => {
+test('IdMapIndex: mmap load is searchable and read-only', (t) => {
   const file = tmpPath('id-map-index-mmap')
   let mmap = null
   let filter = null
@@ -483,9 +460,9 @@ test('IdMapIndex: mmap load is searchable and read-only', async (t) => {
     const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
     idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
     idx.write(file)
-    await idx.dispose()
+    idx.dispose()
 
-    mmap = await IdMapIndex.loadMmap(file)
+    mmap = IdMapIndex.loadMmap(file)
     t.is(mmap.dim, 2, 'mmap dim restored')
     t.is(mmap.bitWidth, 4, 'mmap bitWidth restored')
     t.is(mmap.length, 2, 'mmap length restored')
@@ -511,28 +488,28 @@ test('IdMapIndex: mmap load is searchable and read-only', async (t) => {
     expectThrows(t, () => mmap.remove(11n), 'mmap remove should be rejected')
     expectThrows(t, () => mmap.compact(), 'mmap compact should be rejected')
   } finally {
-    if (filter !== null) await filter.dispose()
-    if (mmap !== null) await mmap.dispose()
+    if (filter !== null) filter.dispose()
+    if (mmap !== null) mmap.dispose()
     if (fs.existsSync(file)) fs.unlinkSync(file)
   }
 })
 
-test('IdMapIndex: dispose is deterministic and idempotent', async (t) => {
+test('IdMapIndex: dispose is deterministic and idempotent', (t) => {
   const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
   idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([1n]))
-  await idx.dispose()
-  await idx.dispose()
+  idx.dispose()
+  idx.dispose()
 
   expectThrows(t, () => idx.contains(1n), 'disposed contains should throw')
   expectThrows(t, () => idx.search(new Float32Array([1, 0]), 1), 'disposed search should throw')
   expectThrows(t, () => idx.compact(), 'disposed compact should throw')
 })
 
-test('IdMapIndex: corrupt persistence file load fails', async (t) => {
+test('IdMapIndex: corrupt persistence file load fails', (t) => {
   const file = tmpPath('id-map-index-corrupt')
   try {
     fs.writeFileSync(file, new Uint8Array([0, 1, 2, 3, 4, 5]))
-    await expectRejects(t, () => IdMapIndex.load(file), 'corrupt tvim file should be rejected')
+    expectThrows(t, () => IdMapIndex.load(file), 'corrupt tvim file should throw')
   } finally {
     if (fs.existsSync(file)) fs.unlinkSync(file)
   }
