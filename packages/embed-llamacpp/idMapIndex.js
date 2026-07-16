@@ -16,6 +16,7 @@ const binding = require('./binding')
 const HANDLE = Symbol('IdMapIndex.handle')
 const FILTER_HANDLE = Symbol('IdMapIndexFilter.handle')
 const FILTER_OWNER = Symbol('IdMapIndexFilter.owner')
+const INT32_MAX = 0x7fffffff
 
 function ensureHandle(self) {
   if (self[HANDLE] === null || self[HANDLE] === undefined) {
@@ -31,6 +32,14 @@ function ensureFilterHandle(self) {
   return self[FILTER_HANDLE]
 }
 
+function isPositiveInt32(value) {
+  return Number.isInteger(value) && value > 0 && value <= INT32_MAX
+}
+
+function isNonNegativeInt32(value) {
+  return Number.isInteger(value) && value >= 0 && value <= INT32_MAX
+}
+
 class IdMapIndexFilter {
   constructor() {
     throw new TypeError('IdMapIndexFilter instances must be created by IdMapIndex.prepareFilter()')
@@ -40,8 +49,8 @@ class IdMapIndexFilter {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('IdMapIndexFilter.search: queries must be a Float32Array')
     }
-    if (!Number.isInteger(k) || k <= 0) {
-      throw new TypeError('IdMapIndexFilter.search: k must be a positive integer')
+    if (!isPositiveInt32(k)) {
+      throw new TypeError('IdMapIndexFilter.search: k must be a positive int32')
     }
     const filterHandle = ensureFilterHandle(this)
     return binding.idx_search_prepared_filtered(
@@ -74,8 +83,8 @@ class IdMapIndex {
    * @param {4|8|32} [opts.bitWidth=8] - 4 = q4, 8 = q8, 32 = f32 storage
    */
   constructor({ dim, bitWidth = 8 } = {}) {
-    if (!Number.isInteger(dim) || dim <= 0) {
-      throw new TypeError('IdMapIndex: dim must be a positive integer')
+    if (!isPositiveInt32(dim)) {
+      throw new TypeError('IdMapIndex: dim must be a positive int32')
     }
     if (bitWidth !== 4 && bitWidth !== 8 && bitWidth !== 32) {
       throw new TypeError('IdMapIndex: bitWidth must be 4, 8, or 32')
@@ -192,8 +201,8 @@ class IdMapIndex {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('search: queries must be a Float32Array')
     }
-    if (!Number.isInteger(k) || k <= 0) {
-      throw new TypeError('search: k must be a positive integer')
+    if (!isPositiveInt32(k)) {
+      throw new TypeError('search: k must be a positive int32')
     }
     return binding.idx_search(ensureHandle(this), queries, k)
   }
@@ -210,8 +219,8 @@ class IdMapIndex {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('searchFiltered: queries must be a Float32Array')
     }
-    if (!Number.isInteger(k) || k <= 0) {
-      throw new TypeError('searchFiltered: k must be a positive integer')
+    if (!isPositiveInt32(k)) {
+      throw new TypeError('searchFiltered: k must be a positive int32')
     }
     if (!(allowedIds instanceof BigUint64Array)) {
       throw new TypeError('searchFiltered: allowedIds must be a BigUint64Array')
@@ -241,11 +250,11 @@ class IdMapIndex {
    * @param {number} [nIter=0]
    */
   buildIvf(nLists, nIter = 0) {
-    if (!Number.isInteger(nLists) || nLists <= 0) {
-      throw new TypeError('buildIvf: nLists must be a positive integer')
+    if (!isPositiveInt32(nLists)) {
+      throw new TypeError('buildIvf: nLists must be a positive int32')
     }
-    if (!Number.isInteger(nIter) || nIter < 0) {
-      throw new TypeError('buildIvf: nIter must be a non-negative integer')
+    if (!isNonNegativeInt32(nIter)) {
+      throw new TypeError('buildIvf: nIter must be a non-negative int32')
     }
     binding.idx_build_ivf(ensureHandle(this), nLists, nIter)
   }
@@ -262,11 +271,11 @@ class IdMapIndex {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('searchIvf: queries must be a Float32Array')
     }
-    if (!Number.isInteger(k) || k <= 0) {
-      throw new TypeError('searchIvf: k must be a positive integer')
+    if (!isPositiveInt32(k)) {
+      throw new TypeError('searchIvf: k must be a positive int32')
     }
-    if (!Number.isInteger(nProbe) || nProbe <= 0) {
-      throw new TypeError('searchIvf: nProbe must be a positive integer')
+    if (!isPositiveInt32(nProbe)) {
+      throw new TypeError('searchIvf: nProbe must be a positive int32')
     }
     return binding.idx_search_ivf(ensureHandle(this), queries, k, nProbe)
   }

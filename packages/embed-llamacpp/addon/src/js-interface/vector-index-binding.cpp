@@ -11,6 +11,7 @@
 // importing the addon does not boot fabric's LLM backend. The same .bare
 // binary carries both class surfaces; the JS side decides which to construct.
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -170,16 +171,23 @@ VectorIndexFilter* unwrap_filter(js_env_t* env, js_value_t* handle) {
   return external->filter;
 }
 
-// Read a JS object property and parse as int32. On failure, throws and
-// returns the provided default; caller should check pending exception via
-// js_is_exception_pending or by returning nullptr from the function.
+// Read a JS object property and parse it as int32. Returns false if the
+// property is missing, non-numeric, fractional, or outside int32 range.
 bool read_int_prop(
     js_env_t* env, js_value_t* obj, const char* name, int32_t* out) {
   js_value_t* val = nullptr;
   if (js_get_named_property(env, obj, name, &val) != 0) {
     return false;
   }
-  return js_get_value_int32(env, val, out) == 0;
+  double raw = 0.0;
+  if (js_get_value_double(env, val, &raw) != 0 || !std::isfinite(raw) ||
+      raw != std::trunc(raw) ||
+      raw < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+      raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+    return false;
+  }
+  *out = static_cast<int32_t>(raw);
+  return true;
 }
 
 void throw_status(js_env_t* env, int code) {
@@ -257,22 +265,30 @@ bool read_biguint64_array(
 
 bool read_positive_int32(
     js_env_t* env, js_value_t* value, const char* name, int32_t* out) {
-  if (js_get_value_int32(env, value, out) != 0 || *out <= 0) {
+  double raw = 0.0;
+  if (js_get_value_double(env, value, &raw) != 0 || !std::isfinite(raw) ||
+      raw != std::trunc(raw) || raw <= 0.0 ||
+      raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
     const std::string message = std::string(name) + " must be a positive int";
     js_throw_type_error(env, "InvalidArgument", message.c_str());
     return false;
   }
+  *out = static_cast<int32_t>(raw);
   return true;
 }
 
 bool read_nonnegative_int32(
     js_env_t* env, js_value_t* value, const char* name, int32_t* out) {
-  if (js_get_value_int32(env, value, out) != 0 || *out < 0) {
+  double raw = 0.0;
+  if (js_get_value_double(env, value, &raw) != 0 || !std::isfinite(raw) ||
+      raw != std::trunc(raw) || raw < 0.0 ||
+      raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
     const std::string message =
         std::string(name) + " must be a non-negative int";
     js_throw_type_error(env, "InvalidArgument", message.c_str());
     return false;
   }
+  *out = static_cast<int32_t>(raw);
   return true;
 }
 

@@ -206,6 +206,49 @@ test('IdMapIndex: validates production bit widths', (t) => {
   )
 })
 
+test('IdMapIndex: rejects numeric arguments outside int32 range', (t) => {
+  const tooLarge = 0x80000000
+  expectThrows(t, () => new IdMapIndex({ dim: tooLarge }), 'oversized dim should be rejected')
+
+  const idx = new IdMapIndex({ dim: 2 })
+  let filter = null
+  try {
+    idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([1n]))
+    filter = idx.prepareFilter(new BigUint64Array([1n]))
+
+    expectThrows(
+      t,
+      () => idx.search(new Float32Array([1, 0]), tooLarge),
+      'oversized k should be rejected'
+    )
+    expectThrows(
+      t,
+      () => idx.searchFiltered(new Float32Array([1, 0]), tooLarge, new BigUint64Array([1n])),
+      'oversized filtered k should be rejected'
+    )
+    expectThrows(
+      t,
+      () => filter.search(new Float32Array([1, 0]), tooLarge),
+      'oversized prepared-filter k should be rejected'
+    )
+    expectThrows(t, () => idx.buildIvf(tooLarge, 0), 'oversized nLists should be rejected')
+    expectThrows(t, () => idx.buildIvf(1, tooLarge), 'oversized nIter should be rejected')
+    expectThrows(
+      t,
+      () => idx.searchIvf(new Float32Array([1, 0]), tooLarge, 1),
+      'oversized IVF k should be rejected'
+    )
+    expectThrows(
+      t,
+      () => idx.searchIvf(new Float32Array([1, 0]), 1, tooLarge),
+      'oversized nProbe should be rejected'
+    )
+  } finally {
+    if (filter !== null) filter.dispose()
+    idx.dispose()
+  }
+})
+
 test('IdMapIndex: load APIs throw synchronously for invalid input', (t) => {
   expectThrows(t, () => IdMapIndex.load(''), 'load invalid path throws')
   expectThrows(t, () => IdMapIndex.loadMmap(''), 'loadMmap invalid path throws')
