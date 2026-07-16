@@ -32,6 +32,10 @@ function ensureFilterHandle(self) {
 }
 
 class IdMapIndexFilter {
+  constructor() {
+    throw new TypeError('IdMapIndexFilter instances must be created by IdMapIndex.prepareFilter()')
+  }
+
   search(queries, k) {
     if (!(queries instanceof Float32Array)) {
       throw new TypeError('IdMapIndexFilter.search: queries must be a Float32Array')

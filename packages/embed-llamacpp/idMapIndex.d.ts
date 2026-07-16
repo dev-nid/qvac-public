@@ -17,6 +17,8 @@ export interface IdMapIndexSearchResult {
 }
 
 export class IdMapIndexFilter {
+  private constructor()
+
   /** Search with the prepared allowlist. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
 

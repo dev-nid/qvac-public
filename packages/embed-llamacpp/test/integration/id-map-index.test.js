@@ -270,6 +270,12 @@ test('IdMapIndex: prepared filters are reusable and invalidated by mutation', (t
   const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
   let filter = null
   try {
+    expectThrows(
+      t,
+      () => new IdMapIndex.IdMapIndexFilter(),
+      'direct prepared-filter construction should throw'
+    )
+
     idx.addWithIds(new Float32Array([1, 0, 0, 1, 0.5, 0.5]), new BigUint64Array([11n, 22n, 33n]))
     filter = idx.prepareFilter(new BigUint64Array([22n, 33n]))
 
