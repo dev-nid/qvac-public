@@ -313,6 +313,16 @@ bool read_vector_batch(
     js_throw_range_error(env, "InvalidArgument", "too many vectors in batch");
     return false;
   }
+  const uint64_t padding_id = std::numeric_limits<uint64_t>::max();
+  for (size_t i = 0; i < ilen; i++) {
+    if (ids[i] == padding_id) {
+      js_throw_range_error(
+          env,
+          "InvalidArgument",
+          "UINT64_MAX is reserved for search result padding");
+      return false;
+    }
+  }
 
   out->vectors = vectors;
   out->ids = ids;

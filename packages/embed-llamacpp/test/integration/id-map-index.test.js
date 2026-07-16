@@ -258,6 +258,11 @@ test('IdMapIndex: BigInt id range edge cases', (t) => {
   t.ok(idx.contains(edge), 'high-bit id round-trips')
   const out = idx.search(new Float32Array([0.5, 0.5]), 1)
   t.is(out.ids[0], edge, 'high-bit id surfaces from search')
+  expectThrows(
+    t,
+    () => idx.addWithIds(new Float32Array([1, 0]), new BigUint64Array([UINT64_MAX])),
+    'UINT64_MAX id should be rejected because it is reserved for padding'
+  )
   idx.dispose()
 })
 

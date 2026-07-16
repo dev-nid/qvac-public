@@ -44,11 +44,15 @@ export default class IdMapIndex {
 
   /**
    * Insert `n` vectors with stable external ids. Throws on duplicate id or
-   * dim mismatch; mutation is atomic per call.
+   * dim mismatch; mutation is atomic per call. `UINT64_MAX` is reserved for
+   * search result padding and cannot be inserted.
    */
   addWithIds(vectors: Float32Array, ids: BigUint64Array): void
 
-  /** Insert vectors and append the mutation to an incremental .tvid delta log. */
+  /**
+   * Insert vectors and append the mutation to an incremental .tvid delta log.
+   * `UINT64_MAX` is reserved for search result padding and cannot be inserted.
+   */
   addLogged(
     vectors: Float32Array,
     ids: BigUint64Array,
