@@ -358,12 +358,6 @@ private:
   // compaction stay family-agnostic via `reasoningEnabled_`.
   bool isQwen3ReasoningFamily_ = false;
 
-  // EOS-inside-reasoning recovery: the recovery substitutes `</think>\n\n` so
-  // the model produces an answer after thinking, but on marginal prompts
-  // the very next sampled token is EOG again, which would defeat the
-  // recovery with an empty answer.
-  bool banEogAfterReasoningRecovery_ = false;
-
   // GPT-OSS Harmony: <|call|> is a frame delimiter, not a stop signal
   bool isHarmonyModel_ = false;
   llama_token harmonyCallToken_ = LLAMA_TOKEN_NULL;
