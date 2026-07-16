@@ -480,12 +480,12 @@ js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   int32_t dim = 0;
-  int32_t bit_width = 32;
+  int32_t bit_width = 8;
   if (!read_int_prop(env, argv[0], "dim", &dim)) {
     js_throw_type_error(env, "InvalidArgument", "missing or invalid `dim`");
     return nullptr;
   }
-  // bitWidth optional; default to 32 if missing.
+  // bitWidth optional; keep the native fallback aligned with the JS wrapper.
   (void)read_int_prop(env, argv[0], "bitWidth", &bit_width);
 
   VectorIndex* idx = nullptr;

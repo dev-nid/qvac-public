@@ -86,6 +86,7 @@
       "types": "./idMapIndex.d.ts",
       "default": "./idMapIndex.js"
     },
+    "./idMapIndex.js": "./idMapIndex.js",
     "./addonLogging": {
       "types": "./addonLogging.d.ts",
       "default": "./addonLogging.js"
