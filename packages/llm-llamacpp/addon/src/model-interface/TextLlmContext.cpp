@@ -1098,9 +1098,9 @@ bool TextLlmContext::onCancel(
 
 bool TextLlmContext::shouldRollbackPredictionLimitReasoningCutoff() const {
   return generationStopReason_ == GenerationStopReason::PredictionLimit &&
-      needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-      reasoningEnabled_ && reasoningState_.inside_reasoning &&
-      compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
+         needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
+         reasoningEnabled_ && reasoningState_.inside_reasoning &&
+         compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
 }
 
 bool TextLlmContext::rollbackCurrentRequest(

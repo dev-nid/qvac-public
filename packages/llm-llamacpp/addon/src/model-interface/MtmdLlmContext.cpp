@@ -1002,8 +1002,7 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
     if (isEos || stoppedByAntiprompt) {
       flushPendingUtf8ToCallback(outputCallback);
       generationStopReason_ =
-          isEos ? GenerationStopReason::Eos
-                : GenerationStopReason::Antiprompt;
+          isEos ? GenerationStopReason::Eos : GenerationStopReason::Antiprompt;
       break;
     }
 
@@ -1924,9 +1923,9 @@ bool MtmdLlmContext::onGenerationFinished(
 
 bool MtmdLlmContext::shouldRollbackPredictionLimitReasoningCutoff() const {
   return generationStopReason_ == GenerationStopReason::PredictionLimit &&
-      needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-      reasoningEnabled_ && reasoningState_.inside_reasoning &&
-      compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
+         needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
+         reasoningEnabled_ && reasoningState_.inside_reasoning &&
+         compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
 }
 
 bool MtmdLlmContext::onCancel(
