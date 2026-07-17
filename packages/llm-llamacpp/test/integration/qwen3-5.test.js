@@ -353,7 +353,7 @@ test(
         await addon.load()
         const response = await addon.run([
           { role: 'system', content: 'You are a helpful assistant.' },
-          { role: 'user', content: 'What is the capital of France? Answer in one word.' }
+          { role: 'user', content: 'What is the capital of France?' }
         ])
         return await collectResponse(response)
       } finally {
