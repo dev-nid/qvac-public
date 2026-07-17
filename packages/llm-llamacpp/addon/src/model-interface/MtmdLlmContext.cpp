@@ -1040,7 +1040,8 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
       params_.n_predict > 0 && nRemain == 0) {
     generationStopReason_ = GenerationStopReason::PredictionLimit;
   }
-  const bool rollbackOk = onGenerationFinished(outputCallback);
+  const bool rollbackOk =
+      onGenerationFinished(outputCallback, generationStopReason_);
   return {.rollbackOk = rollbackOk};
 }
 
@@ -1909,10 +1910,14 @@ void MtmdLlmContext::onSequenceEnd(
 }
 
 bool MtmdLlmContext::onGenerationFinished(
-    const std::function<void(const std::string&)>& outputCallback) {
+    const std::function<void(const std::string&)>& outputCallback,
+    GenerationStopReason terminalReason) {
+  if (terminalReason != GenerationStopReason::None) {
+    generationStopReason_ = terminalReason;
+  }
   capturePendingThinkClose();
   onSequenceEnd(outputCallback);
-  if (shouldRollbackPredictionLimitReasoningCutoff()) {
+  if (shouldRollbackKnownReasoningCutoff()) {
     return cancelGenerationCleanup(outputCallback);
   }
   compactThinkSpan();
@@ -1921,11 +1926,14 @@ bool MtmdLlmContext::onGenerationFinished(
   return true;
 }
 
-bool MtmdLlmContext::shouldRollbackPredictionLimitReasoningCutoff() const {
-  return generationStopReason_ == GenerationStopReason::PredictionLimit &&
-         needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-         reasoningEnabled_ && reasoningState_.inside_reasoning &&
-         compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
+bool MtmdLlmContext::shouldRollbackKnownReasoningCutoff() const {
+  const bool knownTruncation =
+      generationStopReason_ == GenerationStopReason::PredictionLimit ||
+      generationStopReason_ == GenerationStopReason::SequenceLimit;
+  return knownTruncation && needsRecurrentSnapshot_ &&
+         removeThinkingFromContext_ && reasoningEnabled_ &&
+         reasoningState_.inside_reasoning && compactor_.hasOpenSpan() &&
+         !compactor_.hasCapturedCloseSpan();
 }
 
 bool MtmdLlmContext::onCancel(

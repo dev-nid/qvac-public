@@ -855,7 +855,8 @@ LlmContext::GenerateResponseResult TextLlmContext::generateResponse(
       generatedAfterAccept >= static_cast<unsigned>(params_.n_predict)) {
     generationStopReason_ = GenerationStopReason::PredictionLimit;
   }
-  const bool rollbackOk = onGenerationFinished(outputCallback);
+  const bool rollbackOk =
+      onGenerationFinished(outputCallback, generationStopReason_);
   return {.rollbackOk = rollbackOk};
 }
 
@@ -1068,10 +1069,14 @@ void TextLlmContext::onSequenceEnd(
 }
 
 bool TextLlmContext::onGenerationFinished(
-    const std::function<void(const std::string&)>& outputCallback) {
+    const std::function<void(const std::string&)>& outputCallback,
+    GenerationStopReason terminalReason) {
+  if (terminalReason != GenerationStopReason::None) {
+    generationStopReason_ = terminalReason;
+  }
   capturePendingThinkClose();
   onSequenceEnd(outputCallback);
-  if (shouldRollbackPredictionLimitReasoningCutoff()) {
+  if (shouldRollbackKnownReasoningCutoff()) {
     return rollbackCurrentRequest(outputCallback);
   }
   if (generationStarted_) {
@@ -1096,11 +1101,14 @@ bool TextLlmContext::onCancel(
   return rollbackCurrentRequest(outputCallback);
 }
 
-bool TextLlmContext::shouldRollbackPredictionLimitReasoningCutoff() const {
-  return generationStopReason_ == GenerationStopReason::PredictionLimit &&
-         needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
-         reasoningEnabled_ && reasoningState_.inside_reasoning &&
-         compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
+bool TextLlmContext::shouldRollbackKnownReasoningCutoff() const {
+  const bool knownTruncation =
+      generationStopReason_ == GenerationStopReason::PredictionLimit ||
+      generationStopReason_ == GenerationStopReason::SequenceLimit;
+  return knownTruncation && needsRecurrentSnapshot_ &&
+         removeThinkingFromContext_ && reasoningEnabled_ &&
+         reasoningState_.inside_reasoning && compactor_.hasOpenSpan() &&
+         !compactor_.hasCapturedCloseSpan();
 }
 
 bool TextLlmContext::rollbackCurrentRequest(

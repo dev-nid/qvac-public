@@ -24,6 +24,7 @@ using qvac_lib_inference_addon_llama::batching::StopReason;
 class RecordingDriver : public SequenceDriver {
 public:
   std::vector<std::string> calls;
+  GenerationStopReason terminalReason = GenerationStopReason::None;
 
   [[nodiscard]] llama_pos getNPast() const override { return 0; }
   [[nodiscard]] int32_t getNSlides() const override { return 0; }
@@ -49,8 +50,10 @@ public:
     calls.emplace_back("onSequenceEnd");
   }
   [[nodiscard]] bool onGenerationFinished(
-      const std::function<void(const std::string&)>&) override {
+      const std::function<void(const std::string&)>&,
+      GenerationStopReason reason = GenerationStopReason::None) override {
     calls.emplace_back("onGenerationFinished");
+    terminalReason = reason;
     return rollbackOk;
   }
   [[nodiscard]] bool
@@ -106,6 +109,20 @@ TEST(ContinuousBatchFinalize, NaturalFinishRunsGenerationFinishedHook) {
       driver, StopReason::Finished, /*prefillOnly=*/false, kNoCallback);
 
   EXPECT_TRUE(driver.fired("onGenerationFinished"));
+  EXPECT_EQ(driver.terminalReason, GenerationStopReason::None);
+}
+
+/// Scheduler-imposed per-sequence cap is a known truncation reason. Preserve it
+/// at the finalization boundary so recurrent drivers can roll back open
+/// reasoning spans instead of treating the slot as a normal completion and
+/// attempting strict compaction.
+TEST(ContinuousBatchFinalize, LimitReachedPropagatesSequenceLimit) {
+  RecordingDriver driver;
+  (void)finalizeTerminalDriver(
+      driver, StopReason::LimitReached, /*prefillOnly=*/false, kNoCallback);
+
+  EXPECT_TRUE(driver.fired("onGenerationFinished"));
+  EXPECT_EQ(driver.terminalReason, GenerationStopReason::SequenceLimit);
 }
 
 /// A prefill-only slot never generated, so it only flushes via onSequenceEnd

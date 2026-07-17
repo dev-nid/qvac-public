@@ -22,6 +22,7 @@ enum class GenerationStopReason : uint8_t {
   Eos,
   Antiprompt,
   PredictionLimit,
+  SequenceLimit,
   ContextOverflow,
 };
 
@@ -220,12 +221,16 @@ public:
   virtual void onSequenceEnd(
       const std::function<void(const std::string&)>& outputCallback) = 0;
 
-  /// Fired when generation reaches a natural EOG / stop token or generation
-  /// budget limit. Returns `false` when finalisation had to roll back the
-  /// request but could not prove live recurrent state matches metadata, in
-  /// which case callers MUST skip cache persistence for this request.
+  /// Fired when generation reaches a natural EOG / stop token, generation
+  /// budget limit, or scheduler-imposed sequence limit. `terminalReason`
+  /// carries reasons known only at finalization time (e.g. the scheduler's
+  /// per-sequence slot cap). Returns `false` when finalisation had to roll
+  /// back the request but could not prove live recurrent state matches
+  /// metadata, in which case callers MUST skip cache persistence for this
+  /// request.
   [[nodiscard]] virtual bool onGenerationFinished(
-      const std::function<void(const std::string&)>& outputCallback) = 0;
+      const std::function<void(const std::string&)>& outputCallback,
+      GenerationStopReason terminalReason = GenerationStopReason::None) = 0;
 
   /// Fired when the sequence is cancelled (user-requested or fatal error).
   /// Returns `true` when internal rollback (metadata + live KV / recurrent

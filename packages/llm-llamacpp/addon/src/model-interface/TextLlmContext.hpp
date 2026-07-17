@@ -198,7 +198,9 @@ public:
       const std::function<void(const std::string&)>& outputCallback) override;
 
   [[nodiscard]] bool onGenerationFinished(
-      const std::function<void(const std::string&)>& outputCallback) override;
+      const std::function<void(const std::string&)>& outputCallback,
+      GenerationStopReason terminalReason =
+          GenerationStopReason::None) override;
 
   [[nodiscard]] bool onCancel(
       const std::function<void(const std::string&)>& outputCallback) override;
@@ -284,7 +286,7 @@ private:
   void setOpenThinkSpan(llama_pos start);
   void capturePendingThinkClose();
   void compactThinkSpan();
-  [[nodiscard]] bool shouldRollbackPredictionLimitReasoningCutoff() const;
+  [[nodiscard]] bool shouldRollbackKnownReasoningCutoff() const;
   [[nodiscard]] bool rollbackCurrentRequest(
       const std::function<void(const std::string&)>& outputCallback);
   void configureReasoningTags(

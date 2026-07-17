@@ -113,7 +113,10 @@ bool finalizeTerminalDriver(
     driver.onSequenceEnd(outputCallback);
     return true;
   } else {
-    return driver.onGenerationFinished(outputCallback);
+    const GenerationStopReason terminalReason =
+        reason == StopReason::LimitReached ? GenerationStopReason::SequenceLimit
+                                           : GenerationStopReason::None;
+    return driver.onGenerationFinished(outputCallback, terminalReason);
   }
 }
 
