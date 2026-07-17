@@ -421,6 +421,73 @@ test(
 )
 
 test(
+  'Qwen3.5-0.8B n_predict exhaustion mid-reasoning does not abort',
+  {
+    timeout: 600_000
+  },
+  async (t) => {
+    const [modelName, dirPath] = await ensureModel({
+      modelName: QWEN3_5_MODEL.name,
+      downloadUrl: QWEN3_5_MODEL.url
+    })
+    const modelPath = path.join(dirPath, modelName)
+
+    const addon = new LlmLlamacpp({
+      files: { model: [modelPath] },
+      config: {
+        device: useCpu ? 'cpu' : 'gpu',
+        gpu_layers: '999',
+        ctx_size: '2048',
+        n_predict: '64',
+        temp: '0',
+        seed: '42',
+        verbosity: '2'
+      },
+      logger: createLogger(),
+      opts: { stats: true }
+    })
+
+    try {
+      await addon.load()
+
+      const response = await addon.run(
+        [
+          {
+            role: 'system',
+            content: 'You are a helpful assistant. Think carefully before answering.'
+          },
+          {
+            role: 'user',
+            content:
+              'Before answering, reason in detail for at least 20 sentences, then answer: What is the capital of France?'
+          }
+        ],
+        {
+          generationParams: {
+            remove_thinking_from_context: true
+          }
+        }
+      )
+      const output = await collectResponse(response)
+
+      t.comment(`small-budget output (${output.length} chars): "${output.slice(0, 300)}"`)
+      t.comment(`small-budget stats: ${JSON.stringify(response.stats || {})}`)
+      t.ok(output.length > 0, `small-budget run produced output (${output.length} chars)`)
+      t.ok(
+        output.includes('<think>'),
+        `small-budget run should enter reasoning before n_predict cutoff: "${output.slice(0, 120)}"`
+      )
+      t.ok(
+        response.stats?.generatedTokens >= 64,
+        `small-budget run should reach n_predict (generatedTokens=${response.stats?.generatedTokens})`
+      )
+    } finally {
+      await addon.unload().catch(() => {})
+    }
+  }
+)
+
+test(
   'Qwen3.5-0.8B per-request generationParams.reasoning_budget overrides load-time default',
   {
     timeout: 600_000
