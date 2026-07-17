@@ -770,6 +770,9 @@ bool MtmdLlmContext::cancelGenerationCleanup(
   rollbackState_.clearPostReasoning();
   compactor_.clearSpan();
   generationStopReason_ = GenerationStopReason::None;
+  // The sampled tokens were accepted before rollback; clear sampler history so
+  // the next clean request cannot inherit a request that "never happened".
+  common_sampler_reset(smpl_.get());
   return rollbackOk;
 }
 

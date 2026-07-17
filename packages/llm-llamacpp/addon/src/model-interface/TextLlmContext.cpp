@@ -1143,6 +1143,9 @@ bool TextLlmContext::rollbackCurrentRequest(
   assistantOutput_.clear();
   generationStarted_ = false;
   generationStopReason_ = GenerationStopReason::None;
+  // The sampled tokens were accepted before rollback; clear sampler history so
+  // the next clean request cannot inherit a request that "never happened".
+  common_sampler_reset(smpl_.get());
   return rollbackOk;
 }
 
