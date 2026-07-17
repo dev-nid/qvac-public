@@ -48,9 +48,10 @@ public:
   void onSequenceEnd(const std::function<void(const std::string&)>&) override {
     calls.emplace_back("onSequenceEnd");
   }
-  void onGenerationFinished(
+  [[nodiscard]] bool onGenerationFinished(
       const std::function<void(const std::string&)>&) override {
     calls.emplace_back("onGenerationFinished");
+    return rollbackOk;
   }
   [[nodiscard]] bool
   onCancel(const std::function<void(const std::string&)>&) override {
@@ -119,10 +120,11 @@ TEST(ContinuousBatchFinalize, PrefillOnlyOnlyFlushes) {
   EXPECT_FALSE(driver.fired("onCancel"));
 }
 
-/// `finalizeTerminalDriver` must forward the driver's rollback-ok signal
-/// from `onCancel` on Cancelled / DecodeError paths so the scheduler can
-/// skip `saveCache` when a recurrent full-state restore was refused.
-/// Non-cancel paths always report OK because no rollback runs.
+/// `finalizeTerminalDriver` must forward the driver's rollback-ok signal so
+/// the scheduler can skip `saveCache` when a recurrent full-state restore was
+/// refused. Cancelled / DecodeError paths report through `onCancel`; natural
+/// generation finalization can also report a rollback failure when generation
+/// was truncated mid-reasoning.
 TEST(ContinuousBatchFinalize, CancelForwardsRollbackFailure) {
   RecordingDriver driver;
   driver.rollbackOk = false;
@@ -137,9 +139,9 @@ TEST(ContinuousBatchFinalize, CancelForwardsRollbackSuccess) {
       driver, StopReason::Cancelled, /*prefillOnly=*/false, kNoCallback));
 }
 
-TEST(ContinuousBatchFinalize, NaturalFinishAlwaysReportsRollbackOk) {
+TEST(ContinuousBatchFinalize, NaturalFinishForwardsRollbackFailure) {
   RecordingDriver driver;
-  driver.rollbackOk = false; // Should be ignored on non-cancel paths.
-  EXPECT_TRUE(finalizeTerminalDriver(
+  driver.rollbackOk = false;
+  EXPECT_FALSE(finalizeTerminalDriver(
       driver, StopReason::Finished, /*prefillOnly=*/false, kNoCallback));
 }

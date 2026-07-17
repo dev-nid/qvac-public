@@ -111,10 +111,10 @@ bool finalizeTerminalDriver(
   }
   if (prefillOnly) {
     driver.onSequenceEnd(outputCallback);
+    return true;
   } else {
-    driver.onGenerationFinished(outputCallback);
+    return driver.onGenerationFinished(outputCallback);
   }
-  return true;
 }
 
 bool computeSlideCapable(

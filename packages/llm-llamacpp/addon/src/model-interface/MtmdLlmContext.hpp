@@ -256,7 +256,7 @@ public:
   void onSequenceEnd(
       const std::function<void(const std::string&)>& outputCallback) override;
 
-  void onGenerationFinished(
+  [[nodiscard]] bool onGenerationFinished(
       const std::function<void(const std::string&)>& outputCallback) override;
 
   [[nodiscard]] bool onCancel(
@@ -324,6 +324,7 @@ private:
   void setOpenThinkSpan(llama_pos start);
   void capturePendingThinkClose();
   void compactThinkSpan();
+  [[nodiscard]] bool shouldRollbackPredictionLimitReasoningCutoff() const;
   void configureReasoningTags(
       const std::string& thinkingStartTag, const std::string& thinkingEndTag,
       const std::string& forcedOpenText);
@@ -384,6 +385,7 @@ private:
   double visionEncodeMs_ = 0.0;
   int32_t visionEncodeTiles_ = 0;
   bool pendingBatchFirstMsg_ = false;
+  GenerationStopReason generationStopReason_ = GenerationStopReason::None;
   // Snapshot of `current_` / `protectedPrefix_` at `evalMessageWithTools`
   // entry. Restored by `cancelGenerationCleanup` to roll back to the
   // pre-request cursor.

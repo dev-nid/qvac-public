@@ -719,8 +719,8 @@ void MtmdLlmContext::flushPendingUtf8ToCallback(
 
 bool MtmdLlmContext::cancelGenerationCleanup(
     const std::function<void(const std::string&)>& outputCallback) {
-  // Cancel = "request never happened": roll back to the pre-request
-  // cursor for both prefill- and decode-stage cancels.
+  // Rollback = "request never happened": roll back to the pre-request
+  // cursor for both cancellation and n_predict truncation inside reasoning.
   // `reasoningBoundary` is compaction-only and not used here — restoring
   // it would leak the cancelled prompt / generated-prefix state into
   // the cache.
@@ -769,6 +769,7 @@ bool MtmdLlmContext::cancelGenerationCleanup(
   rollbackState_.clearReasoningBoundary();
   rollbackState_.clearPostReasoning();
   compactor_.clearSpan();
+  generationStopReason_ = GenerationStopReason::None;
   return rollbackOk;
 }
 
@@ -818,6 +819,7 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
   reasoningState_.inside_reasoning = false;
   reasoningState_.recent_output_buffer.clear();
   compactor_.reset();
+  generationStopReason_ = GenerationStopReason::None;
 
   if (thinkingForcedOpen_) {
     if (outputCallback) {
@@ -867,6 +869,7 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
               protectedPrefix_.pos,
               tools_.anchor(),
               tools_.enabled() ? "true" : "false"));
+      generationStopReason_ = GenerationStopReason::ContextOverflow;
       return {.ok = false};
     }
     applyContextDiscard();
@@ -946,6 +949,7 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
         }
       }
       flushPendingUtf8ToCallback(outputCallback);
+      generationStopReason_ = GenerationStopReason::Eos;
       break;
     }
 
@@ -987,11 +991,16 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
       ++current_.cacheTokens;
       capturePendingThinkClose();
       flushPendingUtf8ToCallback(outputCallback);
+      generationStopReason_ = GenerationStopReason::Eos;
       break;
     }
 
-    if (isEos || checkAntiprompt()) {
+    const bool stoppedByAntiprompt = checkAntiprompt();
+    if (isEos || stoppedByAntiprompt) {
       flushPendingUtf8ToCallback(outputCallback);
+      generationStopReason_ =
+          isEos ? GenerationStopReason::Eos
+                : GenerationStopReason::Antiprompt;
       break;
     }
 
@@ -1025,17 +1034,12 @@ LlmContext::GenerateResponseResult MtmdLlmContext::generateResponse(
         .cancelled = true,
         .rollbackOk = cancelGenerationCleanup(outputCallback)};
   }
-  if (nRemain == 0) {
-    flushPendingUtf8ToCallback(outputCallback);
+  if (generationStopReason_ == GenerationStopReason::None &&
+      params_.n_predict > 0 && nRemain == 0) {
+    generationStopReason_ = GenerationStopReason::PredictionLimit;
   }
-  // Drop the reasoning block from the KV cache if the caller opted
-  // in and a `<think>...</think>` (or model-equivalent) was emitted.
-  compactThinkSpan();
-  // Generation completed; cancel cannot fire anymore so the
-  // prefill-entry rollback checkpoint is no longer reachable. Drop
-  // its temp file now instead of waiting for the next inference.
-  rollbackState_.clearPrefillEntry();
-  return {};
+  const bool rollbackOk = onGenerationFinished(outputCallback);
+  return {.rollbackOk = rollbackOk};
 }
 
 std::function<void()>
@@ -1774,7 +1778,11 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
             current_.pos,
             current_.cacheTokens,
             ctxCeiling()));
-    return {.finished = true, .contextOverflow = true};
+    generationStopReason_ = GenerationStopReason::ContextOverflow;
+    return {
+        .finished = true,
+        .contextOverflow = true,
+        .stopReason = GenerationStopReason::ContextOverflow};
   }
   // No applyContextDiscard here: the batcher's per-sequence cap stops a
   // slot before its window fills, and sliding a sequence that holds
@@ -1864,7 +1872,11 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
       }
     }
     flushPendingUtf8ToCallback(outputCallback);
-    return {.token = tokenId, .finished = true};
+    generationStopReason_ = GenerationStopReason::Eos;
+    return {
+        .token = tokenId,
+        .finished = true,
+        .stopReason = GenerationStopReason::Eos};
   }
 
   // Batch path only: scheduler stops solely on `finished` (see
@@ -1872,11 +1884,21 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
   const bool reachedBudget =
       inlineDecodeBatch == nullptr && params_.n_predict > 0 &&
       generatedAfterAccept >= static_cast<unsigned>(params_.n_predict);
-  const bool finished = isEos || reachedBudget || checkAntiprompt();
+  const bool stoppedByAntiprompt = checkAntiprompt();
+  GenerationStopReason stopReason = GenerationStopReason::None;
+  if (isEos) {
+    stopReason = GenerationStopReason::Eos;
+  } else if (stoppedByAntiprompt) {
+    stopReason = GenerationStopReason::Antiprompt;
+  } else if (reachedBudget) {
+    stopReason = GenerationStopReason::PredictionLimit;
+  }
+  const bool finished = stopReason != GenerationStopReason::None;
   if (finished) {
+    generationStopReason_ = stopReason;
     flushPendingUtf8ToCallback(outputCallback);
   }
-  return {.token = tokenId, .finished = finished};
+  return {.token = tokenId, .finished = finished, .stopReason = stopReason};
 }
 
 void MtmdLlmContext::onSequenceEnd(
@@ -1884,12 +1906,24 @@ void MtmdLlmContext::onSequenceEnd(
   flushPendingUtf8ToCallback(outputCallback);
 }
 
-void MtmdLlmContext::onGenerationFinished(
+bool MtmdLlmContext::onGenerationFinished(
     const std::function<void(const std::string&)>& outputCallback) {
   capturePendingThinkClose();
   onSequenceEnd(outputCallback);
+  if (shouldRollbackPredictionLimitReasoningCutoff()) {
+    return cancelGenerationCleanup(outputCallback);
+  }
   compactThinkSpan();
   rollbackState_.clearPrefillEntry();
+  generationStopReason_ = GenerationStopReason::None;
+  return true;
+}
+
+bool MtmdLlmContext::shouldRollbackPredictionLimitReasoningCutoff() const {
+  return generationStopReason_ == GenerationStopReason::PredictionLimit &&
+      needsRecurrentSnapshot_ && removeThinkingFromContext_ &&
+      reasoningEnabled_ && reasoningState_.inside_reasoning &&
+      compactor_.hasOpenSpan() && !compactor_.hasCapturedCloseSpan();
 }
 
 bool MtmdLlmContext::onCancel(
