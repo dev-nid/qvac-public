@@ -1887,14 +1887,13 @@ SequenceStepResult MtmdLlmContext::onLogitsReady(
   const bool reachedBudget =
       inlineDecodeBatch == nullptr && params_.n_predict > 0 &&
       generatedAfterAccept >= static_cast<unsigned>(params_.n_predict);
-  const bool stoppedByAntiprompt = checkAntiprompt();
   GenerationStopReason stopReason = GenerationStopReason::None;
   if (isEos) {
     stopReason = GenerationStopReason::Eos;
-  } else if (stoppedByAntiprompt) {
-    stopReason = GenerationStopReason::Antiprompt;
   } else if (reachedBudget) {
     stopReason = GenerationStopReason::PredictionLimit;
+  } else if (checkAntiprompt()) {
+    stopReason = GenerationStopReason::Antiprompt;
   }
   const bool finished = stopReason != GenerationStopReason::None;
   if (finished) {
