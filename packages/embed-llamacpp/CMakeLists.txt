@@ -58,6 +58,7 @@ find_path(QVAC_LIB_INFERENCE_ADDON_CPP_INCLUDE_DIRS "inference-addon-cpp/JsInter
 # IMPORTED interface. Make OpenSSL discoverable before find_package(llama)
 # so the target chain resolves on local builds.
 find_package(OpenSSL)
+find_package(ggml CONFIG REQUIRED)
 find_package(llama CONFIG REQUIRED)
 
 if(WIN32)
@@ -125,10 +126,21 @@ if(NOT TARGET llama::common)
   endif()
 endif()
 
+set(QVAC_VECTOR_INDEX_TARGET "")
+if(TARGET ggml::vector-index)
+  set(QVAC_VECTOR_INDEX_TARGET ggml::vector-index)
+elseif(TARGET ggml::ggml-vector-index)
+  set(QVAC_VECTOR_INDEX_TARGET ggml::ggml-vector-index)
+elseif(TARGET ggml-vector-index)
+  set(QVAC_VECTOR_INDEX_TARGET ggml-vector-index)
+else()
+  message(FATAL_ERROR "qvac-fabric did not export a ggml vector-index target")
+endif()
+
 target_link_libraries(
   ${embed-llamacpp}
   PRIVATE
-    llama::llama llama::common
+    llama::llama llama::common ${QVAC_VECTOR_INDEX_TARGET}
 )
 
 target_compile_definitions(${embed-llamacpp} PUBLIC JS_LOGGER)

@@ -18,8 +18,6 @@ inline std::string toString(int code) {
   switch (code) {
     case GGML_VEC_INDEX_OK:
       return "OK";
-    case GGML_VEC_INDEX_E_INVALID_DIM:
-      return "InvalidDim";
     case GGML_VEC_INDEX_E_INVALID_ARG:
       return "InvalidArgument";
     case GGML_VEC_INDEX_E_DUPLICATE:
