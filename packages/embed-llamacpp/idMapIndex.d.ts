@@ -38,7 +38,11 @@ export default class IdMapIndex {
   /** Open a persisted .tvim file with mmap-backed vector storage. Synchronous; mutations fail. */
   static loadMmap(path: string): IdMapIndex
 
-  /** Open a persisted .tvim snapshot and replay an append-only .tvid delta log. Synchronous; may block for large indexes. */
+  /**
+   * Open a persisted .tvim snapshot and replay an append-only .tvid delta log.
+   * Synchronous; may block for large indexes. If another writer appends to the
+   * same delta log, reload before writing more logged mutations.
+   */
   static loadWithDelta(
     snapshotPath: string,
     deltaPath: string
@@ -54,6 +58,10 @@ export default class IdMapIndex {
   /**
    * Insert vectors and append the mutation to an incremental .tvid delta log.
    * `UINT64_MAX` is reserved for search result padding and cannot be inserted.
+   * Use a single writer instance per delta log; stale writers are rejected and
+   * should reload with `IdMapIndex.loadWithDelta()` before appending.
+   * Added vectors are stored in the delta log as f32 payloads regardless of
+   * `bitWidth`; compact snapshots carry the q4/q8 size savings.
    */
   addLogged(
     vectors: Float32Array,
@@ -61,7 +69,7 @@ export default class IdMapIndex {
     deltaPath: string
   ): void
 
-  /** Top-k search across `queries.length / dim` rows. */
+  /** Top-k search across `queries.length / dim` rows. Exact search is linear in index size. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
 
   /** Top-k search restricted to the supplied allowed ids. */
@@ -74,16 +82,27 @@ export default class IdMapIndex {
   /** Prepare an allowlist for repeated filtered searches. */
   prepareFilter(allowedIds: BigUint64Array): IdMapIndexFilter
 
-  /** Build IVF-flat approximate search state. Mutations invalidate this state. */
+  /**
+   * Build IVF-flat approximate search state. Mutations invalidate this state.
+   * IVF state is in-memory only; call this after `load()`, `loadMmap()`, or
+   * `loadWithDelta()` before using `searchIvf()`.
+   */
   buildIvf(nLists: number, nIter?: number): void
 
-  /** IVF-flat ANN top-k search. `buildIvf()` must have run after the latest mutation. */
+  /**
+   * IVF-flat ANN top-k search. `buildIvf()` must have run after the latest mutation or load.
+   * Higher `nProbe` improves recall at the cost of latency; tune `nLists`, `nIter`, and `nProbe` against your dataset.
+   */
   searchIvf(queries: Float32Array, k: number, nProbe: number): IdMapIndexSearchResult
 
   /** Returns true if removed, false if not present. */
   remove(id: bigint): boolean
 
-  /** Remove an entry and append the mutation to an incremental .tvid delta log. */
+  /**
+   * Remove an entry and append the mutation to an incremental .tvid delta log.
+   * Use a single writer instance per delta log; stale writers are rejected and
+   * should reload with `IdMapIndex.loadWithDelta()` before appending.
+   */
   removeLogged(id: bigint, deltaPath: string): boolean
 
   /** Physically remove deleted slots from the in-memory index. */
@@ -97,7 +116,10 @@ export default class IdMapIndex {
   /** Persist to disk (.tvim v2; legacy v1 files are still readable). */
   write(path: string): void
 
-  /** Write a compacted full snapshot and reset the matching .tvid delta log. */
+  /**
+   * Write a compacted full snapshot and reset the matching .tvid delta log.
+   * Coordinate compaction with the same single writer that owns the delta log.
+   */
   compactDelta(snapshotPath: string, deltaPath: string): void
 
   readonly length: number

@@ -126,6 +126,8 @@ class IdMapIndex {
   /**
    * Load a full snapshot and replay an append-only delta log.
    * This is synchronous and may block for large persisted indexes.
+   * If another writer appends to the same delta log, reload with
+   * `IdMapIndex.loadWithDelta()` before writing more logged mutations.
    * @param {string} snapshotPath
    * @param {string} deltaPath
    * @returns {IdMapIndex}
@@ -166,6 +168,10 @@ class IdMapIndex {
 
   /**
    * Insert vectors and append the mutation to an incremental delta log.
+   * Use a single writer instance per delta log; stale writers are rejected
+   * and should reload with `IdMapIndex.loadWithDelta()` before appending.
+   * Added vectors are stored in the delta log as f32 payloads regardless of
+   * `bitWidth`; compact snapshots carry the q4/q8 size savings.
    * @param {Float32Array} vectors - length = n * dim
    * @param {BigUint64Array} ids   - length = n
    * @param {string} deltaPath
@@ -191,6 +197,8 @@ class IdMapIndex {
 
   /**
    * Top-k search across `m` queries packed contiguously in `queries`.
+   * Exact search is linear in index size; use filtered or IVF search to
+   * reduce the candidate set.
    * Returns `{ scores, ids, m, k }` where scores/ids are typed arrays of
    * length m*k (row-major).
    * @param {Float32Array} queries - length = m * dim
@@ -246,6 +254,8 @@ class IdMapIndex {
 
   /**
    * Build IVF-flat approximate search state. Mutations invalidate this state.
+   * IVF state is in-memory only; call this after `load()`, `loadMmap()`,
+   * or `loadWithDelta()` before using `searchIvf()`.
    * @param {number} nLists
    * @param {number} [nIter=0]
    */
@@ -261,7 +271,9 @@ class IdMapIndex {
 
   /**
    * IVF-flat ANN top-k search. `buildIvf()` must have run after the latest
-   * mutation.
+   * mutation or load.
+   * Higher `nProbe` improves recall at the cost of latency; tune
+   * `nLists`, `nIter`, and `nProbe` against your dataset.
    * @param {Float32Array} queries - length = m * dim
    * @param {number} k
    * @param {number} nProbe
@@ -294,6 +306,8 @@ class IdMapIndex {
 
   /**
    * Remove an entry and append the mutation to an incremental delta log.
+   * Use a single writer instance per delta log; stale writers are rejected
+   * and should reload with `IdMapIndex.loadWithDelta()` before appending.
    * @param {bigint} id
    * @param {string} deltaPath
    * @returns {boolean}
@@ -342,6 +356,7 @@ class IdMapIndex {
 
   /**
    * Write a compacted full snapshot and reset the matching delta log.
+   * Coordinate compaction with the same single writer that owns the delta log.
    * @param {string} snapshotPath
    * @param {string} deltaPath
    */
