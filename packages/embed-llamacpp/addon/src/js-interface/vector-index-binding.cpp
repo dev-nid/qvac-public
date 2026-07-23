@@ -225,6 +225,32 @@ bool read_utf8_string(
   return true;
 }
 
+bool read_utf8_string_prop(
+    js_env_t* env, js_value_t* obj, const char* name, std::string* out) {
+  js_value_t* val = nullptr;
+  if (js_get_named_property(env, obj, name, &val) != 0) {
+    return false;
+  }
+  size_t len = 0;
+  if (js_get_value_string_utf8(env, val, nullptr, 0, &len) != 0 ||
+      len == std::numeric_limits<size_t>::max()) {
+    return false;
+  }
+  try {
+    std::vector<utf8_t> buffer(len + 1);
+    size_t copied = 0;
+    if (js_get_value_string_utf8(
+            env, val, buffer.data(), buffer.size(), &copied) != 0) {
+      return false;
+    }
+    out->assign(reinterpret_cast<const char*>(buffer.data()), copied);
+  } catch (const std::bad_alloc&) {
+    js_throw_error(env, "OutOfMemory", "allocation failure");
+    return false;
+  }
+  return true;
+}
+
 bool read_float32_array(
     js_env_t* env, js_value_t* value, const char* name, const float** outData,
     size_t* outLen) {
@@ -487,10 +513,12 @@ js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
   }
   // bitWidth optional; keep the native fallback aligned with the JS wrapper.
   (void)read_int_prop(env, argv[0], "bitWidth", &bit_width);
+  std::string storage;
+  (void)read_utf8_string_prop(env, argv[0], "storage", &storage);
 
   VectorIndex* idx = nullptr;
   try {
-    idx = new VectorIndex(dim, bit_width);
+    idx = new VectorIndex(dim, bit_width, storage);
   } catch (const std::invalid_argument& e) {
     js_throw_error(env, "InvalidArgument", e.what());
     return nullptr;

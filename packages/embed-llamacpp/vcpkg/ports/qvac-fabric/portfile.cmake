@@ -19,7 +19,7 @@
 # bump the `# fabric-src-hash:` comment line on each iteration so vcpkg
 # rebuilds the port.
 
-# fabric-src-hash: 0000000000000000000000000000000000000000
+# fabric-src-hash: 99f9213cc7f0699ad603dbc94884a6bb34a9828e
 
 set(FABRIC_GH_REPO "dev-nid/qvac-fabric-llm.cpp")
 set(FABRIC_GH_REF  "d18858e1e55246f585495664b2108a155169c3ff")  # turbovec-cpu
@@ -119,6 +119,7 @@ vcpkg_cmake_configure(
   DISABLE_PARALLEL_CONFIGURE
   OPTIONS
     -DGGML_NATIVE=OFF
+    -DGGML_VECTOR_INDEX=ON
     -DGGML_CCACHE=OFF
     -DGGML_OPENMP=OFF
     -DGGML_LLAMAFILE=OFF

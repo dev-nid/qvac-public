@@ -2,8 +2,8 @@
 
 // IdMapIndex: thin JS wrapper around the IdMapIndex N-API bindings exposed
 // by the embed-llamacpp addon (vector-index-binding.cpp). The native side
-// supports full f32 storage (`bitWidth: 32`) and production q8/q4 storage
-// (`bitWidth: 8` or `4`) with CPU search against the selected representation.
+// supports full f32 storage (`storage: 'f32'`), q8/q4 storage, and TurboVec
+// q2/q4 storage with CPU search against the selected representation.
 //
 // Lifecycle isolation: constructing IdMapIndex does NOT load any BERT
 // model. It only resolves the native binding (loaded once per process)
@@ -17,6 +17,19 @@ const HANDLE = Symbol('IdMapIndex.handle')
 const FILTER_HANDLE = Symbol('IdMapIndexFilter.handle')
 const FILTER_OWNER = Symbol('IdMapIndexFilter.owner')
 const INT32_MAX = 0x7fffffff
+const BIT_WIDTH_BY_STORAGE = {
+  f32: 32,
+  q8: 8,
+  q4: 4,
+  'turbovec-q4': 4,
+  'turbovec-q2': 2
+}
+const STORAGE_BY_BIT_WIDTH = {
+  2: 'turbovec-q2',
+  4: 'q4',
+  8: 'q8',
+  32: 'f32'
+}
 
 function ensureHandle(self) {
   if (self[HANDLE] === null || self[HANDLE] === undefined) {
@@ -38,6 +51,37 @@ function isPositiveInt32(value) {
 
 function isNonNegativeInt32(value) {
   return Number.isInteger(value) && value >= 0 && value <= INT32_MAX
+}
+
+function normalizeStorageOptions(opts) {
+  const hasBitWidth = Object.prototype.hasOwnProperty.call(opts, 'bitWidth')
+  const hasStorage = Object.prototype.hasOwnProperty.call(opts, 'storage')
+  let bitWidth = hasBitWidth ? opts.bitWidth : 8
+  let storage = hasStorage ? opts.storage : undefined
+
+  if (storage !== undefined) {
+    if (
+      typeof storage !== 'string' ||
+      !Object.prototype.hasOwnProperty.call(BIT_WIDTH_BY_STORAGE, storage)
+    ) {
+      throw new TypeError(
+        "IdMapIndex: storage must be 'f32', 'q8', 'q4', 'turbovec-q4', or 'turbovec-q2'"
+      )
+    }
+    if (!hasBitWidth) {
+      bitWidth = BIT_WIDTH_BY_STORAGE[storage]
+    } else if (bitWidth !== BIT_WIDTH_BY_STORAGE[storage]) {
+      throw new TypeError('IdMapIndex: bitWidth does not match storage')
+    }
+  } else {
+    storage = STORAGE_BY_BIT_WIDTH[bitWidth]
+  }
+
+  if (storage === undefined) {
+    throw new TypeError('IdMapIndex: bitWidth must be 2, 4, 8, or 32')
+  }
+
+  return { bitWidth, storage }
 }
 
 class IdMapIndexFilter {
@@ -80,16 +124,16 @@ class IdMapIndex {
   /**
    * @param {object} opts
    * @param {number} opts.dim - vector dimensionality (must be > 0)
-   * @param {4|8|32} [opts.bitWidth=8] - 4 = q4, 8 = q8, 32 = f32 storage
+   * @param {2|4|8|32} [opts.bitWidth=8] - 2 = TurboVec q2, 4 = q4, 8 = q8, 32 = f32 storage
+   * @param {'f32'|'q8'|'q4'|'turbovec-q4'|'turbovec-q2'} [opts.storage] - explicit storage mode
    */
-  constructor({ dim, bitWidth = 8 } = {}) {
+  constructor(opts = {}) {
+    const { dim } = opts
     if (!isPositiveInt32(dim)) {
       throw new TypeError('IdMapIndex: dim must be a positive int32')
     }
-    if (bitWidth !== 4 && bitWidth !== 8 && bitWidth !== 32) {
-      throw new TypeError('IdMapIndex: bitWidth must be 4, 8, or 32')
-    }
-    this[HANDLE] = binding.idx_create({ dim, bitWidth })
+    const { bitWidth, storage } = normalizeStorageOptions(opts)
+    this[HANDLE] = binding.idx_create({ dim, bitWidth, storage })
   }
 
   /**
@@ -171,7 +215,7 @@ class IdMapIndex {
    * Use a single writer instance per delta log; stale writers are rejected
    * and should reload with `IdMapIndex.loadWithDelta()` before appending.
    * Added vectors are stored in the delta log as f32 payloads regardless of
-   * `bitWidth`; compact snapshots carry the q4/q8 size savings.
+   * `bitWidth`; compact snapshots carry the selected storage savings.
    * @param {Float32Array} vectors - length = n * dim
    * @param {BigUint64Array} ids   - length = n
    * @param {string} deltaPath

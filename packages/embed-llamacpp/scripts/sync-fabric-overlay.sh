@@ -47,19 +47,25 @@ if [ ! -f "$fabric_dir/CMakeLists.txt" ]; then
   exit 1
 fi
 
-# Hash all tracked source under fabric. `git ls-files` is preferred (fast,
-# respects .gitignore); fallback to `find` for non-git trees.
+# Hash source under fabric. `git ls-files` is preferred (fast, respects
+# .gitignore) and includes untracked source files because local feature work
+# often adds new fabric files before commit. Build outputs are filtered out
+# explicitly so they do not churn the port ABI hash.
 hash=$(
   cd "$fabric_dir" && {
-    git ls-files \
-      ':!*.gguf' ':!*.bin' ':!*.png' ':!*.jpg' \
-      2>/dev/null \
+    git ls-files --cached --others --exclude-standard 2>/dev/null \
       || find . -type f \
            -not -path '*/.git/*' \
+           -not -path '*/.cargo*/*' \
            -not -path '*/build*/*' \
            -not -path '*/node_modules/*' \
+           -not -path '*/target/*' \
            -not -path '*/__pycache__/*'
-  } | LC_ALL=C sort | xargs -I{} shasum "{}" 2>/dev/null | shasum | awk '{print $1}'
+  } | awk '
+    /\.(gguf|bin|png|jpg)$/ { next }
+    /(^|\/)(build[^\/]*|node_modules|target|__pycache__|\.git|\.cache|\.cargo[^\/]*)(\/|$)/ { next }
+    { print }
+  ' | LC_ALL=C sort | xargs -I{} shasum "{}" 2>/dev/null | shasum | awk '{print $1}'
 )
 
 if [ -z "$hash" ] || [ "${#hash}" -lt 20 ]; then

@@ -1,8 +1,12 @@
+export type IdMapIndexStorage = 'f32' | 'q8' | 'q4' | 'turbovec-q4' | 'turbovec-q2'
+
 export interface IdMapIndexOptions {
   /** Vector dimensionality (must be > 0). */
   dim: number
-  /** Storage precision: 4 = q4, 8 = q8, 32 = full f32 storage. Defaults to 8. */
-  bitWidth?: 4 | 8 | 32
+  /** Storage precision: 2 = TurboVec q2, 4 = q4, 8 = q8, 32 = full f32 storage. Defaults to 8. */
+  bitWidth?: 2 | 4 | 8 | 32
+  /** Explicit storage mode. Use `turbovec-q4` to distinguish TurboVec q4 from generic q4. */
+  storage?: IdMapIndexStorage
 }
 
 export interface IdMapIndexSearchResult {
@@ -43,10 +47,7 @@ export default class IdMapIndex {
    * Synchronous; may block for large indexes. If another writer appends to the
    * same delta log, reload before writing more logged mutations.
    */
-  static loadWithDelta(
-    snapshotPath: string,
-    deltaPath: string
-  ): IdMapIndex
+  static loadWithDelta(snapshotPath: string, deltaPath: string): IdMapIndex
 
   /**
    * Insert `n` vectors with stable external ids. Throws on duplicate id or
@@ -61,13 +62,9 @@ export default class IdMapIndex {
    * Use a single writer instance per delta log; stale writers are rejected and
    * should reload with `IdMapIndex.loadWithDelta()` before appending.
    * Added vectors are stored in the delta log as f32 payloads regardless of
-   * `bitWidth`; compact snapshots carry the q4/q8 size savings.
+   * `bitWidth`; compact snapshots carry the selected storage savings.
    */
-  addLogged(
-    vectors: Float32Array,
-    ids: BigUint64Array,
-    deltaPath: string
-  ): void
+  addLogged(vectors: Float32Array, ids: BigUint64Array, deltaPath: string): void
 
   /** Top-k search across `queries.length / dim` rows. Exact search is linear in index size. */
   search(queries: Float32Array, k: number): IdMapIndexSearchResult
@@ -124,7 +121,7 @@ export default class IdMapIndex {
 
   readonly length: number
   readonly dim: number
-  readonly bitWidth: 4 | 8 | 32
+  readonly bitWidth: 2 | 4 | 8 | 32
 
   dispose(): void
 }

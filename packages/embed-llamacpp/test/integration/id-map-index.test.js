@@ -31,6 +31,7 @@ const IdMapIndex = require('../../idMapIndex')
 // distinct unit basis vector — keeps the "self-match top-1" assertion
 // well-defined.
 const DIM = 16
+const TURBOVEC_DIM = 128
 const N = 10
 const UINT64_MAX = (1n << 64n) - 1n
 
@@ -60,7 +61,7 @@ function expectThrows(t, fn, message) {
   }
 }
 
-function assertTvimV2Header(t, file, bitWidth) {
+function assertTvimV2Header(t, file, bitWidth, storageKind = null) {
   const bytes = fs.readFileSync(file)
   t.is(bytes[0], 0x54, 'tvim magic T')
   t.is(bytes[1], 0x56, 'tvim magic V')
@@ -68,6 +69,7 @@ function assertTvimV2Header(t, file, bitWidth) {
   t.is(bytes[3], 0x49, 'tvim magic I')
   t.is(bytes[4], 2, 'tvim version 2')
   t.is(bytes[5], bitWidth, 'tvim bit width')
+  if (storageKind !== null) t.is(bytes[6], storageKind, 'tvim storage kind')
 }
 
 function assertTvidHeader(t, file) {
@@ -76,7 +78,7 @@ function assertTvidHeader(t, file) {
   t.is(bytes[1], 0x56, 'tvid magic V')
   t.is(bytes[2], 0x44, 'tvid magic D')
   t.is(bytes[3], 0x4c, 'tvid magic L')
-  t.is(bytes[4], 1, 'tvid version 1')
+  t.is(bytes[4], 4, 'tvid version 4')
 }
 
 function runRoundTrip(t, bitWidth) {
@@ -166,6 +168,86 @@ function runRoundTrip(t, bitWidth) {
   }
 }
 
+function normalizedPatternVec(row) {
+  const v = new Float32Array(TURBOVEC_DIM)
+  let norm = 0
+  for (let col = 0; col < TURBOVEC_DIM; col++) {
+    const value = Math.sin((row + 1) * (col + 3)) + Math.cos((row + 7) * (col + 1))
+    v[col] = value
+    norm += value * value
+  }
+  norm = Math.sqrt(norm) || 1
+  for (let col = 0; col < TURBOVEC_DIM; col++) v[col] /= norm
+  return v
+}
+
+function runTurboVecRoundTrip(t, storage, bitWidth, storageKind) {
+  const idx = new IdMapIndex({ dim: TURBOVEC_DIM, storage })
+  const localN = 6
+  const vectors = new Float32Array(localN * TURBOVEC_DIM)
+  const ids = new BigUint64Array(localN)
+  for (let i = 0; i < localN; i++) {
+    vectors.set(normalizedPatternVec(i), i * TURBOVEC_DIM)
+    ids[i] = 7000n + BigInt(i)
+  }
+
+  const delta = tmpDeltaPath(`id-map-index-${storage}-delta`)
+  const file = tmpPath(`id-map-index-${storage}`)
+  let loaded = null
+  try {
+    t.is(idx.bitWidth, bitWidth, `${storage} bitWidth getter`)
+    idx.addWithIds(vectors, ids)
+    t.is(idx.length, localN, `${storage} vectors inserted`)
+
+    for (let i = 0; i < localN; i++) {
+      const query = vectors.subarray(i * TURBOVEC_DIM, (i + 1) * TURBOVEC_DIM)
+      const out = idx.search(query, 1)
+      t.is(out.ids[0], ids[i], `${storage} query=${i} retrieves itself`)
+      t.ok(Number.isFinite(out.scores[0]), `${storage} score is finite`)
+    }
+
+    const filtered = idx.searchFiltered(
+      vectors.subarray(0, TURBOVEC_DIM),
+      1,
+      new BigUint64Array([ids[0]])
+    )
+    t.is(filtered.ids[0], ids[0], `${storage} filtered search works`)
+
+    idx.buildIvf(4, 0)
+    const ivf = idx.searchIvf(vectors.subarray(0, TURBOVEC_DIM), 1, 4)
+    t.is(ivf.ids[0], ids[0], `${storage} IVF search works`)
+
+    expectThrows(
+      t,
+      () => idx.addLogged(vectors.subarray(0, TURBOVEC_DIM), new BigUint64Array([9999n]), delta),
+      `${storage} addLogged should be rejected`
+    )
+    expectThrows(
+      t,
+      () => idx.removeLogged(ids[0], delta),
+      `${storage} removeLogged should be rejected`
+    )
+
+    idx.write(file)
+    assertTvimV2Header(t, file, bitWidth, storageKind)
+    expectThrows(t, () => IdMapIndex.loadMmap(file), `${storage} mmap load should be rejected`)
+
+    loaded = IdMapIndex.load(file)
+    t.is(loaded.dim, TURBOVEC_DIM, `${storage} dim restored`)
+    t.is(loaded.bitWidth, bitWidth, `${storage} bitWidth restored`)
+    t.is(
+      loaded.search(vectors.subarray(0, TURBOVEC_DIM), 1).ids[0],
+      ids[0],
+      `${storage} reload search works`
+    )
+  } finally {
+    if (loaded !== null) loaded.dispose()
+    idx.dispose()
+    if (fs.existsSync(file)) fs.unlinkSync(file)
+    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+  }
+}
+
 test('IdMapIndex sub-export does not boot the BERT runtime', (t) => {
   // 1. Construct path: zero-arg + tiny-arg ctors must succeed without
   //    loading any model or running addon-side BERT init.
@@ -198,12 +280,33 @@ test('IdMapIndex: f32 add + search + remove + persistence round-trip', (t) => {
   runRoundTrip(t, 32)
 })
 
+test('IdMapIndex: TurboVec q4 add + search + persistence round-trip', (t) => {
+  runTurboVecRoundTrip(t, 'turbovec-q4', 4, 4)
+})
+
+test('IdMapIndex: TurboVec q2 add + search + persistence round-trip', (t) => {
+  runTurboVecRoundTrip(t, 'turbovec-q2', 2, 5)
+})
+
 test('IdMapIndex: validates production bit widths', (t) => {
   expectThrows(
     t,
     () => new IdMapIndex({ dim: DIM, bitWidth: 16 }),
     'bitWidth 16 should be rejected'
   )
+  expectThrows(
+    t,
+    () => new IdMapIndex({ dim: DIM, storage: 'turbovec-q2', bitWidth: 4 }),
+    'mismatched storage and bitWidth should be rejected'
+  )
+  expectThrows(
+    t,
+    () => new IdMapIndex({ dim: DIM, storage: 'unknown' }),
+    'unknown storage should be rejected'
+  )
+  const q2 = new IdMapIndex({ dim: TURBOVEC_DIM, bitWidth: 2 })
+  t.is(q2.bitWidth, 2, 'bitWidth 2 selects TurboVec q2')
+  q2.dispose()
 })
 
 test('IdMapIndex: rejects numeric arguments outside int32 range', (t) => {

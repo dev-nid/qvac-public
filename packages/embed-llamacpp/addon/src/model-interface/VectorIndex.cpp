@@ -5,6 +5,25 @@
 
 namespace qvac_lib_infer_llamacpp_embed {
 
+namespace {
+
+ggml_vec_index_t* create_index(
+    int dim, int bitWidth, const std::string& storage) {
+  if (storage.empty() || storage == "q4" || storage == "q8" ||
+      storage == "f32") {
+    return ggml_vec_index_create(dim, bitWidth);
+  }
+  if (storage == "turbovec-q4") {
+    return ggml_vec_index_create_turbovec_q4(dim);
+  }
+  if (storage == "turbovec-q2") {
+    return ggml_vec_index_create_turbovec_q2(dim);
+  }
+  return nullptr;
+}
+
+} // namespace
+
 VectorIndexFilter::VectorIndexFilter(
     ggml_vec_index_filter_t* handle) noexcept
     : handle_(handle) {}
@@ -33,11 +52,11 @@ VectorIndexFilter& VectorIndexFilter::operator=(
   return *this;
 }
 
-VectorIndex::VectorIndex(int dim, int bitWidth)
-    : handle_(ggml_vec_index_create(dim, bitWidth)) {
+VectorIndex::VectorIndex(int dim, int bitWidth, const std::string& storage)
+    : handle_(create_index(dim, bitWidth, storage)) {
   if (handle_ == nullptr) {
     throw std::invalid_argument(
-        "ggml_vec_index_create rejected dim/bitWidth");
+        "ggml_vec_index_create rejected dim/storage");
   }
 }
 

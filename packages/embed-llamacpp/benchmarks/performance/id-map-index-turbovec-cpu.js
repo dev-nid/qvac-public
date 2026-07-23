@@ -9,7 +9,13 @@ const DIM = 384
 const VECTOR_COUNT = 10000
 const QUERY_COUNT = 128
 const K = 10
-const BIT_WIDTHS = [4, 8, 32]
+const STORAGE_CASES = [
+  { storage: 'q4', bitWidth: 4, supportsMmap: true, supportsDelta: true },
+  { storage: 'q8', bitWidth: 8, supportsMmap: true, supportsDelta: true },
+  { storage: 'f32', bitWidth: 32, supportsMmap: true, supportsDelta: true },
+  { storage: 'turbovec-q4', bitWidth: 4, supportsMmap: false, supportsDelta: false },
+  { storage: 'turbovec-q2', bitWidth: 2, supportsMmap: false, supportsDelta: false }
+]
 const FILTER_COUNT = 1000
 const IVF_LISTS = 100
 const IVF_NPROBE = 10
@@ -176,8 +182,8 @@ function bruteForceSearch(vectors, ids, queries, nVectors, dim, nQueries, k) {
   return { ids: outIds, scores: outScores }
 }
 
-function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
-  const storage = bitWidth === 32 ? 'f32' : `q${bitWidth}`
+function runCase(caseConfig, vectors, ids, queries, filterIds, deltaVectors) {
+  const { storage, bitWidth, supportsMmap, supportsDelta } = caseConfig
   const snapshot = path.join(TMP_DIR, `id-map-index-${storage}.tvim`)
   const delta = path.join(TMP_DIR, `id-map-index-${storage}.tvid`)
   cleanupFile(snapshot)
@@ -188,7 +194,7 @@ function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
   let mmap = null
   let filter = null
   try {
-    idx = new IdMapIndex({ dim: DIM, bitWidth })
+    idx = new IdMapIndex({ dim: DIM, bitWidth, storage })
 
     const add = measureSync(() => {
       idx.addWithIds(vectors, ids)
@@ -224,22 +230,36 @@ function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
 
     const load = measureSync(() => IdMapIndex.load(snapshot))
     loaded = load.value
-    const mmapLoad = measureSync(() => IdMapIndex.loadMmap(snapshot))
-    mmap = mmapLoad.value
-    mmap.search(queries.subarray(0, DIM * 8), K)
-    const mmapExactMs = measureMedianMs(() => {
-      mmap.search(queries, K)
-    })
+    let mmapLoadMs = 'n/a'
+    let mmapExactQps = 'n/a'
+    if (supportsMmap) {
+      const mmapLoad = measureSync(() => IdMapIndex.loadMmap(snapshot))
+      mmap = mmapLoad.value
+      mmapLoadMs = round(mmapLoad.ms, 2)
+      mmap.search(queries.subarray(0, DIM * 8), K)
+      const mmapExactMs = measureMedianMs(() => {
+        mmap.search(queries, K)
+      })
+      mmapExactQps = Math.round(qps(QUERY_COUNT, mmapExactMs))
+    }
 
     const deltaIds = createIds(DELTA_COUNT, 9000000 + bitWidth * 1000)
-    const addLogged = measureSync(() => {
-      idx.addLogged(deltaVectors, deltaIds, delta)
-    })
-    const removeLogged = measureSync(() => {
-      for (let i = 0; i < DELTA_COUNT; i++) {
-        idx.removeLogged(ids[i], delta)
-      }
-    })
+    let addLoggedMs = 'n/a'
+    let removeLoggedMs = 'n/a'
+    let deltaKb = 'n/a'
+    if (supportsDelta) {
+      const addLogged = measureSync(() => {
+        idx.addLogged(deltaVectors, deltaIds, delta)
+      })
+      const removeLogged = measureSync(() => {
+        for (let i = 0; i < DELTA_COUNT; i++) {
+          idx.removeLogged(ids[i], delta)
+        }
+      })
+      addLoggedMs = round(addLogged.ms, 2)
+      removeLoggedMs = round(removeLogged.ms, 2)
+      deltaKb = round(kb(fileSize(delta)), 1)
+    }
 
     return {
       storage,
@@ -252,13 +272,13 @@ function runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors) {
       ivfMsPerQuery: round(ivfMs / QUERY_COUNT, 3),
       ivfRecallAt10: round(recallAtK(exactResult.ids, ivfResult.ids, QUERY_COUNT, K), 3),
       loadMs: round(load.ms, 2),
-      mmapLoadMs: round(mmapLoad.ms, 2),
-      mmapExactQps: Math.round(qps(QUERY_COUNT, mmapExactMs)),
+      mmapLoadMs,
+      mmapExactQps,
       filterBuildMs: round(filterBuild.ms, 2),
       preparedFilterQps: Math.round(qps(QUERY_COUNT, preparedFilterMs)),
-      addLoggedMs: round(addLogged.ms, 2),
-      removeLoggedMs: round(removeLogged.ms, 2),
-      deltaKb: round(kb(fileSize(delta)), 1)
+      addLoggedMs,
+      removeLoggedMs,
+      deltaKb
     }
   } finally {
     if (filter !== null) filter.dispose()
@@ -294,6 +314,7 @@ function buildNotes(results, bruteForceQps) {
   }
   notes.push('Lower bit widths reduce persisted size; recall and latency depend on vector distribution and IVF settings.')
   notes.push('removeLogged is measured as 128 individual durable remove appends, not a bulk delete API.')
+  notes.push('TurboVec q2/q4 currently use normal snapshot load only; mmap load and delta-log mutations are unsupported.')
   notes.push('This benchmark uses normalized synthetic vectors, so it measures index mechanics rather than model embedding quality.')
   return notes
 }
@@ -381,9 +402,9 @@ function main() {
   })
 
   const results = []
-  for (const bitWidth of BIT_WIDTHS) {
-    console.log(`Benchmarking bitWidth=${bitWidth}...`)
-    results.push(runCase(bitWidth, vectors, ids, queries, filterIds, deltaVectors))
+  for (const caseConfig of STORAGE_CASES) {
+    console.log(`Benchmarking storage=${caseConfig.storage}...`)
+    results.push(runCase(caseConfig, vectors, ids, queries, filterIds, deltaVectors))
   }
 
   const bruteForceQps = qps(QUERY_COUNT, bruteForce.ms)

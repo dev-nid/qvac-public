@@ -34,8 +34,8 @@ private:
 class VectorIndex {
 public:
   // Construct a fresh empty index. Throws std::invalid_argument on bad
-  // dims / bit_width.
-  VectorIndex(int dim, int bitWidth);
+  // dims / storage mode.
+  VectorIndex(int dim, int bitWidth, const std::string& storage = {});
 
   // Adopt an already-opened native handle (used by static load).
   explicit VectorIndex(ggml_vec_index_t* handle) noexcept;
