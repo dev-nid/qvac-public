@@ -19,13 +19,13 @@
 # bump the `# fabric-src-hash:` comment line on each iteration so vcpkg
 # rebuilds the port.
 
-# fabric-src-hash: 99f9213cc7f0699ad603dbc94884a6bb34a9828e
+# fabric-src-hash: d4453c833dd44dfe37ce9870837c69c04aa62586
 
 set(FABRIC_GH_REPO "dev-nid/qvac-fabric-llm.cpp")
-set(FABRIC_GH_REF  "d18858e1e55246f585495664b2108a155169c3ff")  # turbovec-cpu
+set(FABRIC_GH_REF  "f68dce10d1a86832e48e82fe3fd0a01fbc3b29de")  # turbovec-cpu
 set(FABRIC_GH_HEAD_REF "turbovec-cpu")
 set(FABRIC_GH_SHA512
-    "20f325b7d079a7a1d82f06d8387ba29ec67c4a3d26208bb087852a68b2be963ade52546b1ec00b96f2280ec937546ed62641835c7861c73712508b191b6a993f")
+    "5834bf1f9776d7dc442fd0378af4da12b08423b5d5f7a595cf12b07bd8a5c9008799b564dd3e2c0ff1ea43c4bff2fa4002eb2f45a17f223eac0182c772dfa99c")
 
 if(DEFINED ENV{QVAC_FABRIC_LOCAL_PATH})
   set(FABRIC_LOCAL_PATH "$ENV{QVAC_FABRIC_LOCAL_PATH}")

@@ -214,8 +214,9 @@ class IdMapIndex {
    * Insert vectors and append the mutation to an incremental delta log.
    * Use a single writer instance per delta log; stale writers are rejected
    * and should reload with `IdMapIndex.loadWithDelta()` before appending.
-   * Added vectors are stored in the delta log as f32 payloads regardless of
-   * `bitWidth`; compact snapshots carry the selected storage savings.
+   * Once bound to a delta log, use logged mutations and `compactDelta()` for
+   * content changes. q4/q8 logs store native quantized payloads; TurboVec
+   * indexes do not support logged mutations.
    * @param {Float32Array} vectors - length = n * dim
    * @param {BigUint64Array} ids   - length = n
    * @param {string} deltaPath
@@ -382,13 +383,13 @@ class IdMapIndex {
     return binding.idx_contains(ensureHandle(this), id)
   }
 
-  /** Placeholder for future cache warming. */
+  /** Warm storage-specific caches; TurboVec prepares rotation/codebook state. */
   prepare() {
     binding.idx_prepare(ensureHandle(this))
   }
 
   /**
-   * Persist the index to disk in the checksummed .tvim v2 format.
+   * Persist in checksummed .tvim v2 (f32/q4/q8) or v3 (TurboVec) format.
    * @param {string} path
    */
   write(path) {

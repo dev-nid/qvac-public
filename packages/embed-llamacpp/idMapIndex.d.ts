@@ -61,8 +61,9 @@ export default class IdMapIndex {
    * `UINT64_MAX` is reserved for search result padding and cannot be inserted.
    * Use a single writer instance per delta log; stale writers are rejected and
    * should reload with `IdMapIndex.loadWithDelta()` before appending.
-   * Added vectors are stored in the delta log as f32 payloads regardless of
-   * `bitWidth`; compact snapshots carry the selected storage savings.
+   * Once bound to a delta log, use logged mutations and `compactDelta()` for
+   * content changes. q4/q8 logs store native quantized payloads; TurboVec
+   * indexes do not support logged mutations.
    */
   addLogged(vectors: Float32Array, ids: BigUint64Array, deltaPath: string): void
 
@@ -107,10 +108,10 @@ export default class IdMapIndex {
 
   contains(id: bigint): boolean
 
-  /** Placeholder for cache warming / codebook resolution after bulk add. */
+  /** Warm storage-specific caches; TurboVec prepares rotation/codebook state. */
   prepare(): void
 
-  /** Persist to disk (.tvim v2; legacy v1 files are still readable). */
+  /** Persist to .tvim v2 (f32/q4/q8) or v3 (TurboVec); legacy v1 remains readable. */
   write(path: string): void
 
   /**

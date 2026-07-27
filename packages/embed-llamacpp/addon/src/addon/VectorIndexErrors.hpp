@@ -30,6 +30,8 @@ inline std::string toString(int code) {
       return "BadVersion";
     case GGML_VEC_INDEX_E_OOM:
       return "OutOfMemory";
+    case GGML_VEC_INDEX_E_PARTIAL_COMPACT:
+      return "PartialCompact";
     case GGML_VEC_INDEX_E_INTERNAL:
       return "InternalError";
     default:

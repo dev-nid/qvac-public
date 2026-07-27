@@ -52,6 +52,12 @@ function tmpDeltaPath(name) {
   return tmpPath(name).replace(/\.tvim$/, '.tvid')
 }
 
+function removeDeltaArtifacts(delta) {
+  for (const artifact of [delta, `${delta}.lock`]) {
+    if (fs.existsSync(artifact)) fs.unlinkSync(artifact)
+  }
+}
+
 function expectThrows(t, fn, message) {
   try {
     fn()
@@ -61,13 +67,13 @@ function expectThrows(t, fn, message) {
   }
 }
 
-function assertTvimV2Header(t, file, bitWidth, storageKind = null) {
+function assertTvimHeader(t, file, version, bitWidth, storageKind = null) {
   const bytes = fs.readFileSync(file)
   t.is(bytes[0], 0x54, 'tvim magic T')
   t.is(bytes[1], 0x56, 'tvim magic V')
   t.is(bytes[2], 0x50, 'tvim magic P')
   t.is(bytes[3], 0x49, 'tvim magic I')
-  t.is(bytes[4], 2, 'tvim version 2')
+  t.is(bytes[4], version, `tvim version ${version}`)
   t.is(bytes[5], bitWidth, 'tvim bit width')
   if (storageKind !== null) t.is(bytes[6], storageKind, 'tvim storage kind')
 }
@@ -148,7 +154,7 @@ function runRoundTrip(t, bitWidth) {
   const file = tmpPath(`id-map-index-roundtrip-${bitWidth}`)
   try {
     idx.write(file)
-    assertTvimV2Header(t, file, bitWidth)
+    assertTvimHeader(t, file, 2, bitWidth)
     idx.dispose()
 
     const loaded = IdMapIndex.load(file)
@@ -229,7 +235,7 @@ function runTurboVecRoundTrip(t, storage, bitWidth, storageKind) {
     )
 
     idx.write(file)
-    assertTvimV2Header(t, file, bitWidth, storageKind)
+    assertTvimHeader(t, file, 3, bitWidth, storageKind)
     expectThrows(t, () => IdMapIndex.loadMmap(file), `${storage} mmap load should be rejected`)
 
     loaded = IdMapIndex.load(file)
@@ -244,7 +250,7 @@ function runTurboVecRoundTrip(t, storage, bitWidth, storageKind) {
     if (loaded !== null) loaded.dispose()
     idx.dispose()
     if (fs.existsSync(file)) fs.unlinkSync(file)
-    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+    removeDeltaArtifacts(delta)
   }
 }
 
@@ -515,7 +521,7 @@ test('IdMapIndex: delta log replay and compaction', (t) => {
     replayed = null
 
     idx.compactDelta(snapshot, delta)
-    assertTvimV2Header(t, snapshot, 4)
+    assertTvimHeader(t, snapshot, 2, 4)
     assertTvidHeader(t, delta)
     idx.dispose()
     idx = null
@@ -529,7 +535,7 @@ test('IdMapIndex: delta log replay and compaction', (t) => {
     if (replayed !== null) replayed.dispose()
     if (compacted !== null) compacted.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
-    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+    removeDeltaArtifacts(delta)
   }
 })
 
@@ -556,7 +562,7 @@ test('IdMapIndex: missing delta log replays as empty', (t) => {
     if (idx !== null) idx.dispose()
     if (loaded !== null) loaded.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
-    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+    removeDeltaArtifacts(delta)
   }
 })
 
@@ -580,7 +586,7 @@ test('IdMapIndex: corrupt delta log replay fails', (t) => {
   } finally {
     if (idx !== null) idx.dispose()
     if (fs.existsSync(snapshot)) fs.unlinkSync(snapshot)
-    if (fs.existsSync(delta)) fs.unlinkSync(delta)
+    removeDeltaArtifacts(delta)
   }
 })
 

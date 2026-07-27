@@ -1131,7 +1131,7 @@ js_value_t* idx_contains(js_env_t* env, js_callback_info_t* info) {
   return result;
 }
 
-// idx_prepare(handle) -> undefined (currently a no-op).
+// idx_prepare(handle) -> undefined (warms storage-specific native caches).
 js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
   size_t argc = 1;
   js_value_t* argv[1] = {nullptr};
