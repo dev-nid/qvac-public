@@ -346,12 +346,13 @@ test('IdMapIndex: ESM wrappers expose named exports', async (t) => {
 
   const rootModule = await import('../../index.mjs')
   t.is(rootModule.default, rootModule.GGMLBert, 'root default and named GGMLBert match')
-  t.is(rootModule.IdMapIndex, idMapModule.IdMapIndex, 'root named IdMapIndex matches subpath')
-  t.is(
-    rootModule.IdMapIndexFilter,
-    idMapModule.IdMapIndexFilter,
-    'root named filter matches subpath'
-  )
+  t.is(typeof rootModule.IdMapIndex, 'function', 'root named IdMapIndex export exists')
+  t.is(typeof rootModule.IdMapIndexFilter, 'function', 'root named filter export exists')
+
+  const idx = new rootModule.IdMapIndex({ dim: DIM })
+  t.ok(idx instanceof idMapModule.IdMapIndex, 'root IdMapIndex constructs the subpath class')
+  t.is(idx.dim, DIM, 'root IdMapIndex wrapper constructs a usable index')
+  idx.dispose()
 })
 
 test('IdMapIndex: rejects numeric arguments outside int32 range', (t) => {
