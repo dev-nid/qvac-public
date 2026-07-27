@@ -1,7 +1,10 @@
 export type IdMapIndexStorage = 'f32' | 'q8' | 'q4' | 'turbovec-q4' | 'turbovec-q2'
 
 export interface IdMapIndexOptions {
-  /** Vector dimensionality (must be > 0). */
+  /**
+   * Vector dimensionality (must be > 0). TurboVec storage additionally
+   * requires a 64-bit target and a dimension divisible by 8 and <= 65,536.
+   */
   dim: number
   /** Storage precision: 2 = TurboVec q2, 4 = q4, 8 = q8, 32 = full f32 storage. Defaults to 8. */
   bitWidth?: 2 | 4 | 8 | 32

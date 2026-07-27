@@ -310,7 +310,7 @@ function buildNotes(results, bruteForceQps) {
     if (f32 && item.storage !== 'f32') {
       notes.push(`${item.storage} snapshot size is ${round(item.fileMb / f32.fileMb, 2)}x of f32 for this dataset.`)
     }
-    notes.push(`${item.storage} IVF search is ${round(item.exactMsPerQuery / item.ivfMsPerQuery, 2)}x faster than exact search at recall ${item.ivfRecallAt10}.`)
+    notes.push(`${item.storage} IVF search throughput is ${round(item.ivfQps / item.exactQps, 2)}x exact search at recall ${item.ivfRecallAt10}.`)
   }
   notes.push('Lower bit widths reduce persisted size; recall and latency depend on vector distribution and IVF settings.')
   notes.push('removeLogged is measured as 128 individual durable remove appends, not a bulk delete API.')

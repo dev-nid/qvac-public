@@ -550,9 +550,14 @@ js_value_t* idx_load(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  VectorIndex loaded = VectorIndex::load(path);
+  int status = 0;
+  VectorIndex loaded = VectorIndex::load(path, &status);
+  if (status != 0) {
+    throw_status(env, status);
+    return nullptr;
+  }
   if (!loaded.valid()) {
-    js_throw_error(env, "IOError", "ggml_vec_index_load returned null");
+    js_throw_error(env, "InternalError", "load succeeded without an index");
     return nullptr;
   }
   try {
@@ -586,9 +591,15 @@ js_value_t* idx_load_mmap(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  VectorIndex loaded = VectorIndex::loadMmap(path);
+  int status = 0;
+  VectorIndex loaded = VectorIndex::loadMmap(path, &status);
+  if (status != 0) {
+    throw_status(env, status);
+    return nullptr;
+  }
   if (!loaded.valid()) {
-    js_throw_error(env, "IOError", "ggml_vec_index_load_mmap returned null");
+    js_throw_error(
+        env, "InternalError", "mmap load succeeded without an index");
     return nullptr;
   }
   try {
@@ -633,10 +644,16 @@ js_value_t* idx_load_with_delta(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  VectorIndex loaded = VectorIndex::loadWithDelta(snapshot_path, delta_path);
+  int status = 0;
+  VectorIndex loaded =
+      VectorIndex::loadWithDelta(snapshot_path, delta_path, &status);
+  if (status != 0) {
+    throw_status(env, status);
+    return nullptr;
+  }
   if (!loaded.valid()) {
     js_throw_error(
-        env, "IOError", "ggml_vec_index_load_with_delta returned null");
+        env, "InternalError", "delta load succeeded without an index");
     return nullptr;
   }
   try {

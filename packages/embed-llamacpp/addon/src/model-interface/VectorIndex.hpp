@@ -116,16 +116,17 @@ public:
       const std::string& snapshotPath,
       const std::string& deltaPath) noexcept;
 
-  // Reads from disk. On failure returns a wrapper whose `valid()` is false;
-  // callers must check before using the instance.
-  static VectorIndex load(const std::string& path) noexcept;
+  // Reads from disk. On failure returns a wrapper whose `valid()` is false and
+  // writes the precise ggml_vec_index_error to status.
+  static VectorIndex load(const std::string& path, int* status) noexcept;
 
   static VectorIndex loadWithDelta(
       const std::string& snapshotPath,
-      const std::string& deltaPath) noexcept;
+      const std::string& deltaPath,
+      int* status) noexcept;
 
   // Reads from disk with mmap-backed vector storage. Mutations fail.
-  static VectorIndex loadMmap(const std::string& path) noexcept;
+  static VectorIndex loadMmap(const std::string& path, int* status) noexcept;
 
   // Stats.
   [[nodiscard]] int len() const noexcept;

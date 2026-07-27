@@ -123,7 +123,7 @@ class IdMapIndexFilter {
 class IdMapIndex {
   /**
    * @param {object} opts
-   * @param {number} opts.dim - vector dimensionality (must be > 0)
+   * @param {number} opts.dim - vector dimensionality; TurboVec requires a 64-bit target and dim <= 65,536 divisible by 8
    * @param {2|4|8|32} [opts.bitWidth=8] - 2 = TurboVec q2, 4 = q4, 8 = q8, 32 = f32 storage
    * @param {'f32'|'q8'|'q4'|'turbovec-q4'|'turbovec-q2'} [opts.storage] - explicit storage mode
    */
@@ -133,6 +133,11 @@ class IdMapIndex {
       throw new TypeError('IdMapIndex: dim must be a positive int32')
     }
     const { bitWidth, storage } = normalizeStorageOptions(opts)
+    if (storage.startsWith('turbovec-') && (dim > 65536 || dim % 8 !== 0)) {
+      throw new RangeError(
+        'IdMapIndex: TurboVec dim must be divisible by 8 and no greater than 65536'
+      )
+    }
     this[HANDLE] = binding.idx_create({ dim, bitWidth, storage })
   }
 

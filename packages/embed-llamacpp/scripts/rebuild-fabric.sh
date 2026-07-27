@@ -17,6 +17,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 package_root="$(cd "$here/.." && pwd)"
 cd "$package_root"
 
+if [ -z "${QVAC_FABRIC_LOCAL_PATH:-}" ] && [ -n "${QVAC_FABRIC_SRC_DIR:-}" ]; then
+  export QVAC_FABRIC_LOCAL_PATH="$QVAC_FABRIC_SRC_DIR"
+fi
+
 if [ -z "${QVAC_FABRIC_LOCAL_PATH:-}${QVAC_FABRIC_SRC_DIR:-}" ]; then
   echo "rebuild-fabric: WARNING — neither QVAC_FABRIC_LOCAL_PATH nor"
   echo "rebuild-fabric: QVAC_FABRIC_SRC_DIR is set. The overlay is in"

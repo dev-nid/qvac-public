@@ -186,21 +186,27 @@ int VectorIndex::compactDelta(
       handle_, snapshotPath.c_str(), deltaPath.c_str());
 }
 
-VectorIndex VectorIndex::load(const std::string& path) noexcept {
-  ggml_vec_index_t* raw = ggml_vec_index_load(path.c_str());
+VectorIndex VectorIndex::load(const std::string& path, int* status) noexcept {
+  ggml_vec_index_t* raw = nullptr;
+  *status = ggml_vec_index_load_ex(path.c_str(), &raw);
   return VectorIndex(raw);
 }
 
 VectorIndex VectorIndex::loadWithDelta(
     const std::string& snapshotPath,
-    const std::string& deltaPath) noexcept {
-  ggml_vec_index_t* raw = ggml_vec_index_load_with_delta(
-      snapshotPath.c_str(), deltaPath.c_str());
+    const std::string& deltaPath,
+    int* status) noexcept {
+  ggml_vec_index_t* raw = nullptr;
+  *status = ggml_vec_index_load_with_delta_ex(
+      snapshotPath.c_str(), deltaPath.c_str(), &raw);
   return VectorIndex(raw);
 }
 
-VectorIndex VectorIndex::loadMmap(const std::string& path) noexcept {
-  ggml_vec_index_t* raw = ggml_vec_index_load_mmap(path.c_str());
+VectorIndex VectorIndex::loadMmap(
+    const std::string& path,
+    int* status) noexcept {
+  ggml_vec_index_t* raw = nullptr;
+  *status = ggml_vec_index_load_mmap_ex(path.c_str(), &raw);
   return VectorIndex(raw);
 }
 

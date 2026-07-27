@@ -92,5 +92,6 @@ export {
   default as IdMapIndex,
   IdMapIndexFilter,
   type IdMapIndexOptions,
-  type IdMapIndexSearchResult
+  type IdMapIndexSearchResult,
+  type IdMapIndexStorage
 } from './idMapIndex'

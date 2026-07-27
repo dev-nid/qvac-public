@@ -62,8 +62,10 @@ function expectThrows(t, fn, message) {
   try {
     fn()
     t.fail(message)
+    return null
   } catch (e) {
     t.pass(`${message}: ${e.message || e.code}`)
+    return e
   }
 }
 
@@ -309,6 +311,16 @@ test('IdMapIndex: validates production bit widths', (t) => {
     t,
     () => new IdMapIndex({ dim: DIM, storage: 'unknown' }),
     'unknown storage should be rejected'
+  )
+  expectThrows(
+    t,
+    () => new IdMapIndex({ dim: 10, storage: 'turbovec-q4' }),
+    'TurboVec dimensions must be divisible by 8'
+  )
+  expectThrows(
+    t,
+    () => new IdMapIndex({ dim: 65544, storage: 'turbovec-q2' }),
+    'TurboVec dimensions must not exceed 65536'
   )
   const q2 = new IdMapIndex({ dim: TURBOVEC_DIM, bitWidth: 2 })
   t.is(q2.bitWidth, 2, 'bitWidth 2 selects TurboVec q2')
@@ -666,8 +678,9 @@ test('IdMapIndex: dispose is deterministic and idempotent', (t) => {
 test('IdMapIndex: corrupt persistence file load fails', (t) => {
   const file = tmpPath('id-map-index-corrupt')
   try {
-    fs.writeFileSync(file, new Uint8Array([0, 1, 2, 3, 4, 5]))
-    expectThrows(t, () => IdMapIndex.load(file), 'corrupt tvim file should throw')
+    fs.writeFileSync(file, new Uint8Array(32))
+    const error = expectThrows(t, () => IdMapIndex.load(file), 'corrupt tvim file should throw')
+    if (error !== null) t.is(error.message, 'BadMagic', 'load preserves native error category')
   } finally {
     if (fs.existsSync(file)) fs.unlinkSync(file)
   }
