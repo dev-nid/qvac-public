@@ -325,6 +325,33 @@ test('IdMapIndex: validates production bit widths', (t) => {
   const q2 = new IdMapIndex({ dim: TURBOVEC_DIM, bitWidth: 2 })
   t.is(q2.bitWidth, 2, 'bitWidth 2 selects TurboVec q2')
   q2.dispose()
+
+  const explicitUndefined = new IdMapIndex({ dim: DIM, bitWidth: undefined })
+  t.is(explicitUndefined.bitWidth, 8, 'explicit undefined bitWidth uses default')
+  explicitUndefined.dispose()
+
+  const storageWithUndefined = new IdMapIndex({
+    dim: DIM,
+    storage: 'q4',
+    bitWidth: undefined
+  })
+  t.is(storageWithUndefined.bitWidth, 4, 'storage controls bitWidth when bitWidth is undefined')
+  storageWithUndefined.dispose()
+})
+
+test('IdMapIndex: ESM wrappers expose named exports', async (t) => {
+  const idMapModule = await import('../../idMapIndex.mjs')
+  t.is(idMapModule.default, idMapModule.IdMapIndex, 'subpath default and named class match')
+  t.ok(idMapModule.IdMapIndexFilter, 'subpath named filter export exists')
+
+  const rootModule = await import('../../index.mjs')
+  t.is(rootModule.default, rootModule.GGMLBert, 'root default and named GGMLBert match')
+  t.is(rootModule.IdMapIndex, idMapModule.IdMapIndex, 'root named IdMapIndex matches subpath')
+  t.is(
+    rootModule.IdMapIndexFilter,
+    idMapModule.IdMapIndexFilter,
+    'root named filter matches subpath'
+  )
 })
 
 test('IdMapIndex: rejects numeric arguments outside int32 range', (t) => {
@@ -469,6 +496,21 @@ test('IdMapIndex: prepared filters are reusable and invalidated by mutation', (t
     if (filter !== null) filter.dispose()
     idx.dispose()
   }
+})
+
+test('IdMapIndex: disposing an index disposes prepared filters first', (t) => {
+  const idx = new IdMapIndex({ dim: 2, bitWidth: 4 })
+  idx.addWithIds(new Float32Array([1, 0, 0, 1]), new BigUint64Array([11n, 22n]))
+  const filter = idx.prepareFilter(new BigUint64Array([11n]))
+
+  idx.dispose()
+  filter.dispose()
+  t.pass('filter dispose after owner dispose is idempotent')
+  expectThrows(
+    t,
+    () => filter.search(new Float32Array([1, 0]), 1),
+    'filter search after owner dispose should throw'
+  )
 })
 
 test('IdMapIndex: IVF build and search lifecycle', (t) => {

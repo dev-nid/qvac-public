@@ -32,8 +32,21 @@ using qvac_lib_infer_llamacpp_embed::VectorIndex;
 using qvac_lib_infer_llamacpp_embed::VectorIndexFilter;
 namespace verrors = qvac_lib_infer_llamacpp_embed::vector_index_errors;
 
+constexpr uint64_t kExternalMagic = UINT64_C(0x515649444d415058);
+
+enum class ExternalKind : uint32_t {
+  index = 1,
+  filter = 2,
+};
+
+struct ExternalHeader {
+  uint64_t magic = kExternalMagic;
+  ExternalKind kind;
+};
+
 struct VectorIndexExternal {
-  explicit VectorIndexExternal(VectorIndex* index) noexcept : idx(index) {}
+  explicit VectorIndexExternal(VectorIndex* index) noexcept
+      : header{kExternalMagic, ExternalKind::index}, idx(index) {}
 
   ~VectorIndexExternal() {
     delete idx;
@@ -43,6 +56,7 @@ struct VectorIndexExternal {
   VectorIndexExternal(const VectorIndexExternal&) = delete;
   VectorIndexExternal& operator=(const VectorIndexExternal&) = delete;
 
+  ExternalHeader header;
   VectorIndex* idx;
 };
 
@@ -56,7 +70,7 @@ struct SearchOutput {
 
 struct VectorIndexFilterExternal {
   explicit VectorIndexFilterExternal(VectorIndexFilter* value) noexcept
-      : filter(value) {}
+      : header{kExternalMagic, ExternalKind::filter}, filter(value) {}
 
   ~VectorIndexFilterExternal() {
     delete filter;
@@ -67,6 +81,7 @@ struct VectorIndexFilterExternal {
   VectorIndexFilterExternal&
   operator=(const VectorIndexFilterExternal&) = delete;
 
+  ExternalHeader header;
   VectorIndexFilter* filter;
 };
 
@@ -131,6 +146,11 @@ VectorIndexExternal* unwrap_external(js_env_t* env, js_value_t* handle) {
     js_throw_error(env, "InvalidArgument", "expected IdMapIndex handle");
     return nullptr;
   }
+  const auto* header = static_cast<const ExternalHeader*>(data);
+  if (header->magic != kExternalMagic || header->kind != ExternalKind::index) {
+    js_throw_error(env, "InvalidArgument", "expected IdMapIndex handle");
+    return nullptr;
+  }
   return static_cast<VectorIndexExternal*>(data);
 }
 
@@ -152,6 +172,11 @@ VectorIndexFilterExternal*
 unwrap_filter_external(js_env_t* env, js_value_t* handle) {
   void* data = nullptr;
   if (js_get_value_external(env, handle, &data) != 0 || data == nullptr) {
+    js_throw_error(env, "InvalidArgument", "expected IdMapIndexFilter handle");
+    return nullptr;
+  }
+  const auto* header = static_cast<const ExternalHeader*>(data);
+  if (header->magic != kExternalMagic || header->kind != ExternalKind::filter) {
     js_throw_error(env, "InvalidArgument", "expected IdMapIndexFilter handle");
     return nullptr;
   }
@@ -179,6 +204,22 @@ bool read_int_prop(
   if (js_get_named_property(env, obj, name, &val) != 0) {
     return false;
   }
+  bool is_undefined = false;
+  if (js_is_undefined(env, val, &is_undefined) == 0 && is_undefined) {
+    return false;
+  }
+  double raw = 0.0;
+  if (js_get_value_double(env, val, &raw) != 0 || !std::isfinite(raw) ||
+      raw != std::trunc(raw) ||
+      raw < static_cast<double>(std::numeric_limits<int32_t>::min()) ||
+      raw > static_cast<double>(std::numeric_limits<int32_t>::max())) {
+    return false;
+  }
+  *out = static_cast<int32_t>(raw);
+  return true;
+}
+
+bool read_int_value(js_env_t* env, js_value_t* val, int32_t* out) {
   double raw = 0.0;
   if (js_get_value_double(env, val, &raw) != 0 || !std::isfinite(raw) ||
       raw != std::trunc(raw) ||
@@ -191,8 +232,70 @@ bool read_int_prop(
 }
 
 void throw_status(js_env_t* env, int code) {
-  const std::string name = verrors::toString(code);
-  js_throw_error(env, name.c_str(), name.c_str());
+  const char* name = verrors::toString(code);
+  js_throw_error(env, name, name);
+}
+
+js_value_t* make_undefined(js_env_t* env) {
+  js_value_t* value = nullptr;
+  if (js_get_undefined(env, &value) != 0) {
+    js_throw_error(env, "InternalError", "create undefined");
+    return nullptr;
+  }
+  return value;
+}
+
+js_value_t* make_boolean(js_env_t* env, bool value) {
+  js_value_t* result = nullptr;
+  if (js_get_boolean(env, value, &result) != 0) {
+    js_throw_error(env, "InternalError", "create boolean");
+    return nullptr;
+  }
+  return result;
+}
+
+js_value_t* make_int32(js_env_t* env, int32_t value) {
+  js_value_t* result = nullptr;
+  if (js_create_int32(env, value, &result) != 0) {
+    js_throw_error(env, "InternalError", "create int32");
+    return nullptr;
+  }
+  return result;
+}
+
+bool get_optional_property(
+    js_env_t* env, js_value_t* obj, const char* name, js_value_t** out,
+    bool* has_value) {
+  *out = nullptr;
+  *has_value = false;
+  if (js_get_named_property(env, obj, name, out) != 0) {
+    js_throw_error(env, "InternalError", "failed to read option");
+    return false;
+  }
+  bool is_undefined = false;
+  if (js_is_undefined(env, *out, &is_undefined) != 0) {
+    js_throw_error(env, "InternalError", "failed to inspect option");
+    return false;
+  }
+  *has_value = !is_undefined;
+  return true;
+}
+
+bool read_optional_int_prop(
+    js_env_t* env, js_value_t* obj, const char* name, int32_t* out,
+    bool* has_value) {
+  js_value_t* val = nullptr;
+  if (!get_optional_property(env, obj, name, &val, has_value)) {
+    return false;
+  }
+  if (!*has_value) {
+    return true;
+  }
+  if (!read_int_value(env, val, out)) {
+    js_throw_type_error(env, "InvalidArgument", "invalid integer option");
+    return false;
+  }
+  return true;
 }
 
 bool read_utf8_string(
@@ -228,12 +331,17 @@ bool read_utf8_string(
 bool read_utf8_string_prop(
     js_env_t* env, js_value_t* obj, const char* name, std::string* out) {
   js_value_t* val = nullptr;
-  if (js_get_named_property(env, obj, name, &val) != 0) {
+  bool has_value = false;
+  if (!get_optional_property(env, obj, name, &val, &has_value)) {
     return false;
+  }
+  if (!has_value) {
+    return true;
   }
   size_t len = 0;
   if (js_get_value_string_utf8(env, val, nullptr, 0, &len) != 0 ||
       len == std::numeric_limits<size_t>::max()) {
+    js_throw_type_error(env, "InvalidArgument", "invalid string option");
     return false;
   }
   try {
@@ -483,10 +591,13 @@ js_value_t* finish_search_result(
 
   js_value_t* m_val = nullptr;
   js_value_t* k_val = nullptr;
-  js_create_uint32(env, static_cast<uint32_t>(m), &m_val);
-  js_create_int32(env, k, &k_val);
-  js_set_named_property(env, result, "m", m_val);
-  js_set_named_property(env, result, "k", k_val);
+  if (js_create_uint32(env, static_cast<uint32_t>(m), &m_val) != 0 ||
+      js_create_int32(env, k, &k_val) != 0 ||
+      js_set_named_property(env, result, "m", m_val) != 0 ||
+      js_set_named_property(env, result, "k", k_val) != 0) {
+    js_throw_error(env, "InternalError", "set result dimensions");
+    return nullptr;
+  }
   return result;
 }
 
@@ -511,10 +622,38 @@ js_value_t* idx_create(js_env_t* env, js_callback_info_t* info) {
     js_throw_type_error(env, "InvalidArgument", "missing or invalid `dim`");
     return nullptr;
   }
-  // bitWidth optional; keep the native fallback aligned with the JS wrapper.
-  (void)read_int_prop(env, argv[0], "bitWidth", &bit_width);
+  bool has_bit_width = false;
+  if (!read_optional_int_prop(
+          env, argv[0], "bitWidth", &bit_width, &has_bit_width)) {
+    return nullptr;
+  }
   std::string storage;
-  (void)read_utf8_string_prop(env, argv[0], "storage", &storage);
+  if (!read_utf8_string_prop(env, argv[0], "storage", &storage)) {
+    return nullptr;
+  }
+
+  if (!storage.empty()) {
+    int32_t storage_bit_width = 0;
+    if (storage == "f32") {
+      storage_bit_width = 32;
+    } else if (storage == "q8") {
+      storage_bit_width = 8;
+    } else if (storage == "q4" || storage == "turbovec-q4") {
+      storage_bit_width = 4;
+    } else if (storage == "turbovec-q2") {
+      storage_bit_width = 2;
+    } else {
+      js_throw_type_error(env, "InvalidArgument", "invalid storage");
+      return nullptr;
+    }
+    if (!has_bit_width) {
+      bit_width = storage_bit_width;
+    } else if (bit_width != storage_bit_width) {
+      js_throw_type_error(
+          env, "InvalidArgument", "bitWidth does not match storage");
+      return nullptr;
+    }
+  }
 
   VectorIndex* idx = nullptr;
   try {
@@ -694,9 +833,7 @@ js_value_t* idx_add(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_add_logged(handle, Float32Array vectors, BigUint64Array ids, deltaPath)
@@ -740,9 +877,7 @@ js_value_t* idx_add_logged(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_search(handle, Float32Array queries, int k)
@@ -960,9 +1095,7 @@ js_value_t* idx_build_ivf(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_search_ivf(handle, Float32Array queries, int k, int nProbe)
@@ -1042,9 +1175,7 @@ js_value_t* idx_remove(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* result = nullptr;
-  js_get_boolean(env, rc == 1, &result);
-  return result;
+  return make_boolean(env, rc == 1);
 }
 
 // idx_remove_logged(handle, id:bigint, deltaPath) -> boolean
@@ -1090,9 +1221,7 @@ js_value_t* idx_remove_logged(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* result = nullptr;
-  js_get_boolean(env, rc == 1, &result);
-  return result;
+  return make_boolean(env, rc == 1);
 }
 
 // idx_compact(handle) -> undefined
@@ -1112,9 +1241,7 @@ js_value_t* idx_compact(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_contains(handle, id:bigint) -> boolean
@@ -1143,9 +1270,7 @@ js_value_t* idx_contains(js_env_t* env, js_callback_info_t* info) {
         "id must be an unsigned BigInt fitting in 64 bits");
     return nullptr;
   }
-  js_value_t* result = nullptr;
-  js_get_boolean(env, idx->contains(id), &result);
-  return result;
+  return make_boolean(env, idx->contains(id));
 }
 
 // idx_prepare(handle) -> undefined (warms storage-specific native caches).
@@ -1160,9 +1285,7 @@ js_value_t* idx_prepare(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
   idx->prepare();
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_write(handle, path) -> undefined; throws on IO error.
@@ -1196,9 +1319,7 @@ js_value_t* idx_write(js_env_t* env, js_callback_info_t* info) {
     throw_status(env, rc);
     return nullptr;
   }
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_compact_delta(handle, snapshotPath, deltaPath) -> undefined.
@@ -1243,9 +1364,7 @@ js_value_t* idx_compact_delta(js_env_t* env, js_callback_info_t* info) {
     return nullptr;
   }
 
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_dispose(handle) -> undefined. Frees the native index immediately; the
@@ -1268,9 +1387,7 @@ js_value_t* idx_dispose(js_env_t* env, js_callback_info_t* info) {
   delete external->idx;
   external->idx = nullptr;
 
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // idx_filter_dispose(filter) -> undefined.
@@ -1292,9 +1409,7 @@ js_value_t* idx_filter_dispose(js_env_t* env, js_callback_info_t* info) {
   delete external->filter;
   external->filter = nullptr;
 
-  js_value_t* u = nullptr;
-  js_get_undefined(env, &u);
-  return u;
+  return make_undefined(env);
 }
 
 // Generic int32 getter for len/dim/bitWidth.
@@ -1309,25 +1424,23 @@ js_value_t* idx_int_getter(js_env_t* env, js_callback_info_t* info) {
   if (idx == nullptr) {
     return nullptr;
   }
-  js_value_t* result = nullptr;
-  js_create_int32(env, (idx->*Fn)(), &result);
-  return result;
+  return make_int32(env, (idx->*Fn)());
 }
 
 } // namespace
 
 namespace qvac_lib_inference_addon_embed::vector_index {
 
-void registerBindings(js_env_t* env, js_value_t* exports) {
+bool registerBindings(js_env_t* env, js_value_t* exports) {
 // NOLINTBEGIN(cppcoreguidelines-macro-usage)
 #define V(name, fn)                                                            \
   do {                                                                         \
     js_value_t* val = nullptr;                                                 \
     if (js_create_function(env, name, -1, fn, nullptr, &val) != 0) {           \
-      return;                                                                  \
+      return false;                                                            \
     }                                                                          \
     if (js_set_named_property(env, exports, name, val) != 0) {                 \
-      return;                                                                  \
+      return false;                                                            \
     }                                                                          \
   } while (0)
 
@@ -1357,6 +1470,7 @@ void registerBindings(js_env_t* env, js_value_t* exports) {
   V("idx_bit_width", (idx_int_getter<&VectorIndex::bitWidth>));
 #undef V
   // NOLINTEND(cppcoreguidelines-macro-usage)
+  return true;
 }
 
 } // namespace qvac_lib_inference_addon_embed::vector_index

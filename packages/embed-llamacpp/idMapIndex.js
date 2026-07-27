@@ -16,6 +16,7 @@ const binding = require('./binding')
 const HANDLE = Symbol('IdMapIndex.handle')
 const FILTER_HANDLE = Symbol('IdMapIndexFilter.handle')
 const FILTER_OWNER = Symbol('IdMapIndexFilter.owner')
+const FILTERS = Symbol('IdMapIndex.filters')
 const INT32_MAX = 0x7fffffff
 const BIT_WIDTH_BY_STORAGE = {
   f32: 32,
@@ -54,8 +55,10 @@ function isNonNegativeInt32(value) {
 }
 
 function normalizeStorageOptions(opts) {
-  const hasBitWidth = Object.prototype.hasOwnProperty.call(opts, 'bitWidth')
-  const hasStorage = Object.prototype.hasOwnProperty.call(opts, 'storage')
+  const hasBitWidth =
+    Object.prototype.hasOwnProperty.call(opts, 'bitWidth') && opts.bitWidth !== undefined
+  const hasStorage =
+    Object.prototype.hasOwnProperty.call(opts, 'storage') && opts.storage !== undefined
   let bitWidth = hasBitWidth ? opts.bitWidth : 8
   let storage = hasStorage ? opts.storage : undefined
 
@@ -84,6 +87,12 @@ function normalizeStorageOptions(opts) {
   return { bitWidth, storage }
 }
 
+function attachHandle(instance, handle) {
+  instance[HANDLE] = handle
+  instance[FILTERS] = new Set()
+  return instance
+}
+
 class IdMapIndexFilter {
   constructor() {
     throw new TypeError('IdMapIndexFilter instances must be created by IdMapIndex.prepareFilter()')
@@ -107,9 +116,11 @@ class IdMapIndexFilter {
 
   dispose() {
     if (this[FILTER_HANDLE] !== null && this[FILTER_HANDLE] !== undefined) {
+      const owner = this[FILTER_OWNER]
       binding.idx_filter_dispose(this[FILTER_HANDLE])
       this[FILTER_HANDLE] = null
       this[FILTER_OWNER] = null
+      owner?.[FILTERS]?.delete(this)
     }
   }
 }
@@ -138,7 +149,7 @@ class IdMapIndex {
         'IdMapIndex: TurboVec dim must be divisible by 8 and no greater than 65536'
       )
     }
-    this[HANDLE] = binding.idx_create({ dim, bitWidth, storage })
+    attachHandle(this, binding.idx_create({ dim, bitWidth, storage }))
   }
 
   /**
@@ -152,8 +163,7 @@ class IdMapIndex {
       throw new TypeError('IdMapIndex.load: path must be a non-empty string')
     }
     const instance = Object.create(IdMapIndex.prototype)
-    instance[HANDLE] = binding.idx_load(path)
-    return instance
+    return attachHandle(instance, binding.idx_load(path))
   }
 
   /**
@@ -168,8 +178,7 @@ class IdMapIndex {
       throw new TypeError('IdMapIndex.loadMmap: path must be a non-empty string')
     }
     const instance = Object.create(IdMapIndex.prototype)
-    instance[HANDLE] = binding.idx_load_mmap(path)
-    return instance
+    return attachHandle(instance, binding.idx_load_mmap(path))
   }
 
   /**
@@ -189,8 +198,7 @@ class IdMapIndex {
       throw new TypeError('IdMapIndex.loadWithDelta: deltaPath must be a non-empty string')
     }
     const instance = Object.create(IdMapIndex.prototype)
-    instance[HANDLE] = binding.idx_load_with_delta(snapshotPath, deltaPath)
-    return instance
+    return attachHandle(instance, binding.idx_load_with_delta(snapshotPath, deltaPath))
   }
 
   /**
@@ -299,6 +307,7 @@ class IdMapIndex {
     const filter = Object.create(IdMapIndexFilter.prototype)
     filter[FILTER_OWNER] = this
     filter[FILTER_HANDLE] = binding.idx_filter_create(ensureHandle(this), allowedIds)
+    this[FILTERS].add(filter)
     return filter
   }
 
@@ -436,6 +445,10 @@ class IdMapIndex {
    */
   dispose() {
     if (this[HANDLE] !== null && this[HANDLE] !== undefined) {
+      for (const filter of Array.from(this[FILTERS])) {
+        filter.dispose()
+      }
+      this[FILTERS].clear()
       binding.idx_dispose(this[HANDLE])
       this[HANDLE] = null
     }

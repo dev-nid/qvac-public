@@ -21,6 +21,7 @@ const IVF_LISTS = 100
 const IVF_NPROBE = 10
 const DELTA_COUNT = 128
 const MEASURED_SEARCH_RUNS = 3
+const MEASURED_BRUTE_FORCE_RUNS = MEASURED_SEARCH_RUNS
 const REPORT_PATH = path.join(__dirname, 'id-map-index-turbovec-cpu-report.md')
 const TMP_DIR = path.join(__dirname, '.tmp-id-map-index-turbovec')
 const MAIN_BASELINE_COMMIT = '168e2dd15'
@@ -95,9 +96,9 @@ function median(values) {
   return sorted[Math.floor(sorted.length / 2)]
 }
 
-function measureMedianMs(fn) {
+function measureMedianMs(fn, runs = MEASURED_SEARCH_RUNS) {
   const samples = []
-  for (let i = 0; i < MEASURED_SEARCH_RUNS; i++) {
+  for (let i = 0; i < runs; i++) {
     samples.push(measureSync(fn).ms)
   }
   return median(samples)
@@ -128,8 +129,17 @@ function cleanupFile(file) {
   if (fs.existsSync(file)) fs.unlinkSync(file)
 }
 
+function cleanupDeltaArtifacts(delta) {
+  cleanupFile(delta)
+  cleanupFile(`${delta}.lock`)
+}
+
 function ensureTmpDir() {
   fs.mkdirSync(TMP_DIR, { recursive: true })
+}
+
+function envValue(name) {
+  return process.env && process.env[name] ? process.env[name] : 'unknown'
 }
 
 function recallAtK(exactIds, approxIds, queryCount, k) {
@@ -187,7 +197,7 @@ function runCase(caseConfig, vectors, ids, queries, filterIds, deltaVectors) {
   const snapshot = path.join(TMP_DIR, `id-map-index-${storage}.tvim`)
   const delta = path.join(TMP_DIR, `id-map-index-${storage}.tvid`)
   cleanupFile(snapshot)
-  cleanupFile(delta)
+  cleanupDeltaArtifacts(delta)
 
   let idx = null
   let loaded = null
@@ -286,7 +296,7 @@ function runCase(caseConfig, vectors, ids, queries, filterIds, deltaVectors) {
     if (mmap !== null) mmap.dispose()
     if (idx !== null) idx.dispose()
     cleanupFile(snapshot)
-    cleanupFile(delta)
+    cleanupDeltaArtifacts(delta)
   }
 }
 
@@ -327,10 +337,18 @@ function toMarkdown(report) {
   lines.push('- Command: `bare benchmarks/performance/id-map-index-turbovec-cpu.js`')
   lines.push(`- Runtime: ${report.runtime}`)
   lines.push(`- Platform: ${report.platform}`)
+  lines.push(`- CPU model: ${report.cpuModel}`)
+  lines.push(`- QVAC commit: ${report.qvacCommit}`)
+  lines.push(`- Fabric source: ${report.fabricSource}`)
+  lines.push(`- Build type: ${report.buildType}`)
+  lines.push(`- Compiler: ${report.compiler}`)
+  lines.push(`- Thread settings: ${report.threadSettings}`)
+  lines.push(`- Power state: ${report.powerState}`)
   lines.push(`- Dataset: ${report.vectorCount} vectors x ${report.dim} dimensions`)
   lines.push(`- Queries: ${report.queryCount}, top-k: ${report.k}`)
   lines.push(`- IVF: ${report.ivfLists} lists, nProbe ${report.ivfNprobe}`)
   lines.push(`- Search timings: median of ${report.searchRuns} measured runs after one warmup`)
+  lines.push(`- JS brute-force timings: median of ${report.bruteForceRuns} measured runs after one warmup`)
   lines.push('')
   lines.push('## Comparison To `main`')
   lines.push('')
@@ -397,9 +415,12 @@ function main() {
 
   console.log('Benchmarking JS brute-force baseline...')
   bruteForceSearch(vectors, ids, queries.subarray(0, DIM * 8), VECTOR_COUNT, DIM, 8, K)
-  const bruteForce = measureSync(() => {
-    bruteForceSearch(vectors, ids, queries, VECTOR_COUNT, DIM, QUERY_COUNT, K)
-  })
+  const bruteForceMs = measureMedianMs(
+    () => {
+      bruteForceSearch(vectors, ids, queries, VECTOR_COUNT, DIM, QUERY_COUNT, K)
+    },
+    MEASURED_BRUTE_FORCE_RUNS
+  )
 
   const results = []
   for (const caseConfig of STORAGE_CASES) {
@@ -407,15 +428,24 @@ function main() {
     results.push(runCase(caseConfig, vectors, ids, queries, filterIds, deltaVectors))
   }
 
-  const bruteForceQps = qps(QUERY_COUNT, bruteForce.ms)
+  const bruteForceQps = qps(QUERY_COUNT, bruteForceMs)
   const report = {
     generatedAt: new Date().toISOString(),
     runtime: process.version || 'unknown',
     platform: `${process.platform || 'unknown'} ${process.arch || 'unknown'}`,
+    cpuModel: envValue('QVAC_BENCHMARK_CPU_MODEL'),
+    qvacCommit: envValue('QVAC_COMMIT'),
+    fabricSource: envValue('QVAC_FABRIC_LOCAL_PATH') !== 'unknown'
+      ? envValue('QVAC_FABRIC_LOCAL_PATH')
+      : envValue('QVAC_FABRIC_REF'),
+    buildType: envValue('CMAKE_BUILD_TYPE'),
+    compiler: `${envValue('CC')} / ${envValue('CXX')}`,
+    threadSettings: `GGML_N_THREADS=${envValue('GGML_N_THREADS')}, OMP_NUM_THREADS=${envValue('OMP_NUM_THREADS')}`,
+    powerState: envValue('QVAC_BENCHMARK_POWER_STATE'),
     mainBaselineCommit: MAIN_BASELINE_COMMIT,
     mainBuildStatus: MAIN_BUILD_STATUS,
     bruteForceQps: Math.round(bruteForceQps),
-    bruteForceMsPerQuery: round(bruteForce.ms / QUERY_COUNT, 3),
+    bruteForceMsPerQuery: round(bruteForceMs / QUERY_COUNT, 3),
     dim: DIM,
     vectorCount: VECTOR_COUNT,
     queryCount: QUERY_COUNT,
@@ -423,6 +453,7 @@ function main() {
     ivfLists: IVF_LISTS,
     ivfNprobe: IVF_NPROBE,
     searchRuns: MEASURED_SEARCH_RUNS,
+    bruteForceRuns: MEASURED_BRUTE_FORCE_RUNS,
     results,
     notes: buildNotes(results, bruteForceQps)
   }

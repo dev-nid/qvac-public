@@ -29,8 +29,10 @@ if [ -n "${QVAC_FABRIC_LOCAL_PATH:-}" ]; then
 elif [ -n "${QVAC_FABRIC_SRC_DIR:-}" ]; then
   fabric_dir="$QVAC_FABRIC_SRC_DIR"
 else
-  # Best-effort default: sibling of the qvac-public checkout.
-  fabric_dir="$(cd "$package_root/../../../qvac-fabric-llm.cpp" 2>/dev/null && pwd || true)"
+  echo "sync-fabric-overlay: QVAC_FABRIC_LOCAL_PATH is not set." >&2
+  echo "  Set QVAC_FABRIC_LOCAL_PATH=/path/to/qvac-fabric-llm.cpp" >&2
+  echo "  or run ./scripts/rebuild-fabric.sh to use the default sibling checkout." >&2
+  exit 1
 fi
 
 if [ -z "$fabric_dir" ] || [ ! -d "$fabric_dir" ]; then
@@ -38,7 +40,6 @@ if [ -z "$fabric_dir" ] || [ ! -d "$fabric_dir" ]; then
   echo "  Tried (in order):" >&2
   echo "    QVAC_FABRIC_LOCAL_PATH=${QVAC_FABRIC_LOCAL_PATH:-<unset>}" >&2
   echo "    QVAC_FABRIC_SRC_DIR=${QVAC_FABRIC_SRC_DIR:-<unset>}" >&2
-  echo "    default sibling: $package_root/../../../qvac-fabric-llm.cpp" >&2
   exit 1
 fi
 

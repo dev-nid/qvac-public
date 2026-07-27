@@ -9,15 +9,22 @@ namespace {
 
 ggml_vec_index_t* create_index(
     int dim, int bitWidth, const std::string& storage) {
-  if (storage.empty() || storage == "q4" || storage == "q8" ||
-      storage == "f32") {
+  if (storage.empty()) {
+    if (bitWidth == 2) {
+      return ggml_vec_index_create_turbovec_q2(dim);
+    }
+    return ggml_vec_index_create(dim, bitWidth);
+  }
+  if ((storage == "q4" && bitWidth == 4) ||
+      (storage == "q8" && bitWidth == 8) ||
+      (storage == "f32" && bitWidth == 32)) {
     return ggml_vec_index_create(dim, bitWidth);
   }
   if (storage == "turbovec-q4") {
-    return ggml_vec_index_create_turbovec_q4(dim);
+    return bitWidth == 4 ? ggml_vec_index_create_turbovec_q4(dim) : nullptr;
   }
   if (storage == "turbovec-q2") {
-    return ggml_vec_index_create_turbovec_q2(dim);
+    return bitWidth == 2 ? ggml_vec_index_create_turbovec_q2(dim) : nullptr;
   }
   return nullptr;
 }

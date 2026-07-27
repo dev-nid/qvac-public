@@ -8,13 +8,11 @@
 
 #include <ggml-vector-index.h>
 
-#include <string>
-
 namespace qvac_lib_infer_llamacpp_embed::vector_index_errors {
 
 constexpr const char* ADDON_ID = "IdMapIndex";
 
-inline std::string toString(int code) {
+inline const char* toString(int code) noexcept {
   switch (code) {
     case GGML_VEC_INDEX_OK:
       return "OK";

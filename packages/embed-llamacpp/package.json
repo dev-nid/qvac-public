@@ -41,7 +41,9 @@
   "files": [
     "binding.js",
     "index.js",
+    "index.mjs",
     "idMapIndex.js",
+    "idMapIndex.mjs",
     "addon.js",
     "addonLogging.js",
     "addonLogging.d.ts",
@@ -80,10 +82,12 @@
     "./package": "./package.json",
     ".": {
       "types": "./index.d.ts",
+      "import": "./index.mjs",
       "default": "./index.js"
     },
     "./idMapIndex": {
       "types": "./idMapIndex.d.ts",
+      "import": "./idMapIndex.mjs",
       "default": "./idMapIndex.js"
     },
     "./idMapIndex.js": "./idMapIndex.js",

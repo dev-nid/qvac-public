@@ -8,7 +8,7 @@
 // LlamaLazyInitializeBackend — required for the POC's lifecycle-isolation
 // invariant (constructing IdMapIndex must not boot fabric's LLM backend).
 namespace qvac_lib_inference_addon_embed::vector_index {
-void registerBindings(js_env_t* env, js_value_t* exports);
+bool registerBindings(js_env_t* env, js_value_t* exports);
 }
 
 js_value_t*
@@ -37,9 +37,12 @@ qvacLibInferLlamacppEmbedExports(js_env_t* env, js_value_t* exports) {
   V("setLogger", qvac_lib_inference_addon_cpp::JsInterface::setLogger)
   V("releaseLogger", qvac_lib_inference_addon_cpp::JsInterface::releaseLogger)
 #undef V
-// NOLINTEND(cppcoreguidelines-macro-usage)
+  // NOLINTEND(cppcoreguidelines-macro-usage)
 
-  qvac_lib_inference_addon_embed::vector_index::registerBindings(env, exports);
+  if (!qvac_lib_inference_addon_embed::vector_index::registerBindings(
+          env, exports)) {
+    return nullptr;
+  }
 
   return exports;
 }

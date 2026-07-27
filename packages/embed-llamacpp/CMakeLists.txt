@@ -71,7 +71,7 @@ if((ANDROID OR UNIX) AND NOT APPLE)
   foreach(_backend ${GGML_AVAILABLE_BACKENDS})
     list(APPEND BACKEND_DL_LIBS INSTALL TARGET ggml::${_backend})
   endforeach()
-endif()  
+endif()
 
 add_bare_module(embed-llamacpp EXPORTS ${BACKEND_DL_LIBS})
 

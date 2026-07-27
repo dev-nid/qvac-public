@@ -22,11 +22,14 @@ if [ -z "${QVAC_FABRIC_LOCAL_PATH:-}" ] && [ -n "${QVAC_FABRIC_SRC_DIR:-}" ]; th
 fi
 
 if [ -z "${QVAC_FABRIC_LOCAL_PATH:-}${QVAC_FABRIC_SRC_DIR:-}" ]; then
-  echo "rebuild-fabric: WARNING — neither QVAC_FABRIC_LOCAL_PATH nor"
-  echo "rebuild-fabric: QVAC_FABRIC_SRC_DIR is set. The overlay is in"
-  echo "rebuild-fabric: github-fetch mode and will not pick up local edits."
-  echo "rebuild-fabric: To iterate on local fabric source set, e.g.,"
-  echo "rebuild-fabric:   export QVAC_FABRIC_LOCAL_PATH=/path/to/qvac-fabric-llm.cpp"
+  default_fabric="$package_root/../../../qvac-fabric-llm.cpp"
+  if [ -f "$default_fabric/CMakeLists.txt" ]; then
+    export QVAC_FABRIC_LOCAL_PATH="$(cd "$default_fabric" && pwd)"
+  else
+    echo "rebuild-fabric: fabric checkout not found." >&2
+    echo "  Set QVAC_FABRIC_LOCAL_PATH=/path/to/qvac-fabric-llm.cpp" >&2
+    exit 1
+  fi
 fi
 
 bash "$here/sync-fabric-overlay.sh"

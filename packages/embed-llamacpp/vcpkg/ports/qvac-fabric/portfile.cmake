@@ -67,7 +67,7 @@ vcpkg_check_features(
 
 if (VCPKG_TARGET_IS_ANDROID)
   include(${CMAKE_CURRENT_LIST_DIR}/android-vulkan-version.cmake)
-  detect_ndk_vulkan_version()
+  resolve_vulkan_headers_version(vulkan_version)
   resolve_vulkan_headers_sha512("${vulkan_version}" vulkan_headers_sha512)
   message(STATUS "Using Vulkan C++ wrappers from version: ${vulkan_version}")
   vcpkg_download_distfile(VULKAN_HEADERS_ARCHIVE

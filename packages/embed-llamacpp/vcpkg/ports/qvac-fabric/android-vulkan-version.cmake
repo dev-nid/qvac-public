@@ -28,7 +28,7 @@ function(detect_ndk_vulkan_version)
         message(FATAL_ERROR "Could not extract VK_HEADER_VERSION from ${vulkan_core_h}")
     endif()
 
-     # Extract major.minor version from VK_HEADER_VERSION_COMPLETE for download URL
+    # Extract major.minor version from VK_HEADER_VERSION_COMPLETE for download URL
     string(REGEX MATCH "VK_HEADER_VERSION_COMPLETE VK_MAKE_API_VERSION\\(([0-9]+), ([0-9]+), ([0-9]+)" version_match "${header_content}")
     if(version_match)
         set(major "${CMAKE_MATCH_2}")
@@ -39,6 +39,23 @@ function(detect_ndk_vulkan_version)
     endif()
 endfunction()
 
+function(resolve_vulkan_headers_version out_var)
+    if(DEFINED QVAC_FABRIC_ANDROID_VULKAN_HEADERS_VERSION)
+        set(requested_version "${QVAC_FABRIC_ANDROID_VULKAN_HEADERS_VERSION}")
+    elseif(DEFINED ENV{QVAC_FABRIC_ANDROID_VULKAN_HEADERS_VERSION})
+        set(requested_version "$ENV{QVAC_FABRIC_ANDROID_VULKAN_HEADERS_VERSION}")
+    else()
+        set(requested_version "1.3.275")
+    endif()
+
+    if(requested_version STREQUAL "AUTO")
+        detect_ndk_vulkan_version()
+        set(${out_var} "${vulkan_version}" PARENT_SCOPE)
+    else()
+        set(${out_var} "${requested_version}" PARENT_SCOPE)
+    endif()
+endfunction()
+
 function(resolve_vulkan_headers_sha512 version out_var)
     if(version STREQUAL "1.3.275")
         set(${out_var}
@@ -46,7 +63,7 @@ function(resolve_vulkan_headers_sha512 version out_var)
             PARENT_SCOPE)
     else()
         message(FATAL_ERROR
-            "Unsupported Android NDK Vulkan header version '${version}'. "
+            "Unsupported Android Vulkan-Headers version '${version}'. "
             "Add the matching KhronosGroup/Vulkan-Headers archive SHA512 before building.")
     endif()
 endfunction()
